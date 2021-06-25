@@ -37,71 +37,52 @@ namespace xla {
 constexpr int kMinCudaComputeCapabilityMajor = 3;
 constexpr int kMinCudaComputeCapabilityMinor = 5;
 
+// Minimum supported AMDGPU ISA version is 803.
+constexpr int kMinAMDGPUISAVersion = 803;
+
 // The name of the interpreter platform.
 constexpr char kInterpreter[] = "interpreter";
 
 namespace {
 
-string CanonicalPlatformName(const string& name) {
-  string platform_str = absl::AsciiStrToLower(name);
+string CanonicalPlatformName(const string& platform_name) {
+  string lowercase_platform_name = absl::AsciiStrToLower(platform_name);
   // "cpu" and "host" mean the same thing.
-  if (platform_str == "cpu") {
-    platform_str = "host";
+  if (lowercase_platform_name == "cpu") {
+    return "host";
   }
-  // "gpu" and "cuda" mean the same thing.
-  if (platform_str == "gpu") {
-    platform_str = "cuda";
+  // When configured on CUDA, "gpu" and "cuda" mean the same thing.
+  // When configured on ROCm, "gpu" and "rocm" mean the same thing.
+  if (lowercase_platform_name == "gpu") {
+#if TENSORFLOW_USE_ROCM
+    return "rocm";
+#else
+    return "cuda";
+#endif
   }
-  return platform_str;
+  return lowercase_platform_name;
+}
+
+StatusOr<std::vector<se::Platform*>> GetSupportedPlatforms() {
+  return se::MultiPlatformManager::PlatformsWithFilter(
+      [](const se::Platform* platform) {
+        auto compiler_status = Compiler::GetForPlatform(platform);
+        bool supported = compiler_status.ok();
+        if (!supported) {
+          LOG(INFO) << "platform " << platform->Name() << " present but no "
+                    << "XLA compiler available: "
+                    << compiler_status.status().error_message();
+        }
+        return supported;
+      });
 }
 
 }  // namespace
 
 /* static */ StatusOr<std::vector<se::Platform*>>
 PlatformUtil::GetSupportedPlatforms() {
-  std::vector<se::Platform*> all_platforms =
-      se::MultiPlatformManager::AllPlatforms();
-  if (all_platforms.empty()) {
-    LOG(WARNING) << "no executor platforms available: platform map is empty";
-  }
-
   // Gather all platforms which have an XLA compiler.
-  std::vector<se::Platform*> platforms;
-  for (se::Platform* platform : all_platforms) {
-    auto compiler_status = Compiler::GetForPlatform(platform);
-    if (compiler_status.ok()) {
-      if (!platform->Initialized()) {
-        TF_RETURN_IF_ERROR(platform->Initialize({}));
-      }
-      platforms.push_back(platform);
-    } else {
-      LOG(INFO) << "platform " << platform->Name() << " present but no "
-                << "XLA compiler available: "
-                << compiler_status.status().error_message();
-    }
-  }
-  return platforms;
-}
-
-/* static */ StatusOr<se::Platform*> PlatformUtil::GetSolePlatform() {
-  TF_ASSIGN_OR_RETURN(auto platforms, GetSupportedPlatforms());
-  if (platforms.empty()) {
-    return NotFound("no platforms found");
-  } else if (platforms.size() == 1) {
-    se::Platform* platform = platforms[0];
-    if (!platform->Initialized()) {
-      TF_RETURN_IF_ERROR(platform->Initialize({}));
-    }
-    return platform;
-  }
-
-  // Multiple platforms present and we can't pick a reasonable default.
-  string platforms_string = absl::StrJoin(
-      platforms, ", ",
-      [](string* out, const se::Platform* p) { out->append(p->Name()); });
-  return InvalidArgument(
-      "must specify platform because more than one platform found: %s",
-      platforms_string);
+  return xla::GetSupportedPlatforms();
 }
 
 /* static */ StatusOr<se::Platform*> PlatformUtil::GetDefaultPlatform() {
@@ -122,9 +103,6 @@ PlatformUtil::GetSupportedPlatforms() {
     }
   }
   if (platform != nullptr) {
-    if (!platform->Initialized()) {
-      TF_RETURN_IF_ERROR(platform->Initialize({}));
-    }
     return platform;
   }
 
@@ -140,47 +118,11 @@ PlatformUtil::GetSupportedPlatforms() {
 
 /*static*/ StatusOr<se::Platform*> PlatformUtil::GetPlatform(
     const string& platform_name) {
-  string platform_str = CanonicalPlatformName(platform_name);
-  TF_ASSIGN_OR_RETURN(auto platforms, PlatformUtil::GetSupportedPlatforms());
-  for (se::Platform* platform : platforms) {
-    if (absl::AsciiStrToLower(platform->Name()) == platform_str) {
-      if (!platform->Initialized()) {
-        TF_RETURN_IF_ERROR(platform->Initialize({}));
-      }
-      return platform;
-    }
-  }
-  return InvalidArgument("platform %s not found", platform_name);
-}
-
-/*static*/ StatusOr<se::Platform*> PlatformUtil::GetPlatformExceptFor(
-    const string& platform_name) {
-  string platform_str = CanonicalPlatformName(platform_name);
-
-  TF_ASSIGN_OR_RETURN(auto platforms, PlatformUtil::GetSupportedPlatforms());
-  std::vector<se::Platform*> matched;
-  for (se::Platform* platform : platforms) {
-    if (absl::AsciiStrToLower(platform->Name()) != platform_name) {
-      matched.push_back(platform);
-    }
-  }
-  if (matched.empty()) {
-    return InvalidArgument("unable to find platform that is not %s",
-                           platform_name);
-  }
-  if (matched.size() == 1) {
-    auto platform = matched[0];
-    if (!platform->Initialized()) {
-      TF_RETURN_IF_ERROR(platform->Initialize({}));
-    }
-    return platform;
-  }
-  string matched_string = absl::StrJoin(
-      matched, ", ",
-      [](string* out, const se::Platform* p) { out->append(p->Name()); });
-  return InvalidArgument(
-      "found multiple platforms %s, but expected one platform except for %s",
-      matched_string, platform_name);
+  TF_ASSIGN_OR_RETURN(se::Platform * platform,
+                      se::MultiPlatformManager::PlatformWithName(
+                          CanonicalPlatformName(platform_name)));
+  TF_RETURN_IF_ERROR(Compiler::GetForPlatform(platform).status());
+  return platform;
 }
 
 // Returns whether the device underlying the given StreamExecutor is supported
@@ -189,17 +131,26 @@ static bool IsDeviceSupported(se::StreamExecutor* executor) {
   const auto& description = executor->GetDeviceDescription();
   if (executor->platform()->id() == se::cuda::kCudaPlatformId) {
     // CUDA devices must have a minimum compute capability.
-    int major_version, minor_version;
-    if (description.cuda_compute_capability(&major_version, &minor_version)) {
-      if (major_version < kMinCudaComputeCapabilityMajor ||
-          (major_version == kMinCudaComputeCapabilityMajor &&
-           minor_version < kMinCudaComputeCapabilityMinor)) {
-        LOG(INFO) << "StreamExecutor cuda device ("
+    se::CudaComputeCapability cc = description.cuda_compute_capability();
+    if (!cc.IsAtLeast(kMinCudaComputeCapabilityMajor,
+                      kMinCudaComputeCapabilityMinor)) {
+      LOG(INFO) << "StreamExecutor cuda device (" << executor->device_ordinal()
+                << ") is of "
+                << "insufficient compute capability: "
+                << kMinCudaComputeCapabilityMajor << "."
+                << kMinCudaComputeCapabilityMinor << " required, "
+                << "device is " << cc.ToString();
+      return false;
+    }
+  } else if (executor->platform()->id() == se::rocm::kROCmPlatformId) {
+    int isa_version = 0;
+    if (description.rocm_amdgpu_isa_version(&isa_version)) {
+      if (isa_version < kMinAMDGPUISAVersion) {
+        LOG(INFO) << "StreamExecutor ROCM device ("
                   << executor->device_ordinal() << ") is of "
-                  << "insufficient compute capability: "
-                  << kMinCudaComputeCapabilityMajor << "."
-                  << kMinCudaComputeCapabilityMinor << " required, "
-                  << "device is " << major_version << "." << minor_version;
+                  << "obsolete AMDGPU ISA version: "
+                  << "gfx" << kMinAMDGPUISAVersion << " required, "
+                  << "device is gfx" << isa_version;
         return false;
       }
     }
@@ -244,9 +195,7 @@ PlatformUtil::GetStreamExecutors(
       }
       thread_pool.Schedule([platform, i, &stream_executors]() {
         VLOG(1) << "Started device init " << i;
-        se::StreamExecutorConfig config;
-        config.ordinal = i;
-        auto executor_status = platform->GetExecutor(config);
+        auto executor_status = platform->ExecutorForDevice(i);
         if (executor_status.ok()) {
           se::StreamExecutor* executor = executor_status.ValueOrDie();
           if (IsDeviceSupported(executor)) {
@@ -263,12 +212,18 @@ PlatformUtil::GetStreamExecutors(
     // Block here in thread_pool destructor until all devices are initialized.
   }
   VLOG(1) << "Device initialization complete";
-  if (absl::c_all_of(stream_executors,
-                     [](se::StreamExecutor* s) { return s == nullptr; })) {
+
+  std::vector<se::StreamExecutor*> out;
+  for (se::StreamExecutor* executor : stream_executors) {
+    if (executor != nullptr) {
+      out.push_back(executor);
+    }
+  }
+  if (out.empty()) {
     return InternalError("no supported devices found for platform %s",
                          platform->Name());
   }
-  return stream_executors;
+  return out;
 }
 
 }  // namespace xla

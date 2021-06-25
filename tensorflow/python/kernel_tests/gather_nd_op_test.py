@@ -23,7 +23,6 @@ import time
 import numpy as np
 
 from tensorflow.python.client import session
-from tensorflow.python.compat import compat
 from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
@@ -40,7 +39,7 @@ from tensorflow.python.platform import test
 class GatherNdTest(test.TestCase):
 
   def _testSimpleDtype(self, dtype):
-    with self.cached_session(use_gpu=True):
+    with self.cached_session():
       params = constant_op.constant(np.array([8, 1, 2, 3, 7, 5], dtype=dtype))
       indices = constant_op.constant([[4], [4], [0]])
       gather_nd_t = array_ops.gather_nd(params, indices)
@@ -61,7 +60,7 @@ class GatherNdTest(test.TestCase):
   @test_util.run_deprecated_v1
   @test_util.disable_xla("b/123337890")  # Error messages differ
   def testEmptyIndicesAndParamsOKButJustEmptyParamsFails(self):
-    with self.session(use_gpu=True):
+    with self.session():
       params = np.ones((3, 3), dtype=np.float32)
 
       indices_empty = np.empty((0, 2), dtype=np.int32)
@@ -92,7 +91,7 @@ class GatherNdTest(test.TestCase):
       self.assertAllClose(np.empty((0,), dtype=np.float32), gather_nd_ok_val)
 
   def testIndexScalar(self):
-    with self.session(use_gpu=True):
+    with self.session():
       params = np.array(
           [[-8, -1, -2, -3, -7, -5], [8, 1, 2, 3, 7, 5]], dtype=np.float32).T
       indices = constant_op.constant([4, 1])
@@ -102,7 +101,7 @@ class GatherNdTest(test.TestCase):
       self.assertAllEqual(np.array(7), gather_nd_val)
 
   def testParamsRankLargerThanIndexIndexScalarSlices(self):
-    with self.session(use_gpu=True):
+    with self.session():
       params = np.array(
           [[-8, -1, -2, -3, -7, -5], [8, 1, 2, 3, 7, 5]], dtype=np.float32).T
       indices = constant_op.constant([4])
@@ -112,7 +111,7 @@ class GatherNdTest(test.TestCase):
       self.assertAllEqual(np.array([-7, 7]), gather_nd_val)
 
   def testParamsRankLargerThanIndexSlices(self):
-    with self.session(use_gpu=True):
+    with self.session():
       params = np.array(
           [[-8, -1, -2, -3, -7, -5], [8, 1, 2, 3, 7, 5]], dtype=np.float32).T
       indices = constant_op.constant([[4], [4], [0]])
@@ -123,7 +122,7 @@ class GatherNdTest(test.TestCase):
     self.assertAllEqual(np.array([[-7, 7], [-7, 7], [-8, 8]]), gather_nd_val)
 
   def testHigherRankParamsLargerThanIndexSlices(self):
-    with self.session(use_gpu=True):
+    with self.session():
       params = np.array(
           [[[-8, -1, -2, -3, -7, -5], [8, 1, 2, 3, 7, 5]],
            [[-80, -10, -20, -30, -70, -50], [80, 10, 20, 30, 70, 50]]],
@@ -137,7 +136,7 @@ class GatherNdTest(test.TestCase):
     self.assertAllEqual(params[[4, 4, 0]], gather_nd_val)
 
   def testEmptyIndicesLastRankMeansCopyEntireTensor(self):
-    with self.session(use_gpu=True):
+    with self.session():
       params = np.array(
           [[[-8, -1, -2, -3, -7, -5], [8, 1, 2, 3, 7, 5]],
            [[-80, -10, -20, -30, -70, -50], [80, 10, 20, 30, 70, 50]]],
@@ -154,7 +153,7 @@ class GatherNdTest(test.TestCase):
         gather_nd_val)
 
   def testHigherRankParamsAndIndicesLargerThanIndexSlices(self):
-    with self.session(use_gpu=True):
+    with self.session():
       params = np.array(
           [[[-8, -1, -2, -3, -7, -5], [8, 1, 2, 3, 7, 5]],
            [[-80, -10, -20, -30, -70, -50], [80, 10, 20, 30, 70, 50]]],
@@ -169,7 +168,7 @@ class GatherNdTest(test.TestCase):
                         gather_nd_val)
 
   def testHigherRankParams(self):
-    with self.session(use_gpu=True):
+    with self.session():
       shape = (10, 20, 5, 1, 17)
       params = np.random.rand(*shape)
       indices = np.vstack([np.random.randint(0, s, size=2000) for s in shape]).T
@@ -181,7 +180,7 @@ class GatherNdTest(test.TestCase):
     self.assertEqual([2000], gather_nd_t.get_shape())
 
   def testHigherRankParamsAndIndices(self):
-    with self.session(use_gpu=True):
+    with self.session():
       shape = (10, 20, 5, 1, 17)
       params = np.random.rand(*shape)
       indices = np.vstack([np.random.randint(0, s, size=2000) for s in shape]).T
@@ -206,6 +205,7 @@ class GatherNdTest(test.TestCase):
     self.assertEqual(None, tensor_shape.dimension_value(shape[0]))
 
   @test_util.run_deprecated_v1
+  @test_util.disable_xla("XLA does not have assertions in kernels.")
   def testBadIndicesCPU(self):
     with self.session(use_gpu=False):
       params = [0, 1, 2]
@@ -220,7 +220,7 @@ class GatherNdTest(test.TestCase):
     # On GPU the bad indices do not raise error but fetch 0 values
     if not test.is_gpu_available():
       return
-    with self.session(use_gpu=True):
+    with self.session():
       params = [0, 1, 2]
       indices = [[[0], [7]]]  # Make this one higher rank
       gather_nd = array_ops.gather_nd(params, indices)
@@ -229,6 +229,7 @@ class GatherNdTest(test.TestCase):
         self.evaluate(gather_nd)
 
   @test_util.run_deprecated_v1
+  @test_util.disable_xla("XLA does not have assertions in kernels.")
   def testBadIndicesWithSlicesCPU(self):
     with self.session(use_gpu=False):
       params = [[0, 1, 2]]
@@ -243,7 +244,7 @@ class GatherNdTest(test.TestCase):
     # On GPU the bad indices do not raise error but fetch 0 values
     if not test.is_gpu_available():
       return
-    with self.session(use_gpu=True):
+    with self.session():
       params = [[0, 1, 2]]
       indices = [[[0], [0], [1]]]  # Make this one higher rank
       gather_nd = array_ops.gather_nd(params, indices)
@@ -260,7 +261,7 @@ class GatherNdTest(test.TestCase):
     grad_vals = constant_op.constant([1, 2], dtype=dtypes.float64)
     grads = gradients_impl.gradients([outputs], [inputs], [grad_vals])[0]
     expected_grads = np.array([[1, 0], [0, 2]], dtype=np.float64)
-    with self.session(use_gpu=True):
+    with self.session():
       assert np.array_equal(expected_grads, self.evaluate(grads))
 
   @test_util.run_deprecated_v1
@@ -272,9 +273,9 @@ class GatherNdTest(test.TestCase):
     grad_vals = constant_op.constant([[1, 2], [3, 4]], dtype=dtypes.float64)
     grads = gradients_impl.gradients([outputs], [inputs], [grad_vals])[0]
     expected_grads = np.array([[3, 4], [1, 2]], dtype=np.float64)
-    with self.session(use_gpu=True):
+    with self.session():
       self.assertIndexedSlices(grads)
-      self.assertAllEqual(expected_grads, ops.convert_to_tensor(grads).eval())
+      self.assertAllEqual(expected_grads, ops.convert_to_tensor(grads))
 
   @test_util.run_deprecated_v1
   def testGradientsRank3Elements(self):
@@ -289,7 +290,7 @@ class GatherNdTest(test.TestCase):
     grads = gradients_impl.gradients([outputs], [inputs], [grad_vals])[0]
     expected_grads = np.array(
         [[[5, 6], [1, 2]], [[3, 4], [7, 8]]], dtype=np.float64)
-    with self.session(use_gpu=True):
+    with self.session():
       self.assertAllEqual(expected_grads, self.evaluate(grads))
 
   @test_util.run_deprecated_v1
@@ -319,7 +320,7 @@ class GatherNdTest(test.TestCase):
             [[[[5, 6], [1, 2]]]],
             [[[[3, 4], [7, 8]]]]
         ]]], dtype=np.float64)
-    with self.session(use_gpu=True):
+    with self.session():
       self.assertAllEqual(expected_grads, self.evaluate(grads))
 
   @test_util.run_deprecated_v1
@@ -335,7 +336,7 @@ class GatherNdTest(test.TestCase):
     grads = gradients_impl.gradients([outputs], [inputs], [grad_vals])[0]
     expected_grads = np.array(
         [[[5, 6], [1, 2]], [[3, 4], [7, 8]]], dtype=np.float64)
-    with self.session(use_gpu=True):
+    with self.session():
       self.assertAllEqual(expected_grads, self.evaluate(grads))
 
   @test_util.run_deprecated_v1
@@ -357,9 +358,9 @@ class GatherNdTest(test.TestCase):
          [1, 1, 1, 1, 1, 1, 1, 1, 1], [0, 0, 0, 0, 0, 0, 0, 0, 0],
          [0, 0, 0, 0, 0, 0, 0, 0, 0], [3, 3, 3, 3, 3, 3, 3, 3, 3]],
         dtype=np.float64)
-    with self.session(use_gpu=True):
+    with self.session():
       self.assertIndexedSlices(grads)
-      self.assertAllEqual(expected_grads, ops.convert_to_tensor(grads).eval())
+      self.assertAllEqual(expected_grads, ops.convert_to_tensor(grads))
 
   @test_util.run_v1_only("RefVariable is not supported in v2")
   def testGatherNdRefVariable(self):
@@ -373,15 +374,14 @@ class GatherNdTest(test.TestCase):
 
   @test_util.run_in_graph_and_eager_modes
   def testGatherNdResourceVariable(self):
-    with compat.forward_compatibility_horizon(2019, 4, 30):
-      with self.cached_session():
-        v = resource_variable_ops.ResourceVariable(
-            constant_op.constant([[1, 2], [3, 4], [5, 6]]))
-        self.evaluate(variables.global_variables_initializer())
-        gather = array_ops.gather_nd(v, [[0, 1], [2, 0]])
-        if not context.executing_eagerly():  # .op doesn't make sense in Eager
-          self.assertEqual("ResourceGatherNd", gather.op.inputs[0].op.type)
-        self.assertAllEqual([2, 5], gather)
+    with self.cached_session():
+      v = resource_variable_ops.ResourceVariable(
+          constant_op.constant([[1, 2], [3, 4], [5, 6]]))
+      self.evaluate(variables.global_variables_initializer())
+      gather = array_ops.gather_nd(v, [[0, 1], [2, 0]])
+      if not context.executing_eagerly():  # .op doesn't make sense in Eager
+        self.assertEqual("ResourceGatherNd", gather.op.inputs[0].op.type)
+      self.assertAllEqual([2, 5], gather)
 
 
 class GatherNdOpBenchmark(test.Benchmark):
@@ -396,7 +396,7 @@ class GatherNdOpBenchmark(test.Benchmark):
       t_params = variables.Variable(params)
       t_indices = variables.Variable(indices)
       gather_op = array_ops.gather_nd(t_params, t_indices)
-      variables.global_variables_initializer().run()
+      self.evaluate(variables.global_variables_initializer())
       for _ in range(10):
         self.evaluate(gather_op)
       t1 = time.time()

@@ -31,14 +31,13 @@ class TFDataMetaOptimizer : public CustomGraphOptimizer {
 
   string name() const override { return "tf_data_meta_optimizer"; };
 
+  bool UsesFunctionLibrary() const override { return true; }
+
   Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override;
 
   Status Optimize(Cluster* cluster, const GrapplerItem& item,
                   GraphDef* output) override;
-
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimize_output, double result) override;
 
  private:
   absl::flat_hash_map<string, std::unique_ptr<GraphOptimizer>>

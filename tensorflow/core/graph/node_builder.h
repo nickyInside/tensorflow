@@ -121,7 +121,9 @@ class NodeBuilder {
   // Validates the described node and adds it to *graph, adding edges
   // for all (non-back) inputs.  If created_node is not nullptr,
   // *created_node will be set to the new node (or nullptr on error).
-  Status Finalize(Graph* graph, Node** created_node) const;
+  // If `consume` is true, the builder state will be moved into `node_def`,
+  // and the builder will be left in an undefined state.
+  Status Finalize(Graph* graph, Node** created_node, bool consume = false);
 
   // Accessors for the values set in the constructor.
   const string& node_name() const { return def_builder_.node_name(); }
@@ -146,6 +148,7 @@ class NodeBuilder {
   bool GetOutputType(const Node* node, int i, DataType* dt);
 
   NodeDefBuilder def_builder_;
+  const OpRegistryInterface* op_registry_;
   std::vector<NodeOut> inputs_;
   std::vector<Node*> control_inputs_;
   std::vector<string> errors_;

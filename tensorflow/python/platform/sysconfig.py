@@ -21,9 +21,11 @@ from __future__ import print_function
 import os.path as _os_path
 import platform as _platform
 
+from tensorflow.python.client import pywrap_tf_session
 from tensorflow.python.framework.versions import CXX11_ABI_FLAG as _CXX11_ABI_FLAG
 from tensorflow.python.framework.versions import MONOLITHIC_BUILD as _MONOLITHIC_BUILD
 from tensorflow.python.framework.versions import VERSION as _VERSION
+from tensorflow.python.platform import build_info
 from tensorflow.python.util.tf_export import tf_export
 
 
@@ -64,6 +66,8 @@ def get_compile_flags():
   flags = []
   flags.append('-I%s' % get_include())
   flags.append('-D_GLIBCXX_USE_CXX11_ABI=%d' % _CXX11_ABI_FLAG)
+  flags.append('-DEIGEN_MAX_ALIGN_BYTES=%d' %
+               pywrap_tf_session.get_eigen_max_align_bytes())
   return flags
 
 
@@ -80,7 +84,32 @@ def get_link_flags():
   if not _MONOLITHIC_BUILD:
     flags.append('-L%s' % get_lib())
     if is_mac:
-      flags.append('-l:libtensorflow_framework.%s.dylib' % ver)
+      flags.append('-ltensorflow_framework.%s' % ver)
     else:
       flags.append('-l:libtensorflow_framework.so.%s' % ver)
   return flags
+
+
+@tf_export('sysconfig.get_build_info')
+def get_build_info():
+  """Get a dictionary describing TensorFlow's build environment.
+
+  Values are generated when TensorFlow is compiled, and are static for each
+  TensorFlow package. The return value is a dictionary with string keys such as:
+
+    - cuda_version
+    - cudnn_version
+    - is_cuda_build
+    - is_rocm_build
+    - msvcp_dll_names
+    - nvcuda_dll_name
+    - cudart_dll_name
+    - cudnn_dll_name
+
+  Note that the actual keys and values returned by this function is subject to
+  change across different versions of TensorFlow or across platforms.
+
+  Returns:
+    A Dictionary describing TensorFlow's build environment.
+  """
+  return build_info.build_info

@@ -16,12 +16,12 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_SEGMENT_REDUCTION_OPS_H_
 #define TENSORFLOW_CORE_KERNELS_SEGMENT_REDUCTION_OPS_H_
 
-// This file requires the following include because it uses CudaAtomicMax:
+// This file requires the following include because it uses GpuAtomicMax:
 // #include "tensorflow/core/util/gpu_kernel_helper.h"
-//
+
 // Unfortunately we can't add the #include, since it breaks compilation for
 // non-GPU targets. This only breaks in clang, because it's more strict for
-// template code and CudaAtomicMax is used in template context.
+// template code and GpuAtomicMax is used in template context.
 
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/tensor.h"
@@ -32,11 +32,17 @@ namespace tensorflow {
 
 class OpKernelContext;
 
+bool DisableSegmentReductionOpDeterminismExceptions();
+
+// Type of SparseSegmentReduction operation to perform gradient of.
+enum class SparseSegmentReductionOperation { kSum, kMean, kSqrtN };
+
 namespace functor {
 
-#ifdef GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 typedef Eigen::GpuDevice GPUDevice;
-// Functor for SegmentSumGPUOp.
+// Functor for SegmentSumGPUOp & SegmentProdGPUOp & SegmentMaxGPUOp
+//             & SegmentMinGPUOp.
 // output_rows: the number of output segments (unique segment ids in
 //                'segment_ids').
 // segment_ids_shape: shape of 'segment_ids' tensor.
@@ -45,13 +51,16 @@ typedef Eigen::GpuDevice GPUDevice;
 // data_size: size of input data tensor.
 // data: input data tensor.
 // output: output reshaped to {output_rows, output.size/output_rows}
-template <typename T, typename Index>
-struct SegmentSumFunctor {
+template <typename T, typename Index, typename InitialValueF,
+          typename ReductionF, typename AtomicReductionF>
+struct SegmentReductionFunctor {
   void operator()(OpKernelContext* ctx, const GPUDevice& d,
                   const Index output_rows, const TensorShape& segment_ids_shape,
                   typename TTypes<Index>::ConstFlat segment_ids,
                   const Index data_size, const T* data,
                   typename TTypes<T, 2>::Tensor output);
+  static constexpr bool atomic_reduction_is_associative =
+      AtomicReductionF::is_associative;
 };
 
 #endif
@@ -59,50 +68,87 @@ struct SegmentSumFunctor {
 template <typename Device, typename T, typename Index, typename InitialValueF,
           typename ReductionF>
 struct UnsortedSegmentFunctor {
-  void operator()(OpKernelContext* ctx, const Index num_segments,
-                  const TensorShape& segment_ids_shape,
+  void operator()(OpKernelContext* ctx, const TensorShape& segment_ids_shape,
                   typename TTypes<Index>::ConstFlat segment_ids,
-                  const Index data_size, const T* data,
+                  typename TTypes<T, 2>::ConstTensor data,
                   typename TTypes<T, 2>::Tensor output);
 };
 
-#ifdef GOOGLE_CUDA
-// reduction functors for the gpu
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
+// Atomic reduction functors for the gpu.
 template <typename T>
-struct SumOpGpu {
+struct AtomicSumOpGpu {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
                                                         const T& value) {
-    CudaAtomicAdd(dest, value);
+    GpuAtomicAdd(dest, value);
+  }
+  static constexpr bool is_associative = std::is_integral<T>::value;
+};
+
+template <typename T>
+struct AtomicProdOpGpu {
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
+                                                        const T& value) {
+    GpuAtomicMul(dest, value);
+  }
+  static constexpr bool is_associative = std::is_integral<T>::value;
+};
+
+template <typename T>
+struct AtomicMaxOpGpu {
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
+                                                        const T& value) {
+    GpuAtomicMax(dest, value);
+  }
+  static constexpr bool is_associative = true;
+};
+
+template <typename T>
+struct AtomicMinOpGpu {
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
+                                                        const T& value) {
+    GpuAtomicMin(dest, value);
+  }
+  static constexpr bool is_associative = true;
+};
+
+// Non-atomic reduction functors for the gpu.
+template <typename T>
+struct NonAtomicSumOpGpu {
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
+                                                        const T& value) {
+    *dest += value;
   }
 };
 
 template <typename T>
-struct ProdOpGpu {
+struct NonAtomicProdOpGpu {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
                                                         const T& value) {
-    CudaAtomicMul(dest, value);
+    *dest *= value;
   }
 };
 
 template <typename T>
-struct MaxOpGpu {
+struct NonAtomicMaxOpGpu {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
                                                         const T& value) {
-    CudaAtomicMax(dest, value);
+    *dest = max(*dest, value);
   }
 };
 
 template <typename T>
-struct MinOpGpu {
+struct NonAtomicMinOpGpu {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE void operator()(T* dest,
                                                         const T& value) {
-    CudaAtomicMin(dest, value);
+    *dest = min(*dest, value);
   }
 };
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-// initial value functors
+// Initial value functors.
 template <typename T>
 struct Zero {
   EIGEN_STRONG_INLINE T operator()() const { return T(0); }
@@ -125,6 +171,25 @@ struct Highest {
   EIGEN_STRONG_INLINE T operator()() const {
     return Eigen::NumTraits<T>::highest();
   }
+};
+
+template <typename T, typename Index, typename SegmentId>
+struct SparseSegmentReductionFunctor {
+  Status operator()(OpKernelContext* context, bool is_mean, bool is_sqrtn,
+                    T default_value, typename TTypes<T, 2>::ConstTensor input,
+                    typename TTypes<Index>::ConstVec indices,
+                    typename TTypes<SegmentId>::ConstVec segment_ids,
+                    typename TTypes<T, 2>::Tensor output);
+};
+
+template <class Device, typename T, typename Index, typename SegmentId>
+struct SparseSegmentGradFunctor {
+  void operator()(OpKernelContext* context,
+                  SparseSegmentReductionOperation operation,
+                  typename TTypes<T>::ConstMatrix input_flat,
+                  typename TTypes<Index>::ConstVec indices_vec,
+                  typename TTypes<SegmentId>::ConstVec segment_vec,
+                  typename TTypes<T>::Matrix output_flat);
 };
 
 }  // namespace functor

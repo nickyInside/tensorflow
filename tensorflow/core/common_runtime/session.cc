@@ -19,10 +19,16 @@ limitations under the License.
 
 #include "tensorflow/core/common_runtime/session_factory.h"
 #include "tensorflow/core/lib/core/errors.h"
+#include "tensorflow/core/lib/monitoring/gauge.h"
 #include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/monitoring.h"
 
 namespace tensorflow {
+namespace {
+
+auto* session_created = monitoring::Gauge<bool, 0>::New(
+    "/tensorflow/core/session_created", "True if a session was created.");
+
+}  // namespace
 
 Session::Session() {}
 
@@ -31,7 +37,7 @@ Session::~Session() {}
 Status Session::Run(const RunOptions& run_options,
                     const std::vector<std::pair<string, Tensor> >& inputs,
                     const std::vector<string>& output_tensor_names,
-                    const std::vector<string>& target_node_names,
+                    const std::vector<string>& target_tensor_names,
                     std::vector<Tensor>* outputs, RunMetadata* run_metadata) {
   return errors::Unimplemented(
       "Run with options is not supported for this session.");
@@ -54,18 +60,12 @@ Status Session::PRun(const string& handle,
 }
 
 Session* NewSession(const SessionOptions& options) {
-  SessionFactory* factory;
-  Status s = SessionFactory::GetFactory(options, &factory);
-  if (!s.ok()) {
-    LOG(ERROR) << s;
-    return nullptr;
-  }
   // Starts exporting metrics through a platform-specific monitoring API (if
   // provided). For builds using "tensorflow/core/platform/default", this is
   // currently a no-op.
-  monitoring::StartExporter();
+  session_created->GetCell()->Set(true);
   Session* out_session;
-  s = NewSession(options, &out_session);
+  Status s = NewSession(options, &out_session);
   if (!s.ok()) {
     LOG(ERROR) << "Failed to create session: " << s;
     return nullptr;
@@ -78,16 +78,17 @@ Status NewSession(const SessionOptions& options, Session** out_session) {
   Status s = SessionFactory::GetFactory(options, &factory);
   if (!s.ok()) {
     *out_session = nullptr;
-    LOG(ERROR) << s;
+    LOG(ERROR) << "Failed to get session factory: " << s;
     return s;
   }
   // Starts exporting metrics through a platform-specific monitoring API (if
   // provided). For builds using "tensorflow/core/platform/default", this is
   // currently a no-op.
-  monitoring::StartExporter();
+  session_created->GetCell()->Set(true);
   s = factory->NewSession(options, out_session);
   if (!s.ok()) {
     *out_session = nullptr;
+    LOG(ERROR) << "Failed to create session: " << s;
   }
   return s;
 }

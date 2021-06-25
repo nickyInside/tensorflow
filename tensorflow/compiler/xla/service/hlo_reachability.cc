@@ -13,9 +13,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/compiler/xla/service/hlo_reachability.h"
+
 #include <queue>
 
-#include "tensorflow/compiler/xla/service/hlo_reachability.h"
+#include "tensorflow/compiler/xla/service/hlo_opcode.h"
 
 namespace xla {
 
@@ -52,7 +54,7 @@ void HloReachabilityMap::SetReachabilityToUnionHelper(
   if (!absl::c_linear_search(inputs, instruction)) {
     bit_vector->SetToZero();
   }
-  bit_vector->Set(GetIndex(instruction));
+  bit_vector->Set(GetIndex(instruction).v);
   for (const HloInstruction* input : inputs) {
     if (input != instruction) {
       bit_vector->OrWith(GetBitVector(input));
@@ -60,19 +62,34 @@ void HloReachabilityMap::SetReachabilityToUnionHelper(
   }
 }
 
-void HloReachabilityMap::SetReachable(const HloInstruction* a,
-                                      const HloInstruction* b) {
-  GetBitVector(b).Set(GetIndex(a));
+void HloReachabilityMap::Replace(const HloInstruction* original,
+                                 const HloInstruction* replacement) {
+  if (GetKey(original) == GetKey(replacement)) {
+    return;
+  }
+  indices_[GetKey(replacement)] = GetIndex(original).v;
+  indices_.erase(GetKey(original));
 }
 
-bool HloReachabilityMap::IsReachable(const HloInstruction* a,
-                                     const HloInstruction* b) const {
-  return GetBitVector(b).Get(GetIndex(a));
+void HloReachabilityMap::SetReachable(Index a, Index b) {
+  GetBitVector(b).Set(a.v);
 }
 
-bool HloReachabilityMap::IsConnected(const HloInstruction* a,
-                                     const HloInstruction* b) const {
-  return IsReachable(a, b) || IsReachable(b, a);
+std::unique_ptr<HloReachabilityMap> HloReachabilityMap::BuildWithRestrictions(
+    const HloComputation* computation,
+    absl::FunctionRef<void(const HloInstruction*,
+                           std::vector<HloInstruction*>*)>
+        add_dependencies) {
+  const auto& all = computation->MakeInstructionPostOrder();
+  auto result = absl::make_unique<HloReachabilityMap>(all);
+
+  std::vector<HloInstruction*> inputs;
+  for (const HloInstruction* hlo : all) {
+    inputs.clear();
+    add_dependencies(hlo, &inputs);
+    result->FastSetReachabilityToUnion(inputs, hlo);
+  }
+  return result;
 }
 
 std::unique_ptr<HloReachabilityMap> HloReachabilityMap::Build(
@@ -81,32 +98,36 @@ std::unique_ptr<HloReachabilityMap> HloReachabilityMap::Build(
   auto result = absl::make_unique<HloReachabilityMap>(all);
   auto channel_group = computation->ComputeChannelDependencies();
 
+  std::vector<HloInstruction*> inputs;
+
+  const auto add_input = [&channel_group, &inputs](HloInstruction* input) {
+    inputs.push_back(input);
+    if ((input->opcode() == HloOpcode::kAllReduce ||
+         input->opcode() == HloOpcode::kAllReduceScatter) &&
+        input->channel_id()) {
+      auto it = channel_group.find(*input->channel_id());
+      if (it != channel_group.end()) {
+        inputs.insert(inputs.end(), it->second.begin(), it->second.end());
+      }
+    }
+  };
+
+  const auto add_dependencies = [&add_input](const HloInstruction* hlo) {
+    for (HloInstruction* operand : hlo->operands()) {
+      add_input(operand);
+    }
+    for (HloInstruction* predecessor : hlo->control_predecessors()) {
+      add_input(predecessor);
+    }
+  };
+
   for (const HloInstruction* hlo : all) {
-    std::vector<HloInstruction*> inputs;
-    const auto add_input = [&channel_group, &inputs](HloInstruction* input) {
-      inputs.push_back(input);
-      if (input->opcode() == HloOpcode::kAllReduce && input->all_reduce_id()) {
-        auto it = channel_group.find(*input->all_reduce_id());
-        if (it != channel_group.end()) {
-          inputs.insert(inputs.end(), it->second.begin(), it->second.end());
-        }
-      }
-    };
-
-    const auto add_dependencies = [&add_input](const HloInstruction* hlo) {
-      for (HloInstruction* operand : hlo->operands()) {
-        add_input(operand);
-      }
-      for (HloInstruction* predecessor : hlo->control_predecessors()) {
-        add_input(predecessor);
-      }
-    };
-
+    inputs.clear();
     add_dependencies(hlo);
 
     switch (hlo->opcode()) {
       case HloOpcode::kRecvDone: {
-        auto it = channel_group.find(hlo->channel_id());
+        auto it = channel_group.find(*hlo->channel_id());
         if (it != channel_group.end()) {
           for (HloInstruction* channel : it->second) {
             if (channel->opcode() == HloOpcode::kSend) {
@@ -116,10 +137,11 @@ std::unique_ptr<HloReachabilityMap> HloReachabilityMap::Build(
         }
         break;
       }
-      case HloOpcode::kAllReduce: {
-        auto all_reduce_id = hlo->all_reduce_id();
-        if (all_reduce_id) {
-          auto it = channel_group.find(all_reduce_id.value());
+      case HloOpcode::kAllReduce:
+      case HloOpcode::kAllReduceScatter: {
+        auto channel_id = hlo->channel_id();
+        if (channel_id) {
+          auto it = channel_group.find(channel_id.value());
           if (it != channel_group.end()) {
             for (HloInstruction* all_reduce : it->second) {
               add_dependencies(all_reduce);

@@ -12,33 +12,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""This module contains the user-facing API for AutoGraph."""
+"""This module contains the user- and codegen-facing API for AutoGraph."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import collections
-import copy
 import functools
+import imp
 import inspect
 import os
-import pdb
-import re
 import sys
 import textwrap
+import traceback
 
-from enum import Enum
+import six
 
+from tensorflow.python.autograph import operators
+from tensorflow.python.autograph import utils
+from tensorflow.python.autograph.converters import asserts
+from tensorflow.python.autograph.converters import break_statements
+from tensorflow.python.autograph.converters import call_trees
+from tensorflow.python.autograph.converters import conditional_expressions
+from tensorflow.python.autograph.converters import continue_statements
+from tensorflow.python.autograph.converters import control_flow
+from tensorflow.python.autograph.converters import directives
+from tensorflow.python.autograph.converters import functions
+from tensorflow.python.autograph.converters import lists
+from tensorflow.python.autograph.converters import logical_expressions
+from tensorflow.python.autograph.converters import return_statements
+from tensorflow.python.autograph.converters import slices
+from tensorflow.python.autograph.converters import variables
+from tensorflow.python.autograph.core import ag_ctx
 from tensorflow.python.autograph.core import converter
+from tensorflow.python.autograph.core import function_wrappers
+from tensorflow.python.autograph.core import unsupported_features_checker
 from tensorflow.python.autograph.impl import conversion
+from tensorflow.python.autograph.lang import special_functions
 from tensorflow.python.autograph.operators import py_builtins
+from tensorflow.python.autograph.pyct import anno
+from tensorflow.python.autograph.pyct import cfg
+from tensorflow.python.autograph.pyct import error_utils
 from tensorflow.python.autograph.pyct import errors
 from tensorflow.python.autograph.pyct import inspect_utils
+from tensorflow.python.autograph.pyct import origin_info
+from tensorflow.python.autograph.pyct import qual_names
+from tensorflow.python.autograph.pyct import transpiler
+from tensorflow.python.autograph.pyct.static_analysis import activity
+from tensorflow.python.autograph.pyct.static_analysis import reaching_definitions
 from tensorflow.python.autograph.utils import ag_logging as logging
-from tensorflow.python.autograph.utils import py_func
+from tensorflow.python.eager import function
+from tensorflow.python.framework import errors_impl
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.util import tf_inspect
+from tensorflow.python.util import tf_stack
 from tensorflow.python.util.tf_export import tf_export
 
 
@@ -46,17 +73,588 @@ def is_autograph_strict_conversion_mode():
   return int(os.environ.get('AUTOGRAPH_STRICT_CONVERSION', '0')) > 0
 
 
-# TODO(mdan): Properly document the type hints.
-# TODO(mdan): Reduce the type hint information to (module, type).
-# (currently we require (module + class name, type))
+#
+# Error handling
+#
 
 
-# TODO(mdan): This should behave like to_graph (e.g. convert statically).
-# TODO(znado): Make an alias so can write Verbosity directly without needing
-# to write converter.
-def convert(
-    recursive=False,
-    optional_features=None):
+# TODO(mdan): Export this symbol.
+class AutoGraphError(errors.PyCTError):
+  """Base class for all AutoGraph exceptions."""
+  pass
+
+
+class ConversionError(AutoGraphError):
+  """Raised during the conversion process."""
+  pass
+
+
+class StagingError(AutoGraphError):
+  """Raised during the staging (i.e. Python execution) of converted code."""
+  pass
+
+
+class _ErrorMetadata(error_utils.ErrorMetadataBase):
+  """AutoGraph-specific error metadata. See base class."""
+
+  def create_exception(self, source_error):
+    preferred_type = type(source_error)
+    if issubclass(preferred_type, errors_impl.OpError):
+      # Best-effort unpacking of OpError exceptions.
+      # TODO(mdan): Use a mechanism that is more future-proof.
+      init_argspec = tf_inspect.getfullargspec(preferred_type.__init__)
+      message = self.get_message()
+      init_args = tuple(init_argspec.args)
+      # At the time of this writing, TF errors either take 3 or 4 arguments,
+      # the argument '*args' may or may not be used.
+      if init_args == ('self', 'node_def', 'op', 'message'):
+        return preferred_type(source_error.node_def, source_error.op, message,
+                              source_error.experimental_payloads)
+
+    elif preferred_type in (errors.PyCTError, AutoGraphError, ConversionError,
+                            StagingError, errors_impl.InaccessibleTensorError,
+                            errors_impl.OperatorNotAllowedInGraphError):
+      return preferred_type(self.get_message())
+
+    exc = super(_ErrorMetadata, self).create_exception(source_error)
+    if exc is not None:
+      return exc
+
+    # Note: While changing an error's message property to change the message it
+    # displays will probably work a lot of times, there is no standard way in
+    # Python to do that. The safest way is therefore to create a new exception.
+    # For user defined exceptions, we could define an interface that allowed
+    # them to work under this mechanism.
+    return StagingError(self.get_message())
+
+
+def _attach_error_metadata(e, f):
+  """Augments an error with the metadata necessary for rewrite."""
+  if hasattr(e, 'ag_pass_through'):
+    return
+
+  metadata = getattr(e, 'ag_error_metadata', None)
+  source_map = f.ag_source_map
+
+  if metadata is None:
+    logging.log(1, 'Caught error in user callable %s', f, exc_info=True)
+    message = '{}: {}'.format(e.__class__.__name__, e)
+  else:
+    message = None
+
+  cause_tb = traceback.extract_tb(sys.exc_info()[2])[1:]
+
+  e.ag_error_metadata = _ErrorMetadata(cause_tb, metadata, message, source_map,
+                                       __file__)
+
+
+class StackTraceMapper(tf_stack.StackTraceMapper):
+  """Remaps generated code to code it originated from."""
+
+  def __init__(self, converted_fn):
+    super().__init__()
+    self._source_map = converted_fn.ag_source_map
+    # This may be called repeatedly: once on entry, by the superclass, then by
+    # each child context manager.
+    self._cached_map = None
+
+  def get_effective_source_map(self):
+    if self._cached_map is not None:
+      return self._cached_map
+
+    parent_map = self.parent.get_effective_source_map()
+
+    effective_source_map = {}
+    for loc, origin in self._source_map.items():
+      effective_source_map[(loc.filename, loc.lineno)] = (origin.loc.filename,
+                                                          origin.loc.lineno,
+                                                          origin.function_name)
+
+    for key, value in parent_map.items():
+      filename, lineno, _ = value
+      value_loc = origin_info.LineLocation(filename=filename, lineno=lineno)
+      if value_loc in self._source_map:
+        origin = self._source_map[value_loc]
+        effective_source_map[key] = (origin.loc.filename, origin.loc.lineno,
+                                     origin.function_name)
+      else:
+        effective_source_map[key] = value
+
+    self._cached_map = effective_source_map
+    return effective_source_map
+
+
+#
+# Actual source code transformation
+#
+
+
+class PyToTF(transpiler.PyToPy):
+  """The TensorFlow AutoGraph transformer."""
+
+  def __init__(self):
+    super(PyToTF, self).__init__()
+    self._extra_locals = None
+
+  def get_transformed_name(self, node):
+    return 'tf__' + super(PyToTF, self).get_transformed_name(node)
+
+  def get_extra_locals(self):
+    if self._extra_locals is None:
+      # TODO(mdan): Move into core or replace with an actual importable module.
+      # Craft a module that exposes the external API as well as certain
+      # internal modules.
+      ag_internal = imp.new_module('autograph')
+      ag_internal.__dict__.update(inspect.getmodule(PyToTF).__dict__)
+      ag_internal.ConversionOptions = converter.ConversionOptions
+      ag_internal.STD = converter.STANDARD_OPTIONS
+      ag_internal.Feature = converter.Feature
+      ag_internal.utils = utils
+      ag_internal.FunctionScope = function_wrappers.FunctionScope
+      ag_internal.with_function_scope = function_wrappers.with_function_scope
+      # TODO(mdan): Add safeguards against name clashes.
+      # We don't want to create a submodule because we want the operators to be
+      # accessible as ag__.<operator>
+      ag_internal.__dict__.update(special_functions.__dict__)
+      ag_internal.__dict__.update(operators.__dict__)
+
+      self._extra_locals = {'ag__': ag_internal}
+    return self._extra_locals
+
+  def get_caching_key(self, ctx):
+    return ctx.options
+
+  def initial_analysis(self, node, ctx):
+    graphs = cfg.build(node)
+    node = qual_names.resolve(node)
+    node = activity.resolve(node, ctx, None)
+    node = reaching_definitions.resolve(node, ctx, graphs)
+    anno.dup(
+        node,
+        {
+            anno.Static.DEFINITIONS: anno.Static.ORIG_DEFINITIONS,
+        },
+    )
+    return node
+
+  def transform_ast(self, node, ctx):
+    unsupported_features_checker.verify(node)
+    node = self.initial_analysis(node, ctx)
+
+    node = functions.transform(node, ctx)
+    node = directives.transform(node, ctx)
+    node = break_statements.transform(node, ctx)
+    if ctx.user.options.uses(converter.Feature.ASSERT_STATEMENTS):
+      node = asserts.transform(node, ctx)
+    # Note: sequencing continue canonicalization before for loop one avoids
+    # dealing with the extra loop increment operation that the for
+    # canonicalization creates.
+    node = continue_statements.transform(node, ctx)
+    node = return_statements.transform(node, ctx)
+    if ctx.user.options.uses(converter.Feature.LISTS):
+      node = lists.transform(node, ctx)
+      node = slices.transform(node, ctx)
+    node = call_trees.transform(node, ctx)
+    node = control_flow.transform(node, ctx)
+    node = conditional_expressions.transform(node, ctx)
+    node = logical_expressions.transform(node, ctx)
+    node = variables.transform(node, ctx)
+    return node
+
+
+def _convert_actual(entity, program_ctx):
+  """Applies AutoGraph to entity."""
+
+  # TODO(mdan): Put these extra fields inside __autograph_info__.
+  if not hasattr(entity, '__code__'):
+    raise ValueError('Cannot apply autograph to a function that doesn\'t '
+                     'expose a __code__ object. If this is a @tf.function,'
+                     ' try passing f.python_function instead.')
+
+  transformed, module, source_map = _TRANSPILER.transform(entity, program_ctx)
+
+  assert not hasattr(transformed, 'ag_module')
+  assert not hasattr(transformed, 'ag_source_map')
+  transformed.ag_module = module
+  transformed.ag_source_map = source_map
+  return transformed
+
+
+#
+# Generated code support
+#
+
+
+def autograph_artifact(entity, extras=None):
+  if inspect.ismethod(entity):
+    setattr(entity.__func__, 'autograph_info__', extras)
+  else:
+    setattr(entity, 'autograph_info__', extras)
+  return entity
+
+
+def is_autograph_artifact(entity):
+  return hasattr(entity, 'autograph_info__')
+
+
+def converted_call(f, args, kwargs, caller_fn_scope=None, options=None):
+  """Converts a function call inline.
+
+  For internal use only.
+
+  Note: The argument list is optimized for readability of generated code, which
+  may look like this:
+
+    ag__.converted_call(f, (arg1, arg2), None, fscope)
+    ag__.converted_call(f, (), dict(arg1=val1, **kwargs), fscope)
+    ag__.converted_call(f, (arg1, arg2) + varargs, dict(**kwargs), lscope)
+
+  Args:
+    f: The function to convert.
+    args: Tuple, the original positional arguments of f
+    kwargs: Optional[Dict], the original keyword arguments of f
+    caller_fn_scope: Optional[function_wrappers.FunctionScope], the function
+      scope of the converted function in which this call was originally made.
+    options: Optional[converter.ConversionOptions], conversion options. If not
+      specified, the value of caller_fn_scope.callopts is used. Either options
+      or caller_fn_scope must be present.
+
+  Returns:
+    Any, the result of executing a possibly-converted `f` with the given
+      arguments.
+  """
+  logging.log(1, 'Converted call: %s\n    args: %s\n    kwargs: %s\n', f, args,
+              kwargs)
+
+  if options is None:
+    if caller_fn_scope is None:
+      raise ValueError('either caller_fn_scope or options must have a value')
+    options = caller_fn_scope.callopts
+
+  if conversion.is_in_allowlist_cache(f, options):
+    logging.log(2, 'Allowlisted %s: from cache', f)
+    return _call_unconverted(f, args, kwargs, options, False)
+
+  if ag_ctx.control_status_ctx().status == ag_ctx.Status.DISABLED:
+    logging.log(2, 'Allowlisted: %s: AutoGraph is disabled in context', f)
+    return _call_unconverted(f, args, kwargs, options, False)
+
+  if is_autograph_artifact(f):
+    logging.log(2, 'Permanently allowed: %s: AutoGraph artifact', f)
+    return _call_unconverted(f, args, kwargs, options)
+
+  # If this is a partial, unwrap it and redo all the checks.
+  if isinstance(f, functools.partial):
+    new_kwargs = {}
+    if f.keywords is not None:
+      # Use copy to avoid mutating the underlying keywords.
+      new_kwargs = f.keywords.copy()
+    if kwargs is not None:
+      new_kwargs.update(kwargs)
+    new_args = f.args + args
+    logging.log(3, 'Forwarding call of partial %s with\n%s\n%s\n', f, new_args,
+                new_kwargs)
+    return converted_call(
+        f.func,
+        new_args,
+        new_kwargs,
+        caller_fn_scope=caller_fn_scope,
+        options=options)
+
+  if inspect_utils.isbuiltin(f):
+    if f is eval:
+      return py_builtins.eval_in_original_context(f, args, caller_fn_scope)
+    if f is super:
+      return py_builtins.super_in_original_context(f, args, caller_fn_scope)
+    if f is globals:
+      return py_builtins.globals_in_original_context(caller_fn_scope)
+    if f is locals:
+      return py_builtins.locals_in_original_context(caller_fn_scope)
+    if kwargs:
+      return py_builtins.overload_of(f)(*args, **kwargs)
+    else:
+      return py_builtins.overload_of(f)(*args)
+
+  if conversion.is_unsupported(f):
+    return _call_unconverted(f, args, kwargs, options)
+
+  if not options.user_requested and conversion.is_allowlisted(f):
+    return _call_unconverted(f, args, kwargs, options)
+
+  # internal_convert_user_code is for example turned off when issuing a dynamic
+  # call conversion from generated code while in nonrecursive mode. In that
+  # case we evidently don't want to recurse, but we still have to convert
+  # things like builtins.
+  if not options.internal_convert_user_code:
+    return _call_unconverted(f, args, kwargs, options)
+
+  try:
+    if inspect.ismethod(f) or inspect.isfunction(f):
+      target_entity = f
+      effective_args = args
+
+      f_self = getattr(f, '__self__', None)
+      if f_self is not None:
+        if isinstance(f_self, function.TfMethodTarget):
+          f_self = f_self.target
+        effective_args = (f_self,) + effective_args
+
+    elif hasattr(f, '__class__') and hasattr(f.__class__, '__call__'):
+      # Callable objects. Dunder methods have special lookup rules, see:
+      # https://docs.python.org/3/reference/datamodel.html#specialnames
+      # TODO(mdan): Recurse into converted_call to simplify other verifications.
+      # This should be handled in the same way as partials.
+      target_entity = f.__class__.__call__
+      effective_args = (f,) + args
+
+    else:
+      target_entity = f
+      raise NotImplementedError('unknown callable type "%s"' % type(f))
+
+  except Exception as e:  # pylint:disable=broad-except
+    logging.log(1, 'Error transforming entity %s', target_entity, exc_info=True)
+    if is_autograph_strict_conversion_mode():
+      raise
+    return _fall_back_unconverted(f, args, kwargs, options, e)
+
+  if not hasattr(target_entity, '__code__'):
+    logging.log(2, 'Permanently allowed: %s: native binding', target_entity)
+    return _call_unconverted(f, args, kwargs, options)
+  elif (hasattr(target_entity.__code__, 'co_filename') and
+        target_entity.__code__.co_filename == '<string>'):
+    # TODO(mdan): __globals__['txt'] might work in Py3.
+    logging.log(2, 'Permanently allowed: %s: dynamic code (exec?)',
+                target_entity)
+    return _call_unconverted(f, args, kwargs, options)
+
+  try:
+    program_ctx = converter.ProgramContext(options=options)
+    converted_f = _convert_actual(target_entity, program_ctx)
+    if logging.has_verbosity(2):
+      _log_callargs(converted_f, effective_args, kwargs)
+  except Exception as e:  # pylint:disable=broad-except
+    logging.log(1, 'Error transforming entity %s', target_entity, exc_info=True)
+    if is_autograph_strict_conversion_mode():
+      raise
+    return _fall_back_unconverted(f, args, kwargs, options, e)
+
+  with StackTraceMapper(converted_f), tf_stack.CurrentModuleFilter():
+    try:
+      if kwargs is not None:
+        result = converted_f(*effective_args, **kwargs)
+      else:
+        result = converted_f(*effective_args)
+    except Exception as e:
+      _attach_error_metadata(e, converted_f)
+      raise
+
+  return result
+
+
+def _call_unconverted(f, args, kwargs, options, update_cache=True):
+  """Calls the original function without converting with AutoGraph."""
+  if update_cache:
+    conversion.cache_allowlisted(f, options)
+
+  if inspect.ismethod(f) and isinstance(f.__self__, function.TfMethodTarget):
+    return f.__self__.call(args, kwargs)
+
+  if kwargs is not None:
+    return f(*args, **kwargs)
+  return f(*args)
+
+
+def _fall_back_unconverted(f, args, kwargs, options, exc):
+  """Falls back to calling the function unconverted, in case of error."""
+  # TODO(mdan): Consider adding an internal metric.
+  warning_template = (
+      'AutoGraph could not transform %s and will run it as-is.\n'
+      '%s'
+      'Cause: %s\n'
+      'To silence this warning, decorate the function with'
+      ' @tf.autograph.experimental.do_not_convert')
+  if isinstance(exc, errors.UnsupportedLanguageElementError):
+    if not conversion.is_in_allowlist_cache(f, options):
+      logging.warn(warning_template, f, '', exc)
+  else:
+    file_bug_message = (
+        'Please report this to the TensorFlow team. When filing the bug, set'
+        ' the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and'
+        ' attach the full output.\n')
+    logging.warn(warning_template, f, file_bug_message, exc)
+
+  return _call_unconverted(f, args, kwargs, options)
+
+
+#
+# TensorFlow integration
+#
+
+
+@tf_export('__internal__.autograph.tf_convert', v1=[])
+def tf_convert(f, ctx, convert_by_default=True, user_requested=False):
+  """Decorator that applies AutoGraph to a function.
+
+  Use in internal APIs.
+
+  This API is suitable for high order functions internal to the TensorFlow API,
+  and more generally any function to which AutoGraph is not applied.
+
+  Guidance: `convert` was a decorator meant for use directly by developers, but
+  most of today's uses go through `tf.function`. `tf_convert` is to be called
+  from high order functions internal to TF. By default, all the internal
+  TensorFlow functions are skipped when AutoGraph processes the code. This may
+  lead to user-supplied functions to be incorrectly skipped as well.
+  `tf_convert` helps avoid that. See the following example for more details.
+
+  ```
+  =====tf_internal_module.py=====
+
+  def unconverted(input_fn):
+    return input_fn()
+
+  def converted(input_fn):
+    return tf.__internal__.autograph.tf_convert(
+       input_fn, ctx=tf.__internal__.autograph.control_status_ctx())()
+
+  ======user_module.py======
+
+  @tf.function
+  def foo(input_fn)
+    return unconverted(input_fn)
+
+  @tf.function
+  def bar(input_fn)
+    return converted(input_fn)
+
+  @tf.function(autograph=False)
+  def baz(input_fn)
+    return converted(input_fn)
+  ```
+
+  The `foo` method above will execute the `input_fn` without autograph
+  conversion, while the `bar` method will run an autographed `input_fn`. The
+  `baz` method will run an unconverted `input_fn`, since `tf_convert` respect
+  the control status context.
+
+  Note that both methods in `tf_internal_module` are skipped by autograph when
+  tracing the `tf.function`. The configuration of whether a module/package
+  should be skipped by autograph is controlled in
+  tensorflow/python/autograph/core/config.py.
+
+  Args:
+    f: Callable.
+    ctx: ag_ctx.ControlStatusCtx, the Autograph context in which `f` is used.
+    convert_by_default: bool, whether to use AutoGraph when the context doesn't
+      specify.
+    user_requested: bool, whether to ignore the conversion allowlist. See
+      ConversionOptions.user_requested.
+
+  Returns:
+    Either `f or the converted version of `f`.
+  """
+
+  if is_autograph_artifact(f):
+    return f
+  f_wrapper = f
+  decorators, f = tf_decorator.unwrap(f)
+
+  # TODO(mdan): Grab features from context.
+  # Note: we pass the original context through to convert to properly handle the
+  # following scenario, which can be used inside TF implementations:
+  #
+  #   ctx = ag_ctx.control_status_ctx()
+  #   @function(autograph=False)  # Low-level graph code
+  #   def inner_fn():
+  #     # The context is disabled here, but should be enabled in user user_fn
+  #     tf_convert(user_fn, ctx=ctx)
+  if ctx.status == ag_ctx.Status.ENABLED:
+    wrapper_factory = convert(
+        recursive=True, user_requested=user_requested, conversion_ctx=ctx)
+  elif ctx.status == ag_ctx.Status.DISABLED:
+    wrapper_factory = do_not_convert
+  elif ctx.status == ag_ctx.Status.UNSPECIFIED:
+    if convert_by_default:
+      wrapper_factory = convert(
+          recursive=True, user_requested=user_requested, conversion_ctx=ctx)
+    else:
+      wrapper_factory = call_with_unspecified_conversion_status
+  else:
+    assert False, 'This switch contains all possible cases!'
+  wrapper = wrapper_factory(f)
+
+  if decorators:
+    wrapper = tf_decorator.rewrap(f_wrapper, f, wrapper)
+
+  return autograph_artifact(wrapper)
+
+
+def call_with_unspecified_conversion_status(func):
+  """Decorator that resets the conversion context to the unspecified status."""
+
+  def wrapper(*args, **kwargs):
+    with ag_ctx.ControlStatusCtx(status=ag_ctx.Status.UNSPECIFIED):
+      return func(*args, **kwargs)
+
+  if inspect.isfunction(func) or inspect.ismethod(func):
+    wrapper = functools.update_wrapper(wrapper, func)
+
+  return autograph_artifact(wrapper)
+
+
+def _log_callargs(f, args, kwargs):
+  """Logging helper."""
+  logging.log(2, 'Defaults of %s : %s', f, f.__defaults__)
+  if not six.PY2:
+    logging.log(2, 'KW defaults of %s : %s', f, f.__kwdefaults__)
+
+  if kwargs is not None:
+    callargs = tf_inspect.getcallargs(f, *args, **kwargs)
+  else:
+    callargs = tf_inspect.getcallargs(f, *args)
+
+  formatted_callargs = '\n'.join(
+      '    {}: {}'.format(k, v) for k, v in callargs.items())
+  logging.log(2, 'Calling %s with\n%s\n', f, formatted_callargs)
+
+
+#
+# Public API
+#
+
+
+@tf_export('autograph.experimental.do_not_convert')
+def do_not_convert(func=None):
+  """Decorator that suppresses the conversion of a function.
+
+  Args:
+    func: function to decorate.
+
+  Returns:
+    If `func` is not None, returns a `Callable` which is equivalent to
+    `func`, but is not converted by AutoGraph.
+    If `func` is None, returns a decorator that, when invoked with a
+    single `func` argument, returns a `Callable` equivalent to the
+    above case.
+  """
+  if func is None:
+    return do_not_convert
+
+  def wrapper(*args, **kwargs):
+    with ag_ctx.ControlStatusCtx(status=ag_ctx.Status.DISABLED):
+      return func(*args, **kwargs)
+
+  if inspect.isfunction(func) or inspect.ismethod(func):
+    wrapper = functools.update_wrapper(wrapper, func)
+
+  return autograph_artifact(wrapper)
+
+
+# TODO(mdan): Make private.
+def convert(recursive=False,
+            optional_features=None,
+            user_requested=True,
+            conversion_ctx=ag_ctx.NullCtx()):
   """Decorator that compiles a function to use TensorFlow ops.
 
   The decorator is dynamic - it recompiles the target whenever the decorated
@@ -70,6 +668,10 @@ def convert(
     optional_features: converted.Feature, allows toggling optional or
       experimental features. When set to None, only the core features are
       enabled.
+    user_requested: bool, whether this is a function that the user explicitly
+      asked to be converted. See ConversionOptions.user_requested.
+    conversion_ctx: Optional ag_ctx.ControlStatusCtx, the Autograph context in
+      which `f` is used.
 
   Returns:
     Callable, a decorator that converts the given function into an equivalent
@@ -79,318 +681,33 @@ def convert(
   def decorator(f):
     """Decorator implementation."""
 
-    @functools.wraps(f)
     def wrapper(*args, **kwargs):
-      return converted_call(
-          f, None,
-          converter.ConversionOptions(
-              recursive=recursive,
-              force_conversion=True,
-              optional_features=optional_features,
-          ), args, kwargs)
+      """Wrapper that calls the converted version of f."""
+      options = converter.ConversionOptions(
+          recursive=recursive,
+          user_requested=user_requested,
+          optional_features=optional_features)
+      try:
+        with conversion_ctx:
+          return converted_call(f, args, kwargs, options=options)
+      except Exception as e:  # pylint:disable=broad-except
+        if hasattr(e, 'ag_error_metadata'):
+          raise e.ag_error_metadata.to_exception(e)
+        else:
+          raise
 
-    wrapper = tf_decorator.make_decorator(f, wrapper)
+    if inspect.isfunction(f) or inspect.ismethod(f):
+      wrapper = functools.update_wrapper(wrapper, f)
 
-    # Sometimes the decorator is just desugared, making it impossible to detect.
-    # This attribute makes detection easier.
-    setattr(wrapper, '__ag_compiled', True)
-    return wrapper
-
-  return decorator
-
-
-class RunMode(Enum):
-  """Specifies the way a converted function or method should be executed in TF.
-
-  Attributes:
-   * GRAPH: Call this function directly, as-is. This is suitable for functions
-       that were already designed for TF graphs and contain ops.
-   * PY_FUNC: Wrap this function into a py_func op. This is suitable for code
-       that will only run correctly in Python, for example code that renders
-       to the display, reads keyboard input, etc.
-  """
-  GRAPH = 1
-  PY_FUNC = 2
-
-
-def do_not_convert_internal(f):
-  """Decorator that marks internal functions which do not need conversion."""
-  setattr(f, '__ag_compiled', True)
-  return f
-
-
-def do_not_convert(run_as=RunMode.GRAPH, return_dtypes=None):
-  """Decorator that suppresses the conversion of a function.
-
-  See also: docs/pyfunc_dtypes.md
-
-  Args:
-    run_as: RunMode, specifies how to use the function in TensorFlow.
-    return_dtypes: Optional[Iterable[ Union[tf.DType,
-      utils.py_func.MatchDType]]], the return data types of the converted
-      function, if run_as is RunMode.PY_FUNC. Ignored otherwise. May be set to
-      None if the function has no return values.
-
-  Returns:
-    Callable, a decorator that wraps the original function.
-  """
-
-  def decorator(f):
-    """Decorator implementation."""
-
-    @functools.wraps(f)
-    def graph_wrapper(*args, **kwargs):
-      return f(*args, **kwargs)
-
-    @functools.wraps(f)
-    def py_func_wrapper(*args, **kwargs):
-      if kwargs:
-        raise NotImplementedError('RunMode.PY_FUNC does not yet support kwargs')
-      # TODO(mdan): Add support for kwargs.
-      return py_func.wrap_py_func(
-          f, return_dtypes, args, kwargs, use_dummy_return=not return_dtypes)
-
-    if run_as == RunMode.GRAPH:
-      wrapper = graph_wrapper
-    elif run_as == RunMode.PY_FUNC:
-      wrapper = py_func_wrapper
-    else:
-      raise ValueError('unknown value for run_as: %s' % run_as)
-
-    setattr(wrapper, '__ag_compiled', True)
-    return wrapper
+    decorated_wrapper = tf_decorator.make_decorator(f, wrapper)
+    return autograph_artifact(decorated_wrapper)
 
   return decorator
 
 
-def _call_unconverted(f, args, kwargs):
-  """Calls the original function without converting with AutoGraph."""
-  if inspect_utils.istfmethodtarget(f):
-    return f.__self__.call(args, kwargs)
-
-  if kwargs is not None:
-    return f(*args, **kwargs)
-  else:
-    return f(*args)
-
-
-def _is_known_loaded_type(f, module_name, entity_name):
-  """Tests whether the function or method is an instance of a known type."""
-  if (module_name not in sys.modules or
-      not hasattr(sys.modules[module_name], entity_name)):
-    return False
-  type_entity = getattr(sys.modules[module_name], entity_name)
-  if isinstance(f, type_entity):
-    # The method if of this type. Example:
-    #
-    # o = ClassType()
-    # function(o.method)()
-    return True
-  # Note: inspect is required here, to avoid unpacking tf.function decorators.
-  if inspect.ismethod(f):
-    # The the unbound method if of this type. Example:
-    #
-    # class ClassType:
-    #   @function
-    #   def method(self):
-    #     ...
-    # o = ClassType()
-    # o.method()
-    if isinstance(f.__func__, type_entity):
-      return True
-  return False
-
-
-def converted_call(f, owner, options, args, kwargs):
-  """Compiles a function call inline. For internal use only."""
-  if owner is not None:
-    if not isinstance(f, str):
-      raise ValueError(
-          'When owner is specified, the function name must be specified as'
-          ' a string: {}'.format(f))
-    owner_attr = f
-
-    # Special case when the owner is a 'super' object. In that case lookups of
-    # dynamic attributes won't work. See
-    # inspect_utils.SuperWrapperForDynamicAttrs.
-    if isinstance(owner, super):
-      owner = inspect_utils.SuperWrapperForDynamicAttrs(owner)
-
-    f = getattr(owner, f)
-
-  if logging.has_verbosity(1):
-    if owner is not None:
-      composite_desc = '("{}" attr of {})'.format(owner_attr, owner)
-    else:
-      composite_desc = ''
-
-    logging.log(1,
-                'Converted call: %s %s\n    args: %s\n    kwargs: %s\n',
-                f, composite_desc, args, kwargs)
-
-  if inspect_utils.isbuiltin(f):
-    if kwargs:
-      return py_builtins.overload_of(f)(*args, **kwargs)
-    else:
-      return py_builtins.overload_of(f)(*args)
-
-  # TODO(b/122265385): Remove this bypass.
-  if (_is_known_loaded_type(f, 'wrapt', 'FunctionWrapper') or
-      _is_known_loaded_type(f, 'wrapt', 'BoundFunctionWrapper')):
-    logging.warn(
-        'Entity {} appears to be decorated by wrapt, which is not yet supported'
-        ' by AutoGraph. The function will be called without transformation.'
-        ' You may however apply AutoGraph before the decorator.'.format(f))
-    logging.log(2, 'Permanently whitelisted: %s: wrapt decorated', f)
-    return _call_unconverted(f, args, kwargs)
-
-  if _is_known_loaded_type(f, 'functools', '_lru_cache_wrapper'):
-    logging.log(2, 'Permanently whitelisted: %s: lru_cache', f)
-    return _call_unconverted(f, args, kwargs)
-
-  # Constructors are permanently whitelisted.
-  # TODO(mdan): Toggle as experimental feature instead.
-  # TODO(b/124016764): Remove this limitation.
-  if tf_inspect.isclass(f):
-    logging.log(2, 'Permanently whitelisted: %s: constructor', f)
-    return _call_unconverted(f, args, kwargs)
-
-  # Other built-in modules are permanently whitelisted.
-  # TODO(mdan): Figure out how to do this consistently for all stdlib modules.
-  if any(
-      f in m.__dict__.values() for m in (collections, pdb, copy, inspect, re)):
-    logging.log(2, 'Permanently whitelisted: %s: part of builtin module', f)
-    return _call_unconverted(f, args, kwargs)
-
-  # Custom ops and kernels are also permanently whitelisted.
-  # See tensorflow.framework.load_library.
-  if (hasattr(f, '__module__')
-      and hasattr(f.__module__, '_IS_TENSORFLOW_PLUGIN')):
-    logging.log(2, 'Permanently whitelisted: %s: TensorFlow plugin', f)
-    return _call_unconverted(f, args, kwargs)
-
-  if not options.force_conversion and conversion.is_whitelisted_for_graph(f):
-    return _call_unconverted(f, args, kwargs)
-
-  # internal_convert_user_code is for example turned off when issuing a dynamic
-  # call conversion from generated code while in nonrecursive mode. In that
-  # case we evidently don't want to recurse, but we still have to convert
-  # things like builtins.
-  if not options.internal_convert_user_code:
-    return _call_unconverted(f, args, kwargs)
-
-  # TODO(mdan): Move this entire block inside to_graph.
-  try:  # Begin of transformation error guards
-
-    # Unwrap functools.partial objects
-    # TODO(mdan): Consider sharing unwrapping logic with tf_inspect.
-    while isinstance(f, functools.partial):
-      args = f.args + args
-      new_kwargs = {}
-      if f.keywords is not None:
-        new_kwargs.update(f.keywords)
-      if kwargs is not None:
-        new_kwargs.update(kwargs)
-      kwargs = new_kwargs
-      f = f.func
-
-    if tf_inspect.isfunction(f) or tf_inspect.ismethod(f):
-      # Regular functions
-      target_entity = f
-      f_self = inspect_utils.getmethodself(f)
-
-      # TODO(b/119246461): This may be more elegantly handled using __get__?
-      if f_self is not None:
-        effective_args = (f_self,) + args
-      else:
-        effective_args = args
-
-    elif tf_inspect.isclass(f):
-      # Constructors
-      # Note: Until we support class constructurs, and enable whole-class
-      # conversion with an experimental flag, this branch is dead code.
-      # TODO(mdan): Consider removing unless there is a compelling use case.
-      target_entity = f
-      effective_args = args
-
-    elif hasattr(f, '__call__') and hasattr(f, '__class__'):
-      # Callable objects
-      target_entity = f.__call__
-      effective_args = (f,) + args
-
-    else:
-      target_entity = f
-      raise NotImplementedError('unknown callable type "%s"' % type(f))
-
-    if not tf_inspect.isclass(target_entity):
-      if not hasattr(target_entity, '__code__'):
-        logging.log(
-            2, 'Permanently whitelisted: %s: native binding', target_entity)
-        return _call_unconverted(f, args, kwargs)
-      elif (hasattr(target_entity.__code__, 'co_filename') and
-            target_entity.__code__.co_filename == '<string>'):
-        # TODO(mdan): __globals__['txt'] might work in Py3.
-        logging.log(
-            2, 'Permanently whitelisted: %s: dynamic code (exec?)',
-            target_entity)
-        return _call_unconverted(f, args, kwargs)
-
-    converted_f = to_graph(
-        target_entity,
-        recursive=options.recursive,
-        experimental_optional_features=options.optional_features)
-
-    if logging.has_verbosity(2):
-      logging.log(2, 'Defaults of %s : %s', converted_f,
-                  converted_f.__defaults__)
-      if kwargs is not None:
-        callargs = tf_inspect.getcallargs(
-            converted_f, *effective_args, **kwargs)
-      else:
-        callargs = tf_inspect.getcallargs(converted_f, *effective_args)
-      formatted_callargs = '\n'.join(
-          '    {}: {}'.format(k, v) for k, v in callargs.items())
-      logging.log(2, 'Calling %s with\n%s\n', converted_f, formatted_callargs)
-
-  # TODO(mdan): Reduce this list.
-  except (errors.AutoGraphError, AssertionError, AttributeError, IndexError,
-          KeyError, NameError, NotImplementedError, SyntaxError, TypeError,
-          ValueError, IOError) as e:
-
-    logging.log(1, 'Error transforming entity %s', target_entity, exc_info=True)
-
-    if is_autograph_strict_conversion_mode():
-      raise
-
-    logging.warn(
-        'Entity %s could not be transformed and will be executed as-is.'
-        ' Some features (e.g. tensor-dependent conditionals and loops) may not'
-        ' work as expected.'
-        ' Error details can be found in the logs when running with the env'
-        ' variable AUTOGRAPH_VERBOSITY >= 1. Please report this to the'
-        ' AutoGraph team. Cause: %s', target_entity, e)
-
-    return _call_unconverted(f, args, kwargs)
-
-  try:
-    if kwargs is not None:
-      result = converted_f(*effective_args, **kwargs)
-    else:
-      result = converted_f(*effective_args)
-  except errors.StagingError as e:
-    target_origin = errors.extract_origin_info(converted_f)
-    raise errors.StagingError((target_origin,) + e.user_trace, e.original_error)
-  except errors.AutoGraphError as e:
-    target_origin = errors.extract_origin_info(converted_f)
-    raise errors.StagingError((target_origin,), e)
-
-  return result
-
-
+# pylint:disable=line-too-long
 @tf_export('autograph.to_graph', v1=[])
-def to_graph(entity,
-             recursive=True,
-             experimental_optional_features=None):
+def to_graph(entity, recursive=True, experimental_optional_features=None):
   """Converts a Python entity into a TensorFlow graph.
 
   Also see: `tf.autograph.to_code`, `tf.function`.
@@ -403,22 +720,19 @@ def to_graph(entity,
   TensorFlow function or a Python callable. Internally, `tf.function` uses
   `to_graph`.
 
-  _Example Usage_
+  Example usage:
 
-  ```python
-    def foo(x):
-      if x > 0:
-        y = x * x
-      else:
-        y = -x
-      return y
-
-    converted_foo = to_graph(foo)
-
-    x = tf.constant(1)
-    y = converted_foo(x)  # converted_foo is a TensorFlow Op-like.
-    assert is_tensor(y)
-  ```
+  >>> def f(x):
+  ...   if x > 0:
+  ...     y = x * x
+  ...   else:
+  ...     y = -x
+  ...   return y
+  ...
+  >>> converted_f = to_graph(f)
+  >>> x = tf.constant(2)
+  >>> converted_f(x)  # converted_foo is like a TensorFlow Op.
+  <tf.Tensor: shape=(), dtype=int32, numpy=4>
 
   Supported Python entities include:
     * functions
@@ -433,13 +747,17 @@ def to_graph(entity,
   Methods are converted into unbound function that have an additional first
   argument called `self`.
 
+  For a tutorial, see the
+  [tf.function and AutoGraph guide](https://www.tensorflow.org/guide/function).
+  For more detailed information, see the
+  [AutoGraph reference documentation](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/python/autograph/g3doc/reference/index.md).
+
   Args:
     entity: Python callable or class to convert.
-    recursive: Whether to recursively convert any functions that the
-      converted function may call.
+    recursive: Whether to recursively convert any functions that the converted
+      function may call.
     experimental_optional_features: `None`, a tuple of, or a single
-      `tf.autograph.experimental.Feature` value. Controls the use of
-      optional features in the conversion process.
+      `tf.autograph.experimental.Feature` value.
 
   Returns:
     Same as `entity`, the converted Python function or class.
@@ -451,11 +769,13 @@ def to_graph(entity,
     program_ctx = converter.ProgramContext(
         options=converter.ConversionOptions(
             recursive=recursive,
-            optional_features=experimental_optional_features),
-        autograph_module=tf_inspect.getmodule(to_graph))
-    return conversion.convert(entity, program_ctx)
+            user_requested=True,
+            optional_features=experimental_optional_features))
+    return autograph_artifact(_convert_actual(entity, program_ctx))
   except (ValueError, AttributeError, KeyError, NameError, AssertionError) as e:
-    errors.report_internal_error(entity, e)
+    logging.error(1, 'Error converting %s', entity, exc_info=True)
+    raise ConversionError('converting {}: {}: {}'.format(
+        entity, e.__class__.__name__, str(e)))
 
 
 @tf_export(v1=['autograph.to_graph'])
@@ -513,8 +833,7 @@ def to_graph_v1(entity,
     arg_values: Deprecated.
     arg_types: Deprecated.
     experimental_optional_features: `None`, a tuple of, or a single
-      `tf.autograph.experimental.Feature` value. Controls the use of optional
-      features in the conversion process.
+      `tf.autograph.experimental.Feature` value.
 
   Returns:
     Same as `entity`, the converted Python function or class.
@@ -537,23 +856,40 @@ def to_code_v1(entity,
                arg_types=None,
                indentation='  ',
                experimental_optional_features=None):
-  """Similar to `to_graph`, but returns Python source code as a string.
+  """Returns the source code generated by AutoGraph, as a string.
+
+  Example usage:
+
+  >>> def f(x):
+  ...   if x < 0:
+  ...     x = -x
+  ...   return x
+  >>> tf.autograph.to_code(f)
+  "...def tf__f(x):..."
 
   Also see: `tf.autograph.to_graph`.
 
-  `to_graph` returns the Python source code that can be used to generate a
-  TensorFlow graph that is functionally identical to the input Python code.
+  Note: If a function has been decorated with `tf.function`, pass its
+  underlying Python function, rather than the callable that `tf.function
+  creates:
+
+  >>> @tf.function
+  ... def f(x):
+  ...   if x < 0:
+  ...     x = -x
+  ...   return x
+  >>> tf.autograph.to_code(f.python_function)
+  "...def tf__f(x):..."
 
   Args:
-    entity: Python callable or class to convert.
+    entity: Python callable or class.
     recursive: Whether to recursively convert any functions that the converted
       function may call.
     arg_values: Deprecated.
     arg_types: Deprecated.
     indentation: Deprecated.
     experimental_optional_features: `None`, a tuple of, or a single
-      `tf.autograph.experimental.Feature` value. Controls the use of optional
-      features in the conversion process.
+      `tf.autograph.experimental.Feature` value.
 
   Returns:
     The converted code as string.
@@ -568,23 +904,38 @@ def to_code_v1(entity,
 
 
 @tf_export('autograph.to_code', v1=[])
-def to_code(entity,
-            recursive=True,
-            experimental_optional_features=None):
-  """Similar to `to_graph`, but returns Python source code as a string.
+def to_code(entity, recursive=True, experimental_optional_features=None):
+  """Returns the source code generated by AutoGraph, as a string.
+
+  Example usage:
+
+  >>> def f(x):
+  ...   if x < 0:
+  ...     x = -x
+  ...   return x
+  >>> tf.autograph.to_code(f)
+  "...def tf__f(x):..."
 
   Also see: `tf.autograph.to_graph`.
 
-  `to_graph` returns the Python source code that can be used to generate a
-  TensorFlow graph that is functionally identical to the input Python code.
+  Note: If a function has been decorated with `tf.function`, pass its
+  underlying Python function, rather than the callable that `tf.function
+  creates:
+
+  >>> @tf.function
+  ... def f(x):
+  ...   if x < 0:
+  ...     x = -x
+  ...   return x
+  >>> tf.autograph.to_code(f.python_function)
+  "...def tf__f(x):..."
 
   Args:
     entity: Python callable or class to convert.
-    recursive: Whether to recursively convert any functions that the
-      converted function may call.
+    recursive: Whether to recursively convert any functions that the converted
+      function may call.
     experimental_optional_features: `None`, a tuple of, or a single
-      `tf.autograph.experimental.Feature` value. Controls the use of
-      optional features in the conversion process.
+      `tf.autograph.experimental.Feature` value.
 
   Returns:
     The converted code as string.
@@ -595,3 +946,6 @@ def to_code(entity,
           recursive=recursive,
           experimental_optional_features=experimental_optional_features))
   return textwrap.dedent(source)
+
+
+_TRANSPILER = PyToTF()

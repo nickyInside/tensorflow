@@ -27,7 +27,7 @@ from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import control_flow_util
 from tensorflow.python.ops import math_ops
 # go/tf-wildcard-import
-# pylint: disable=wildcard-import,undefined-variable
+# pylint: disable=wildcard-import,undefined-variable,redefined-builtin
 from tensorflow.python.ops.control_flow_ops import *
 # pylint: enable=wildcard-import
 
@@ -210,6 +210,8 @@ def _EnterGrad(op, grad):
   # pylint: disable=protected-access
   grad_ctxt = graph._get_control_flow_context()
   # pylint: enable=protected-access
+  if grad_ctxt is None:
+    return grad
   if not grad_ctxt.back_prop:
     # Skip gradient computation, if the attribute `back_prop` is false.
     return grad

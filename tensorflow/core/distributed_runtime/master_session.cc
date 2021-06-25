@@ -31,9 +31,11 @@ limitations under the License.
 #include "tensorflow/core/framework/allocation_description.pb.h"
 #include "tensorflow/core/framework/collective.h"
 #include "tensorflow/core/framework/cost_graph.pb.h"
+#include "tensorflow/core/framework/graph_def_util.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/framework/tensor_description.pb.h"
 #include "tensorflow/core/graph/graph_partition.h"
 #include "tensorflow/core/graph/tensor_id.h"
@@ -55,6 +57,7 @@ limitations under the License.
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/public/session_options.h"
+#include "tensorflow/core/util/device_name_utils.h"
 
 namespace tensorflow {
 
@@ -92,7 +95,7 @@ class MasterSession::ReffedClientGraph : public core::RefCounted {
           n->name(),
           NodeDetails(n->type_string(),
                       strings::StrCat(
-                          "(", str_util::Join(n->requested_inputs(), ", "))));
+                          "(", absl::StrJoin(n->requested_inputs(), ", "))));
     }
   }
 
@@ -227,7 +230,7 @@ class MasterSession::ReffedClientGraph : public core::RefCounted {
   const BuildGraphOptions bg_opts_;
 
   // NOTE(mrry): This pointer will be null after `RegisterPartitions()` returns.
-  std::unique_ptr<ClientGraph> client_graph_before_register_ GUARDED_BY(mu_);
+  std::unique_ptr<ClientGraph> client_graph_before_register_ TF_GUARDED_BY(mu_);
   const SessionOptions session_opts_;
   const bool is_partial_;
   const CallableOptions callable_opts_;
@@ -260,7 +263,7 @@ class MasterSession::ReffedClientGraph : public core::RefCounted {
     // The interface to the worker. Owned.
     WorkerInterface* worker = nullptr;
 
-    // After registeration with the worker, graph_handle identifies
+    // After registration with the worker, graph_handle identifies
     // this partition on the worker.
     string graph_handle;
 
@@ -280,7 +283,7 @@ class MasterSession::ReffedClientGraph : public core::RefCounted {
   Notification init_done_;
 
   // init_result_ remembers the initialization error if any.
-  Status init_result_ GUARDED_BY(mu_);
+  Status init_result_ TF_GUARDED_BY(mu_);
 
   std::unique_ptr<StatsPublisherInterface> stats_publisher_;
 
@@ -444,7 +447,7 @@ Status MasterSession::ReffedClientGraph::DoRegisterPartitions(
     Part* part = &partitions_.back();
     part->name = name_def.first;
     TrackFeedsAndFetches(part, name_def.second, popts);
-    part->worker = worker_cache_->CreateWorker(part->name);
+    part->worker = worker_cache_->GetOrCreateWorker(part->name);
     if (part->worker == nullptr) {
       s = errors::NotFound("worker ", part->name);
       break;
@@ -471,6 +474,9 @@ Status MasterSession::ReffedClientGraph::DoRegisterPartitions(
     c->req.set_session_handle(session_handle_);
     c->req.set_create_worker_session_called(!should_deregister_);
     c->req.mutable_graph_def()->Swap(&graph_partitions[part.name]);
+    StripDefaultAttributes(*OpRegistry::Global(),
+                           c->req.mutable_graph_def()->mutable_node());
+    *c->req.mutable_config_proto() = session_opts_.config;
     *c->req.mutable_graph_options() = session_opts_.config.graph_options();
     *c->req.mutable_debug_options() =
         callable_opts_.run_options().debug_options();
@@ -491,6 +497,7 @@ Status MasterSession::ReffedClientGraph::DoRegisterPartitions(
   return s;
 }
 
+namespace {
 // Helper class to manage "num" parallel RunGraph calls.
 class RunManyGraphs {
  public:
@@ -501,26 +508,30 @@ class RunManyGraphs {
   // Returns the index-th call.
   struct Call {
     CallOptions opts;
+    const string* worker_name;
+    std::atomic<bool> done{false};
     std::unique_ptr<MutableRunGraphRequestWrapper> req;
     std::unique_ptr<MutableRunGraphResponseWrapper> resp;
   };
   Call* get(int index) { return &calls_[index]; }
 
   // When the index-th call is done, updates the overall status.
-  void WhenDone(int index, const std::string& worker_name, const Status& s) {
+  void WhenDone(int index, const Status& s) {
     TRACEPRINTF("Partition %d %s", index, s.ToString().c_str());
-    auto resp = get(index)->resp.get();
+    Call* call = get(index);
+    call->done = true;
+    auto resp = call->resp.get();
     if (resp->status_code() != error::Code::OK) {
       // resp->status_code will only be non-OK if s.ok().
       mutex_lock l(mu_);
       ReportBadStatus(Status(resp->status_code(),
-                             strings::StrCat("From ", worker_name, ":\n",
+                             strings::StrCat("From ", *call->worker_name, ":\n",
                                              resp->status_error_message())));
     } else if (!s.ok()) {
       mutex_lock l(mu_);
-      ReportBadStatus(Status(
-          s.code(),
-          strings::StrCat("From ", worker_name, ":\n", s.error_message())));
+      ReportBadStatus(
+          Status(s.code(), strings::StrCat("From ", *call->worker_name, ":\n",
+                                           s.error_message())));
     }
     pending_.DecrementCount();
   }
@@ -530,7 +541,36 @@ class RunManyGraphs {
     ReportBadStatus(errors::Cancelled("RunManyGraphs"));
   }
 
-  void Wait() { pending_.Wait(); }
+  void Wait() {
+    // Check the error status every 60 seconds in other to print a log message
+    // in the event of a hang.
+    const std::chrono::milliseconds kCheckErrorPeriod(1000 * 60);
+    while (true) {
+      if (pending_.WaitFor(kCheckErrorPeriod)) {
+        return;
+      }
+      if (!status().ok()) {
+        break;
+      }
+    }
+
+    // The step has failed. Wait for another 60 seconds before diagnosing a
+    // hang.
+    DCHECK(!status().ok());
+    if (pending_.WaitFor(kCheckErrorPeriod)) {
+      return;
+    }
+    LOG(ERROR)
+        << "RunStep still blocked after 60 seconds. Failed with error status: "
+        << status();
+    for (const Call& call : calls_) {
+      if (!call.done) {
+        LOG(ERROR) << "- No response from RunGraph call to worker: "
+                   << *call.worker_name;
+      }
+    }
+    pending_.Wait();
+  }
 
   Status status() const {
     mutex_lock l(mu_);
@@ -544,13 +584,13 @@ class RunManyGraphs {
 
   BlockingCounter pending_;
   mutable mutex mu_;
-  StatusGroup status_group_ GUARDED_BY(mu_);
-  bool cancel_issued_ GUARDED_BY(mu_) = false;
+  StatusGroup status_group_ TF_GUARDED_BY(mu_);
+  bool cancel_issued_ TF_GUARDED_BY(mu_) = false;
 
-  void ReportBadStatus(const Status& s) EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+  void ReportBadStatus(const Status& s) TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     VLOG(1) << "Master received error status " << s;
     if (!cancel_issued_ && !StatusGroup::IsDerived(s)) {
-      // Only start cancelling other workers upon receiveing a non-derived
+      // Only start cancelling other workers upon receiving a non-derived
       // error
       cancel_issued_ = true;
 
@@ -566,7 +606,6 @@ class RunManyGraphs {
   TF_DISALLOW_COPY_AND_ASSIGN(RunManyGraphs);
 };
 
-namespace {
 Status AddSendFromClientRequest(const RunStepRequestWrapper& client_req,
                                 MutableRunGraphRequestWrapper* worker_req,
                                 size_t index, const string& send_key) {
@@ -590,9 +629,6 @@ struct RunCallableResponseWrapper {
   Status AddTensorFromRunGraphResponse(
       const string& tensor_name, MutableRunGraphResponseWrapper* worker_resp,
       size_t index) {
-    // TODO(b/74355905): Add a specialized implementation that avoids
-    // copying the tensor into the RunCallableResponse when at least
-    // two of the {client, master, worker} are in the same process.
     return worker_resp->RecvValue(index, &fetch_key_to_protos[tensor_name]);
   }
 };
@@ -633,6 +669,7 @@ Status MasterSession::ReffedClientGraph::RunPartitionsHelper(
   for (int i = 0; i < num; ++i) {
     const Part& part = partitions_[i];
     RunManyGraphs::Call* c = calls.get(i);
+    c->worker_name = &part.name;
     c->req.reset(part.worker->CreateRunGraphRequest());
     c->resp.reset(part.worker->CreateRunGraphResponse());
     if (is_partial_) {
@@ -697,15 +734,15 @@ Status MasterSession::ReffedClientGraph::RunPartitionsHelper(
     const Part& part = partitions_[i];
     RunManyGraphs::Call* call = calls.get(i);
     TRACEPRINTF("Partition %d %s", i, part.name.c_str());
-    part.worker->RunGraphAsync(&call->opts, call->req.get(), call->resp.get(),
-                               std::bind(&RunManyGraphs::WhenDone, &calls, i,
-                                         part.name, std::placeholders::_1));
+    part.worker->RunGraphAsync(
+        &call->opts, call->req.get(), call->resp.get(),
+        std::bind(&RunManyGraphs::WhenDone, &calls, i, std::placeholders::_1));
   }
 
   // Waits for the RunGraph calls.
   call_opts->SetCancelCallback([&calls]() {
     LOG(INFO) << "Client requested cancellation for RunStep, cancelling "
-                  "worker operations.";
+                 "worker operations.";
     calls.StartCancel();
   });
   auto token = cm->get_cancellation_token();
@@ -797,7 +834,7 @@ Status MasterSession::ReffedClientGraph::RunPartitions(
           << execution_count;
   // Maps the names of fed tensors to their index in `req`.
   std::unordered_map<StringPiece, size_t, StringPieceHasher> feeds(3);
-  for (size_t i = 0; i < callable_opts_.feed_size(); ++i) {
+  for (size_t i = 0, end = callable_opts_.feed_size(); i < end; ++i) {
     if (!feeds.insert({callable_opts_.feed(i), i}).second) {
       // MakeCallable will fail if there are two feeds with the same name.
       return errors::Internal("Duplicated feeds in callable: ",
@@ -815,9 +852,6 @@ Status MasterSession::ReffedClientGraph::RunPartitions(
       call_opts, req, &wrapped_resp, cm, false /* is_last_partial_run */));
 
   // Collects fetches.
-  // TODO(b/74355905): Add a specialized implementation that avoids
-  // copying the tensor into the RunCallableResponse when at least
-  // two of the {client, master, worker} are in the same process.
   for (const string& fetch : callable_opts_.fetch()) {
     TensorProto* fetch_proto = resp->mutable_fetch()->Add();
     auto iter = wrapped_resp.fetch_key_to_protos.find(fetch);
@@ -872,9 +906,9 @@ class CleanupBroadcastHelper {
 
   mutex mu_;
   // Number of requests remaining to be collected.
-  int num_pending_ GUARDED_BY(mu_);
+  int num_pending_ TF_GUARDED_BY(mu_);
   // Aggregate status of the operation.
-  Status status_ GUARDED_BY(mu_);
+  Status status_ TF_GUARDED_BY(mu_);
   // Callback to be called when all operations complete.
   StatusCallback done_;
 
@@ -1220,7 +1254,7 @@ void MasterSession::UpdateLastAccessTime() {
   last_access_time_usec_.store(Env::Default()->NowMicros());
 }
 
-Status MasterSession::Create(GraphDef* graph_def,
+Status MasterSession::Create(GraphDef&& graph_def,
                              const WorkerCacheFactoryOptions& options) {
   if (session_opts_.config.use_per_session_threads() ||
       session_opts_.config.session_inter_op_thread_pool_size() > 0) {
@@ -1240,7 +1274,7 @@ Status MasterSession::Create(GraphDef* graph_def,
   {
     mutex_lock l(mu_);
     TF_RETURN_IF_ERROR(GraphExecutionState::MakeForBaseGraph(
-        graph_def, execution_options, &execution_state_));
+        std::move(graph_def), execution_options, &execution_state_));
   }
   should_delete_worker_sessions_ = true;
   return CreateWorkerSessions(options);
@@ -1275,17 +1309,37 @@ Status MasterSession::CreateWorkerSessions(
     }
   });
 
+  string task_name;
+  string local_device_name;
+  DeviceNameUtils::SplitDeviceName(devices_->client_device()->name(),
+                                   &task_name, &local_device_name);
+  const int64 client_device_incarnation =
+      devices_->client_device()->attributes().incarnation();
+
   Status status = Status::OK();
   // Create all the workers & kick off the computations.
   for (size_t i = 0; i < worker_names.size(); ++i) {
     workers[i].name = &worker_names[i];
-    workers[i].worker = worker_cache->CreateWorker(worker_names[i]);
+    workers[i].worker = worker_cache->GetOrCreateWorker(worker_names[i]);
     workers[i].request.set_session_handle(handle_);
-    if (session_opts_.config.experimental()
+    workers[i].request.set_master_task(task_name);
+    workers[i].request.set_master_incarnation(client_device_incarnation);
+    if (session_opts_.config.share_cluster_devices_in_session() ||
+        session_opts_.config.experimental()
             .share_cluster_devices_in_session()) {
       for (const auto& remote_dev : devices_->devices()) {
         *workers[i].request.add_cluster_device_attributes() =
             remote_dev->attributes();
+      }
+
+      if (!session_opts_.config.share_cluster_devices_in_session() &&
+          session_opts_.config.experimental()
+              .share_cluster_devices_in_session()) {
+        LOG(WARNING)
+            << "ConfigProto.Experimental.share_cluster_devices_in_session has "
+               "been promoted to a non-experimental API. Please use "
+               "ConfigProto.share_cluster_devices_in_session instead. The "
+               "experimental option will be removed in the future.";
       }
     }
 
@@ -1377,7 +1431,7 @@ Status MasterSession::DeleteWorkerSessions() {
   // Create all the workers & kick off the computations.
   for (size_t i = 0; i < worker_names.size(); ++i) {
     workers[i].name = &worker_names[i];
-    workers[i].worker = worker_cache->CreateWorker(worker_names[i]);
+    workers[i].worker = worker_cache->GetOrCreateWorker(worker_names[i]);
     workers[i].request.set_session_handle(handle_);
     // Since the worker may have gone away, set a timeout to avoid blocking the
     // session-close operation.
@@ -1514,7 +1568,7 @@ uint64 MasterSession::NewStepId(int64 graph_key) {
   } else {
     uint64 step_id = env_->collective_executor_mgr->NextStepId(graph_key);
     int32 retry_count = 0;
-    while (step_id == CollectiveExecutor::kInvalidId) {
+    while (static_cast<int64>(step_id) == CollectiveExecutor::kInvalidId) {
       Notification note;
       Status status;
       env_->collective_executor_mgr->RefreshStepIdSequenceAsync(
@@ -1915,6 +1969,13 @@ Status MasterSession::DoRunWithLocalExecution(
 
   std::unique_ptr<ProfileHandler> ph;
   FillPerStepState(rcg, req.options(), step_id, count, &pss, &ph);
+
+  if (pss.collect_partition_graphs &&
+      session_opts_.config.experimental().disable_output_partition_graphs()) {
+    return errors::InvalidArgument(
+        "RunOptions.output_partition_graphs() is not supported when "
+        "disable_output_partition_graphs is true.");
+  }
 
   Status s = rcg->RunPartitions(env_, step_id, count, &pss, opts, req, resp,
                                 &cancellation_manager_, false);

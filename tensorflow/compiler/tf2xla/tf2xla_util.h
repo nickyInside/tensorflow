@@ -21,6 +21,7 @@ limitations under the License.
 #include "absl/types/optional.h"
 #include "tensorflow/compiler/tf2xla/tf2xla.pb.h"
 #include "tensorflow/compiler/xla/status_macros.h"
+#include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/kernel_def.pb.h"
 #include "tensorflow/core/framework/op.h"
@@ -176,12 +177,12 @@ struct OutEdgeInfo {
 };
 
 // Replaces node `n` with a new node whose NodeDef is `node_def`.
-xla::StatusOr<Node*> ReplaceNode(Graph* g, Node* n, const NodeDef& node_def);
+StatusOr<Node*> ReplaceNode(Graph* g, Node* n, const NodeDef& node_def);
 
 // Helper function that builds an Identity node.
-xla::StatusOr<Node*> BuildIdentityNode(Graph* graph, const string& node_name,
-                                       DataType dtype, const Node* input,
-                                       absl::optional<string> requested_device);
+StatusOr<Node*> BuildIdentityNode(Graph* graph, const string& node_name,
+                                  DataType dtype, const Node* input,
+                                  absl::optional<string> requested_device);
 
 // For "If"/"While" nodes, if some of their inputs are Const nodes, rewrite
 // body functions to use the Const nodes instead of original _Arg nodes.
@@ -196,6 +197,31 @@ xla::StatusOr<Node*> BuildIdentityNode(Graph* graph, const string& node_name,
 Status PropagateConstIntoFunctionalNodes(
     Graph* g, const FunctionLibraryDefinition* lookup_fld,
     FunctionLibraryDefinition* fld);
+
+// Prunes unreachable FunctionDefs from FunctionLibraryDefinition.
+Status PruneUnreachableFunctionsFromGraph(const Graph& g,
+                                          FunctionLibraryDefinition* fld);
+
+// Finds the following pattern in the graph:
+// 1) EmptyTensorList -> forward While op -> backward While op,
+// 2) in forward While op, a Const node is pushed,
+// 3) in backward While op, data is popped from the tensor list.
+// And rewrites backward While op to use Const node instead of TensorListPopBack
+// result.
+// TODO(b/128633174) remove the TensorList and related TensorList ops.
+Status RewriteTensorListWithConstElement(Graph* g,
+                                         FunctionLibraryDefinition* fld);
+
+extern const char kTpuReplicateAttrName[];
+
+inline bool IsConstTraversableOpType(const Node* node) {
+  return node->type_string() == "Identity" ||
+         node->type_string() == "IdentityN" || node->IsWhileNode();
+}
+
+// Determines whether a loop body is invariant for the given argument index.
+StatusOr<bool> IsLoopInvariant(const FunctionBody* loop_body, int index,
+                               const FunctionLibraryDefinition* lookup_fld);
 
 }  // namespace tensorflow
 

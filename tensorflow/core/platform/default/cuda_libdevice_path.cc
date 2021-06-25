@@ -19,7 +19,7 @@ limitations under the License.
 #include <vector>
 
 #if !defined(PLATFORM_GOOGLE)
-#include "cuda/cuda_config.h"
+#include "third_party/gpus/cuda/cuda_config.h"
 #endif
 #include "tensorflow/core/platform/logging.h"
 
@@ -27,7 +27,9 @@ namespace tensorflow {
 
 std::vector<string> CandidateCudaRoots() {
   VLOG(3) << "CUDA root = " << TF_CUDA_TOOLKIT_PATH;
-  return {TF_CUDA_TOOLKIT_PATH};
+  return {TF_CUDA_TOOLKIT_PATH, string("/usr/local/cuda")};
 }
+
+bool PreferPtxasFromPath() { return true; }
 
 }  // namespace tensorflow

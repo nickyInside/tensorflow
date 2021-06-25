@@ -1,3 +1,4 @@
+# Lint as: python2, python3
 # Copyright 2015 The TensorFlow Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,8 +20,11 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import sys
 import enum
+import sys
+
+import six
+
 from google.protobuf import message
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import deprecation
@@ -41,6 +45,11 @@ _CORNER_CASES = {
     'estimator.NanLossDuringTrainingError': {
         'message': {}
     },
+    'train.LooperThread': {
+        'isAlive': {},
+        'join': {},
+        'native_id': {}
+    }
 }
 
 # Python 2 vs. 3 differences
@@ -48,7 +57,7 @@ if sys.version_info.major == 3:
   _NORMALIZE_TYPE = {}
   for t in ('property', 'object', 'getset_descriptor', 'int', 'str', 'type',
             'tuple', 'module', 'collections.defaultdict', 'set', 'dict',
-            'NoneType', 'frozenset'):
+            'NoneType', 'frozenset', 'member_descriptor'):
     _NORMALIZE_TYPE["<class '%s'>" % t] = "<type '%s'>" % t
   for e in 'Exception', 'RuntimeError':
     _NORMALIZE_TYPE["<class '%s'>" % e] = "<type 'exceptions.%s'>" % e
@@ -72,11 +81,34 @@ if sys.version_info.major == 3:
     return (member == 'with_traceback' or member in ('name', 'value') and
             isinstance(cls, type) and issubclass(cls, enum.Enum))
 else:
-  _NORMALIZE_TYPE = {"<class 'abc.ABCMeta'>": "<type 'type'>"}
-  _NORMALIZE_ISINSTANCE = {}
+  _NORMALIZE_TYPE = {
+      "<class 'abc.ABCMeta'>":
+          "<type 'type'>",
+      "<class 'pybind11_type'>":
+          "<class 'pybind11_builtins.pybind11_type'>",
+  }
+  _NORMALIZE_ISINSTANCE = {
+      "<class 'pybind11_object'>":
+          "<class 'pybind11_builtins.pybind11_object'>",
+  }
 
   def _SkipMember(cls, member):  # pylint: disable=unused-argument
     return False
+
+
+# Differences created by typing implementations.
+_NORMALIZE_TYPE[(
+    'tensorflow.python.framework.ops.Tensor')] = (
+        "<class 'tensorflow.python.framework.ops.Tensor'>")
+_NORMALIZE_TYPE['typing.Generic'] = "<class 'typing.Generic'>"
+# TODO(mdan): Remove once the golden files are generated in Python 3.7.
+_NORMALIZE_TYPE["<class 'typing._GenericAlias'>"] = 'typing.Union'
+# TODO(mdan): Remove once the golden files are generated in Python 3.9.
+_NORMALIZE_TYPE["<class 'typing._UnionGenericAlias'>"] = 'typing.Union'
+
+
+if sys.version_info.major == 3 and sys.version_info.minor >= 8:
+  _NORMALIZE_TYPE["<class '_collections._tuplegetter'>"] = "<type 'property'>"
 
 
 def _NormalizeType(ty):
@@ -147,7 +179,10 @@ def _SanitizedMRO(obj):
       continue
     str_repr = _NormalizeType(str(cls))
     return_list.append(str_repr)
-    if 'tensorflow' not in str_repr:
+    # Class type that has keras in their name should also be monitored. This
+    # will cover any class that imported from third_party/py/keras or
+    # keras_preprocessing.
+    if 'tensorflow' not in str_repr and 'keras' not in str_repr:
       break
 
     # Hack - tensorflow.test.StubOutForTesting may or may not be type <object>
@@ -167,10 +202,11 @@ def _IsProtoClass(obj):
 class PythonObjectToProtoVisitor(object):
   """A visitor that summarizes given python objects as protobufs."""
 
-  def __init__(self):
+  def __init__(self, default_path='tensorflow'):
     # A dict to store all protocol buffers.
     # Keyed by "path" to the object.
     self._protos = {}
+    self._default_path = default_path
 
   def GetProtos(self):
     """Return the list of protos stored."""
@@ -178,7 +214,7 @@ class PythonObjectToProtoVisitor(object):
 
   def __call__(self, path, parent, children):
     # The path to the object.
-    lib_path = 'tensorflow.%s' % path if path else 'tensorflow'
+    lib_path = self._default_path + '.' + path if path else self._default_path
     _, parent = tf_decorator.unwrap(parent)
 
     # A small helper method to construct members(children) protos.
@@ -188,7 +224,8 @@ class PythonObjectToProtoVisitor(object):
       if (_SkipMember(parent, member_name) or
           isinstance(member_obj, deprecation.HiddenTfApiAttribute)):
         return
-      if member_name == '__init__' or not member_name.startswith('_'):
+      if member_name == '__init__' or not six.ensure_str(
+          member_name).startswith('_'):
         if tf_inspect.isroutine(member_obj):
           new_method = proto.member_method.add()
           new_method.name = member_name

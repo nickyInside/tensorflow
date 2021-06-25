@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_reachability.h"
+#include "tensorflow/core/platform/random.h"
 
 namespace xla {
 namespace gpu {
@@ -72,49 +73,11 @@ int ComputeStreamToAssign(
     return kInvalidStreamNum;
   }
 
-  if (hlo.GetModule()
-          ->config()
-          .debug_options()
-          .xla_gpu_disable_multi_streaming()) {
-    return 0;
+  const auto& debug_options = hlo.GetModule()->config().debug_options();
+  if (!debug_options.xla_gpu_disable_multi_streaming()) {
+    LOG(ERROR) << "Multi streaming is not supported";
   }
-
-  if (!ImplementedAsGemm(hlo)) {
-    // If `hlo` is not implemented as a GEMM, keep it close to its operands to
-    // avoid excessive synchronization.
-    int stream_num = -1;
-    for (const auto* operand : hlo.operands()) {
-      if (stream_assignment.HasStreamAssigned(*operand)) {
-        stream_num = std::max(stream_num,
-                              stream_assignment.StreamNumberForHlo(*operand));
-      }
-    }
-    if (!IsStreamNumValid(stream_num)) {
-      stream_num = 0;
-    }
-    return stream_num;
-  }
-
-  // Assign different streams to concurrent GEMMs. The code below uses a
-  // greedy approach. First, we compute as forbidden_stream_numbers the
-  // streams assigned to GEMMs that are concurrent with `hlo`. Then, we assign
-  // `hlo` a different stream.
-  absl::flat_hash_set<int> forbidden_stream_numbers;
-  for (const auto* seen_gemm : seen_gemms) {
-    int stream_num = stream_assignment.StreamNumberForHlo(*seen_gemm);
-    if (!forbidden_stream_numbers.contains(stream_num) &&
-        CanRunConcurrently(*seen_gemm, hlo, reachability)) {
-      forbidden_stream_numbers.insert(stream_num);
-    }
-  }
-
-  for (int stream_num = 0; stream_num < stream_assignment.StreamCount();
-       ++stream_num) {
-    if (!forbidden_stream_numbers.contains(stream_num)) {
-      return stream_num;
-    }
-  }
-  return stream_assignment.StreamCount();
+  return 0;
 }
 
 }  // namespace
@@ -147,7 +110,7 @@ std::unique_ptr<StreamAssignment> AssignStreams(const HloModule& module) {
         stream_num_for_rng = stream_num;
       }
     }
-    if (ImplementedAsGemm(*hlo)) {
+    if (IsCublasGemm(*hlo) || IsMatrixMultiplication(*hlo)) {
       seen_gemms.push_back(hlo);
     }
   }

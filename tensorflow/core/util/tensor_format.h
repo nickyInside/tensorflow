@@ -19,7 +19,9 @@ limitations under the License.
 #include <array>
 #include <vector>
 
+#include "absl/strings/string_view.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -96,18 +98,18 @@ enum FilterTensorFormat {
 
 // Parse tensor format from the given string.
 // Return true if the parsing succeeds, and false if it fails.
-bool FormatFromString(const string& format_str, TensorFormat* format);
+bool FormatFromString(absl::string_view format_str, TensorFormat* format);
 
 // Parse tensor format from the given string.
 // Return true if the parsing succeeds, and false if it fails.
-bool FilterFormatFromString(const string& format_str,
+bool FilterFormatFromString(absl::string_view format_str,
                             FilterTensorFormat* format);
 
 // Convert a tensor format into string.
-string ToString(TensorFormat format);
+std::string ToString(TensorFormat format);
 
 // Convert a filter tensor format into string.
-string ToString(FilterTensorFormat format);
+std::string ToString(FilterTensorFormat format);
 
 // Returns the number of spatial dims of a tensor of rank 'num_dims' and tensor
 // format 'format'.
@@ -123,6 +125,9 @@ inline int GetTensorSpatialDims(int num_dims, TensorFormat format) {
       // Note: the VECT_W is not counted as an independent spatial dim here,
       // since it just a component of the width dimension.
       return num_dims - 3;  // Exclude N,C,VectDim.
+    default:
+      LOG(FATAL) << "Unknown format " << format;
+      return -1;  // Avoid compiler warning about missing return value
   }
 }
 
@@ -147,6 +152,9 @@ inline int GetTensorDimsFromSpatialDims(int num_spatial_dims,
     case FORMAT_NCHW_VECT_C:
     case FORMAT_NHWC_VECT_W:
       return num_spatial_dims + 3;  // Include N,C,VectDim.
+    default:
+      LOG(FATAL) << "Unknown format " << format;
+      return -1;  // Avoid compiler warning about missing return value
   }
 }
 
@@ -441,7 +449,9 @@ T GetFilterDim(gtl::ArraySlice<T> dimension_attribute,
                                           filter_tensor_format) == 3)
                   ? GetFilterDimIndex<3>(filter_tensor_format, dimension)
                   : GetFilterDimIndex<2>(filter_tensor_format, dimension);
-  CHECK(index >= 0 && index < dimension_attribute.size())
+  using size_type = typename gtl::ArraySlice<T>::size_type;
+  CHECK(index >= 0 &&
+        static_cast<size_type>(index) < dimension_attribute.size())
       << "Invalid index from the dimension: " << index << ", "
       << filter_tensor_format << ", " << dimension;
   return dimension_attribute[index];
@@ -495,13 +505,13 @@ inline void GetExplicitPaddingForDim(
 }
 
 // Return the string that specifies the data format for convnet operations.
-string GetConvnetDataFormatAttrString();
-string GetConvnet3dDataFormatAttrString();
+std::string GetConvnetDataFormatAttrString();
+std::string GetConvnet3dDataFormatAttrString();
 
 // Return the string that specifies the filter format for convnet operations.
-string GetConvnetFilterFormatAttrString();
-string GetConvnet3dFilterFormatAttrString();
-string GetConvnetDataFormat2D3DAttrString();
+std::string GetConvnetFilterFormatAttrString();
+std::string GetConvnet3dFilterFormatAttrString();
+std::string GetConvnetDataFormat2D3DAttrString();
 
 // Returns a tensor shape for the specified format and dimension sizes.
 // Works for both 2D and 3D operations. The output shapes are as follows:

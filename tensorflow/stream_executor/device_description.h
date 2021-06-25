@@ -22,14 +22,51 @@ limitations under the License.
 
 #include <map>
 #include <memory>
+
 #include "absl/base/macros.h"
 #include "tensorflow/stream_executor/launch_dim.h"
+#include "tensorflow/stream_executor/lib/statusor.h"
 #include "tensorflow/stream_executor/platform/port.h"
 
 namespace stream_executor {
 namespace internal {
 class DeviceDescriptionBuilder;
 }  // namespace internal
+
+// CUDA compute capability, as reported by the device description.
+struct CudaComputeCapability {
+  int major = 0;
+  int minor = 0;
+
+  // MSVC does not like "PASCAL" symbol.
+  enum CudaComputeCapabilities { PASCAL_ = 6, VOLTA = 7, AMPERE = 8 };
+
+  CudaComputeCapability() {}
+  CudaComputeCapability(int major, int minor) {
+    this->major = major;
+    this->minor = minor;
+  }
+
+  bool IsAtLeast(int other_major, int other_minor = 0) const {
+    return !(*this < CudaComputeCapability{other_major, other_minor});
+  }
+
+  bool operator<(const CudaComputeCapability &other) const {
+    return ToPair() < other.ToPair();
+  }
+
+  bool operator==(const CudaComputeCapability &other) const {
+    return ToPair() == other.ToPair();
+  }
+
+  bool operator!=(const CudaComputeCapability &other) const {
+    return !(*this == other);
+  }
+
+  std::string ToString() const { return absl::StrCat(major, ".", minor); }
+
+  std::pair<int, int> ToPair() const { return std::make_pair(major, minor); }
+};
 
 // Data that describes the execution target of the StreamExecutor, in terms of
 // important logical parameters. These include dimensionality limits and
@@ -42,22 +79,22 @@ class DeviceDescription {
   // Returns the platform being run on; this value is primarily intended for
   // printing, and comes out something like "OpenCL 1.2" or "Compute Capability
   // 3.5".
-  const string &platform_version() const { return platform_version_; }
+  const std::string &platform_version() const { return platform_version_; }
 
   // Returns the driver version interfacing with the underlying platform. Vendor
   // dependent format.
-  const string &driver_version() const { return driver_version_; }
+  const std::string &driver_version() const { return driver_version_; }
 
   // Return the runtime version, if one is provided by the underlying platform.
   // Vendor dependent format / usefulness.
-  const string &runtime_version() const { return runtime_version_; }
+  const std::string &runtime_version() const { return runtime_version_; }
 
   // Returns the name that the device reports. Vendor dependent.
-  const string &name() const { return name_; }
+  const std::string &name() const { return name_; }
 
   // Returns the PCI bus identifier for this device, of the form
   // [domain]:[bus]:[device].[function]
-  const string &pci_bus_id() const { return pci_bus_id_; }
+  const std::string &pci_bus_id() const { return pci_bus_id_; }
 
   // Returns the NUMA node associated with this device, for use in
   // determining socket locality. If the NUMA node could not be determined, -1
@@ -126,17 +163,24 @@ class DeviceDescription {
 
   // Returns the device vendor string, e.g., "NVIDIA Corporation", "Advanced
   // Micro Devices, Inc.", or "GenuineIntel".
-  const string &device_vendor() const { return device_vendor_; }
+  const std::string &device_vendor() const { return device_vendor_; }
 
   // Returns the CUDA compute capability if we're running on the CUDA platform.
   // If a CUDA compute capability is not available, the major version will be
-  // zero, and the return value will be false.
-  bool cuda_compute_capability(int *major, int *minor) const;
+  // zero.
+  CudaComputeCapability cuda_compute_capability() const;
 
   // Returns the AMDGPU ISA version if we're running on the ROCm platform.
   // If the information is not available, the version is not modified,
   // and the return value will be false.
   bool rocm_amdgpu_isa_version(int *version) const;
+
+  // Returns the
+  // * AMDGPU GCN Architecture Name if we're running on the ROCm platform.
+  // * kUndefinedString otherwise
+  const std::string rocm_amdgpu_gcn_arch_name() const {
+    return rocm_amdgpu_gcn_arch_name_;
+  }
 
   // Returns the maximum amount of shared memory present on a single core
   // (i.e. Streaming Multiprocessor on NVIDIA GPUs; Compute Unit for OpenCL
@@ -150,7 +194,7 @@ class DeviceDescription {
   // TODO(leary): resident blocks per core will be useful.
 
   // Convenience typedef for the string-based DeviceDescription mapping.
-  typedef std::map<string, string> Map;
+  typedef std::map<std::string, std::string> Map;
 
   // Returns a mapping from readable names to readable values that describe the
   // device. This is useful for things like printing.
@@ -169,12 +213,12 @@ class DeviceDescription {
   // above.
   //
   // N.B. If another field is added, update ToMap() above.
-  string device_vendor_;
-  string platform_version_;
-  string driver_version_;
-  string runtime_version_;
-  string pci_bus_id_;
-  string name_;
+  std::string device_vendor_;
+  std::string platform_version_;
+  std::string driver_version_;
+  std::string runtime_version_;
+  std::string pci_bus_id_;
+  std::string name_;
 
   ThreadDim thread_dim_limit_;
   BlockDim block_dim_limit_;
@@ -197,11 +241,13 @@ class DeviceDescription {
   float clock_rate_ghz_;
 
   // CUDA "CC" major value, -1 if not available.
-  int cuda_compute_capability_major_;
-  int cuda_compute_capability_minor_;
+  CudaComputeCapability cuda_compute_capability_{-1, -1};
 
   // ROCM AMDGPU ISA version, 0 if not available.
   int rocm_amdgpu_isa_version_;
+
+  // ROCm AMDGPU GCN Architecture name, "" if not available.
+  std::string rocm_amdgpu_gcn_arch_name_;
 
   int numa_node_;
   int core_count_;
@@ -221,22 +267,24 @@ class DeviceDescriptionBuilder {
   // For descriptions of the following fields, see comments on the corresponding
   // DeviceDescription::* accessors above.
 
-  void set_device_vendor(const string &value) {
+  void set_device_vendor(const std::string &value) {
     device_description_->device_vendor_ = value;
   }
-  void set_platform_version(const string &value) {
+  void set_platform_version(const std::string &value) {
     device_description_->platform_version_ = value;
   }
-  void set_driver_version(const string &value) {
+  void set_driver_version(const std::string &value) {
     device_description_->driver_version_ = value;
   }
-  void set_runtime_version(const string &value) {
+  void set_runtime_version(const std::string &value) {
     device_description_->runtime_version_ = value;
   }
-  void set_pci_bus_id(const string &value) {
+  void set_pci_bus_id(const std::string &value) {
     device_description_->pci_bus_id_ = value;
   }
-  void set_name(const string &value) { device_description_->name_ = value; }
+  void set_name(const std::string &value) {
+    device_description_->name_ = value;
+  }
 
   void set_thread_dim_limit(const ThreadDim &value) {
     device_description_->thread_dim_limit_ = value;
@@ -284,12 +332,16 @@ class DeviceDescriptionBuilder {
   }
 
   void set_cuda_compute_capability(int major, int minor) {
-    device_description_->cuda_compute_capability_major_ = major;
-    device_description_->cuda_compute_capability_minor_ = minor;
+    device_description_->cuda_compute_capability_ =
+        CudaComputeCapability{major, minor};
   }
 
   void set_rocm_amdgpu_isa_version(int version) {
     device_description_->rocm_amdgpu_isa_version_ = version;
+  }
+
+  void set_rocm_amdgpu_gcn_arch_name(const std::string &gcn_arch_name) {
+    device_description_->rocm_amdgpu_gcn_arch_name_ = gcn_arch_name;
   }
 
   void set_numa_node(int value) { device_description_->numa_node_ = value; }

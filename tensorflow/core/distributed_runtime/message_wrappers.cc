@@ -14,14 +14,14 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/distributed_runtime/message_wrappers.h"
+
 #include "tensorflow/core/framework/cost_graph.pb.h"
 #include "tensorflow/core/framework/step_stats.pb.h"
+#include "tensorflow/core/framework/tensor.pb.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/protobuf/named_tensor.pb.h"
 
 namespace tensorflow {
-
-namespace {
 
 bool ParseTensorProtoToTensor(const TensorProto& tensor_proto,
                               Tensor* out_tensor) {
@@ -34,8 +34,6 @@ bool ParseTensorProtoToTensor(const TensorProto& tensor_proto,
   }
   return false;
 }
-
-}  // namespace
 
 const string& InMemoryRunStepRequest::session_handle() const {
   return session_handle_;
@@ -344,9 +342,6 @@ Status InMemoryRunGraphRequest::AddSendFromRunStepRequest(
   return Status::OK();
 }
 
-// TODO(b/74355905): Add a specialized implementation that avoids
-// copying the tensor when at least two of the {client, master,
-// worker} are in the same process.
 Status InMemoryRunGraphRequest::AddSendFromRunCallableRequest(
     const RunCallableRequest& run_callable_request, size_t i,
     const string& send_key) {
@@ -491,9 +486,6 @@ Status MutableProtoRunGraphRequest::AddSendFromRunStepRequest(
   return Status::OK();
 }
 
-// TODO(b/74355905): Add a specialized implementation that avoids
-// copying the tensor when at least two of the {client, master,
-// worker} are in the same process.
 Status MutableProtoRunGraphRequest::AddSendFromRunCallableRequest(
     const RunCallableRequest& run_callable_request, size_t i,
     const string& send_key) {

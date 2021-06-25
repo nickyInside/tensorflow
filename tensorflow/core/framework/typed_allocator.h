@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/resource_handle.h"
+#include "tensorflow/core/framework/type_traits.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -76,19 +77,19 @@ class TypedAllocator {
 
 template <>
 /* static */
-inline void TypedAllocator::RunCtor(Allocator* raw_allocator, string* p,
+inline void TypedAllocator::RunCtor(Allocator* raw_allocator, tstring* p,
                                     size_t n) {
   if (!raw_allocator->AllocatesOpaqueHandle()) {
-    for (size_t i = 0; i < n; ++p, ++i) new (p) string();
+    for (size_t i = 0; i < n; ++p, ++i) new (p) tstring();
   }
 }
 
 template <>
 /* static */
-inline void TypedAllocator::RunDtor(Allocator* raw_allocator, string* p,
+inline void TypedAllocator::RunDtor(Allocator* raw_allocator, tstring* p,
                                     size_t n) {
   if (!raw_allocator->AllocatesOpaqueHandle()) {
-    for (size_t i = 0; i < n; ++p, ++i) p->~string();
+    for (size_t i = 0; i < n; ++p, ++i) p->~tstring();
   }
 }
 

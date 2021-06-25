@@ -223,8 +223,6 @@ class BatchToSpaceOp : public OpKernel {
     OP_REQUIRES(
         context, block_size_ > 1,
         errors::InvalidArgument("Block size should be > 1: ", block_size_));
-    // We don't use context->allocate_persistent because the allocation must
-    // happen on the CPU regardless of Device.
     block_shape_ = Tensor(tensorflow::DT_INT64, TensorShape({2}));
     auto block_shape_vec = block_shape_.vec<int64>();
     block_shape_vec(0) = block_size_;
@@ -266,7 +264,7 @@ class BatchToSpaceOp : public OpKernel {
 TF_CALL_REAL_NUMBER_TYPES(REGISTER);
 #undef REGISTER
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define REGISTER(T)                                        \
   REGISTER_KERNEL_BUILDER(Name("BatchToSpaceND")           \
                               .Device(DEVICE_GPU)          \
@@ -282,6 +280,6 @@ TF_CALL_REAL_NUMBER_TYPES(REGISTER);
 
 TF_CALL_GPU_NUMBER_TYPES(REGISTER);
 #undef REGISTER
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 }  // end namespace tensorflow

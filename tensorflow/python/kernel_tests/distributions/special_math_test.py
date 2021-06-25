@@ -61,7 +61,7 @@ def _make_grid(dtype, grid_spec):
   num_points = np.prod(grid_spec.shape)
   grid = np.linspace(grid_spec.min, grid_spec.max, num=num_points).astype(dtype)
   grid_spacing = (grid_spec.max - grid_spec.min) / num_points
-  grid += 0.1 * grid_spacing * rng.randn(*grid.shape)
+  grid += 0.1 * grid_spacing * rng.randn(*grid.shape)  # pylint: disable=not-an-iterable
   # More useful if it's sorted (e.g. for testing monotonicity, or debugging).
   grid = np.sort(grid)
   return np.reshape(grid, grid_spec.shape)
@@ -132,7 +132,7 @@ class NdtriTest(test.TestCase):
             1. - np.exp(-32.),
             1.,
         ]).astype(dtype))
-    # Not having the lambda sanitzer means we'd get an `IndexError` whenever
+    # Not having the lambda sanitizer means we'd get an `IndexError` whenever
     # the user supplied function has default args.
     _, grads = _value_and_gradient(
         lambda x: special_math.ndtri(x), p)  # pylint: disable=unnecessary-lambda
@@ -276,7 +276,7 @@ class NdtrGradientTest(test.TestCase):
     x = constant_op.constant([-100., 0., 100.], dtype=dtype)
     output = (sm.log_ndtr(x) if self._use_log else sm.ndtr(x))
     fn = sm.log_ndtr if self._use_log else sm.ndtr
-    # Not having the lambda sanitzer means we'd get an `IndexError` whenever
+    # Not having the lambda sanitizer means we'd get an `IndexError` whenever
     # the user supplied function has default args.
     output, grad_output = _value_and_gradient(
         lambda x_: fn(x_), x)  # pylint: disable=unnecessary-lambda

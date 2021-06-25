@@ -14,19 +14,15 @@
 # ==============================================================================
 """Keras model saving code."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import os
-
-import six
-
 from tensorflow.python import tf2
-from tensorflow.python.framework import ops
 from tensorflow.python.keras.saving import hdf5_format
-from tensorflow.python.keras.saving import saved_model
-from tensorflow.python.saved_model import loader_impl
+from tensorflow.python.keras.saving import saving_utils
+from tensorflow.python.keras.saving.saved_model import load as saved_model_load
+from tensorflow.python.keras.saving.saved_model import load_context
+from tensorflow.python.keras.saving.saved_model import save as saved_model_save
+from tensorflow.python.keras.utils import generic_utils
+from tensorflow.python.keras.utils.io_utils import path_to_string
+from tensorflow.python.util import keras_deps
 from tensorflow.python.util.tf_export import keras_export
 
 # pylint: disable=g-import-not-at-top
@@ -36,69 +32,107 @@ except ImportError:
   h5py = None
 # pylint: enable=g-import-not-at-top
 
-_HDF5_EXTENSIONS = ['.h5', '.hdf5', '.keras']
-
-
-# TODO(kathywu): Remove this when Keras SavedModel is not experimental.
-_KERAS_SAVED_MODEL_STILL_EXPERIMENTAL = True
-
 
 @keras_export('keras.models.save_model')
 def save_model(model,
                filepath,
                overwrite=True,
                include_optimizer=True,
-               save_format=None):
+               save_format=None,
+               signatures=None,
+               options=None,
+               save_traces=True):
+  # pylint: disable=line-too-long
   """Saves a model as a TensorFlow SavedModel or HDF5 file.
 
-  The saved model contains:
-      - the model's configuration (topology)
-      - the model's weights
-      - the model's optimizer's state (if any)
+  See the [Serialization and Saving guide](https://keras.io/guides/serialization_and_saving/)
+  for details.
 
-  Thus the saved model can be reinstantiated in
-  the exact same state, without any of the code
-  used for model definition or training.
+  Usage:
 
-  Arguments:
+  >>> model = tf.keras.Sequential([
+  ...     tf.keras.layers.Dense(5, input_shape=(3,)),
+  ...     tf.keras.layers.Softmax()])
+  >>> model.save('/tmp/model')
+  >>> loaded_model = tf.keras.models.load_model('/tmp/model')
+  >>> x = tf.random.uniform((10, 3))
+  >>> assert np.allclose(model.predict(x), loaded_model.predict(x))
+
+  The SavedModel and HDF5 file contains:
+
+  - the model's configuration (topology)
+  - the model's weights
+  - the model's optimizer's state (if any)
+
+  Thus models can be reinstantiated in the exact same state, without any of the
+  code used for model definition or training.
+
+  Note that the model weights may have different scoped names after being
+  loaded. Scoped names include the model/layer names, such as
+  `"dense_1/kernel:0"`. It is recommended that you use the layer properties to
+  access specific variables, e.g. `model.get_layer("dense_1").kernel`.
+
+  __SavedModel serialization format__
+
+  Keras SavedModel uses `tf.saved_model.save` to save the model and all
+  trackable objects attached to the model (e.g. layers and variables). The model
+  config, weights, and optimizer are saved in the SavedModel. Additionally, for
+  every Keras layer attached to the model, the SavedModel stores:
+
+    * the config and metadata -- e.g. name, dtype, trainable status
+    * traced call and loss functions, which are stored as TensorFlow subgraphs.
+
+  The traced functions allow the SavedModel format to save and load custom
+  layers without the original class definition.
+
+  You can choose to not save the traced functions by disabling the `save_traces`
+  option. This will decrease the time it takes to save the model and the
+  amount of disk space occupied by the output SavedModel. If you enable this
+  option, then you _must_ provide all custom class definitions when loading
+  the model. See the `custom_objects` argument in `tf.keras.models.load_model`.
+
+  Args:
       model: Keras model instance to be saved.
       filepath: One of the following:
-        - String, path where to save the model
+        - String or `pathlib.Path` object, path where to save the model
         - `h5py.File` object where to save the model
       overwrite: Whether we should overwrite any existing model at the target
         location, or instead ask the user with a manual prompt.
       include_optimizer: If True, save optimizer's state together.
       save_format: Either 'tf' or 'h5', indicating whether to save the model
-        to Tensorflow SavedModel or HDF5. The 'tf' option is currently disabled,
-        and will be enabled when Keras SavedModel export is no longer
-        experimental. (The experimental function is
-        tf.keras.experimental.export_saved_model).
+        to Tensorflow SavedModel or HDF5. Defaults to 'tf' in TF 2.X, and 'h5'
+        in TF 1.X.
+      signatures: Signatures to save with the SavedModel. Applicable to the 'tf'
+        format only. Please see the `signatures` argument in
+        `tf.saved_model.save` for details.
+      options: (only applies to SavedModel format) `tf.saved_model.SaveOptions`
+        object that specifies options for saving to SavedModel.
+      save_traces: (only applies to SavedModel format) When enabled, the
+        SavedModel will store the function traces for each layer. This
+        can be disabled, so that only the configs of each layer are stored.
+        Defaults to `True`. Disabling this will decrease serialization time and
+        reduce file size, but it requires that all custom layers/models
+        implement a `get_config()` method.
 
   Raises:
       ImportError: If save format is hdf5, and h5py is not available.
   """
+  # pylint: enable=line-too-long
   from tensorflow.python.keras.engine import sequential  # pylint: disable=g-import-not-at-top
 
-  if (not tf2.enabled() and
-      not ops.executing_eagerly_outside_functions()
-      and save_format == 'tf'):
-    raise NotImplementedError(
-        'Saving the model as SavedModel is not supported in TensorFlow 1.X'
-        'graph mode. Please enable eager execution or use the "h5" save format.'
-        )
+  default_format = 'tf' if tf2.enabled() else 'h5'
+  save_format = save_format or default_format
 
-  if _KERAS_SAVED_MODEL_STILL_EXPERIMENTAL and save_format == 'tf':
-    raise NotImplementedError(
-        'Saving the model as SavedModel is still in experimental stages. '
-        'Please use tf.keras.experimental.export_saved_model, or use '
-        'save_format="h5" to save to HDF5.')
+  filepath = path_to_string(filepath)
 
-  # TODO(kathywu): Remove this when Keras SavedModel is not experimental.
-  save_format = 'h5'
+  # If the user has not already called fit or built the underlying metrics, we
+  # should do that before saving to ensure the metric names have all
+  # appropriate name transformations applied.
+  saving_utils.try_build_compiled_arguments(model)
 
   if (save_format == 'h5' or
       (h5py is not None and isinstance(filepath, h5py.File)) or
-      os.path.splitext(filepath)[1] in _HDF5_EXTENSIONS):
+      saving_utils.is_hdf5_filepath(filepath)):
     # TODO(b/130258301): add utility method for detecting model type.
     if (not model._is_graph_network and  # pylint:disable=protected-access
         not isinstance(model, sequential.Sequential)):
@@ -111,44 +145,70 @@ def save_model(model,
           'or using `save_weights`.')
     hdf5_format.save_model_to_hdf5(
         model, filepath, overwrite, include_optimizer)
-    return
+  else:
+    with generic_utils.SharedObjectSavingScope():
+      saved_model_save.save(model, filepath, overwrite, include_optimizer,
+                            signatures, options, save_traces)
 
 
 @keras_export('keras.models.load_model')
-def load_model(filepath, custom_objects=None, compile=True):  # pylint: disable=redefined-builtin
-  """Loads a model saved via `save_model`.
+def load_model(filepath, custom_objects=None, compile=True, options=None):  # pylint: disable=redefined-builtin
+  """Loads a model saved via `model.save()`.
 
-  Arguments:
+  Usage:
+
+  >>> model = tf.keras.Sequential([
+  ...     tf.keras.layers.Dense(5, input_shape=(3,)),
+  ...     tf.keras.layers.Softmax()])
+  >>> model.save('/tmp/model')
+  >>> loaded_model = tf.keras.models.load_model('/tmp/model')
+  >>> x = tf.random.uniform((10, 3))
+  >>> assert np.allclose(model.predict(x), loaded_model.predict(x))
+
+  Note that the model weights may have different scoped names after being
+  loaded. Scoped names include the model/layer names, such as
+  `"dense_1/kernel:0"`. It is recommended that you use the layer properties to
+  access specific variables, e.g. `model.get_layer("dense_1").kernel`.
+
+  Args:
       filepath: One of the following:
-          - String, path to the saved model
+          - String or `pathlib.Path` object, path to the saved model
           - `h5py.File` object from which to load the model
       custom_objects: Optional dictionary mapping names
           (strings) to custom classes or functions to be
           considered during deserialization.
       compile: Boolean, whether to compile the model
           after loading.
+      options: Optional `tf.saved_model.LoadOptions` object that specifies
+        options for loading from SavedModel.
 
   Returns:
-      A Keras model instance. If an optimizer was found
-      as part of the saved model, the model is already
-      compiled. Otherwise, the model is uncompiled and
-      a warning will be displayed. When `compile` is set
-      to False, the compilation is omitted without any
-      warning.
+      A Keras model instance. If the original model was compiled, and saved with
+      the optimizer, then the returned model will be compiled. Otherwise, the
+      model will be left uncompiled. In the case that an uncompiled model is
+      returned, a warning is displayed if the `compile` argument is set to
+      `True`.
 
   Raises:
       ImportError: if loading from an hdf5 file and h5py is not available.
       IOError: In case of an invalid savefile.
   """
-  if not tf2.enabled() or (
-      h5py is not None and (
-          isinstance(filepath, h5py.File) or h5py.is_hdf5(filepath))):
-    return hdf5_format.load_model_from_hdf5(filepath, custom_objects, compile)
+  with generic_utils.SharedObjectLoadingScope():
+    with generic_utils.CustomObjectScope(custom_objects or {}):
+      with load_context.load_context(options):
+        if (h5py is not None and
+            (isinstance(filepath, h5py.File) or h5py.is_hdf5(filepath))):
+          return hdf5_format.load_model_from_hdf5(filepath, custom_objects,
+                                                  compile)
 
-  if isinstance(filepath, six.string_types):
-    loader_impl.parse_saved_model(filepath)
-    return saved_model.load_from_saved_model(filepath)
+        filepath = path_to_string(filepath)
+        if isinstance(filepath, str):
+          return saved_model_load.load(filepath, compile, options)
 
   raise IOError(
       'Unable to load model. Filepath is not an hdf5 file (or h5py is not '
       'available) or SavedModel.')
+
+# Inject the load_model function to keras_deps to remove the dependency
+# from TFLite to Keras.
+keras_deps.register_load_model_function(load_model)

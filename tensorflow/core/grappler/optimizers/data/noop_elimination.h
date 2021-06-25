@@ -30,6 +30,8 @@ class NoOpElimination : public TFDataOptimizerBase {
 
   string name() const override { return "noop_elimination"; };
 
+  bool UsesFunctionLibrary() const override { return false; }
+
   Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override {
     return Status::OK();
@@ -38,9 +40,6 @@ class NoOpElimination : public TFDataOptimizerBase {
   Status OptimizeAndCollectStats(Cluster* cluster, const GrapplerItem& item,
                                  GraphDef* output,
                                  OptimizationStats* stats) override;
-
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimize_output, double result) override;
 };
 
 }  // namespace grappler

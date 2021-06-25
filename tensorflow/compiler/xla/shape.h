@@ -19,6 +19,7 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/container/inlined_vector.h"
 #include "absl/types/optional.h"
 #include "tensorflow/compiler/xla/layout.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
@@ -38,6 +39,15 @@ class Shape {
   // Construct a shape from a ShapeProto.
   explicit Shape(const ShapeProto& shape_proto);
 
+  Shape(PrimitiveType element_type, absl::Span<const int64> dimensions,
+        absl::Span<const bool> dynamic_dimensions,
+        std::vector<Shape> tuple_shapes)
+      : element_type_(element_type),
+        dimensions_(dimensions.begin(), dimensions.end()),
+        dynamic_dimensions_(dynamic_dimensions.begin(),
+                            dynamic_dimensions.end()),
+        tuple_shapes_(std::move(tuple_shapes)) {}
+
   // Returns a ShapeProto representation of the Shape.
   ShapeProto ToProto() const;
 
@@ -48,7 +58,7 @@ class Shape {
   // Returns the rank (number of dimensions) of the given shape. Shape must be
   // an array.
   int64 rank() const {
-    CHECK(IsArray()) << "Non-arrays do not have a rank, shape: " << ToString();
+    DCHECK(IsArray()) << "Non-arrays do not have a rank, shape: " << ToString();
     return dimensions_.size();
   }
 
@@ -58,9 +68,15 @@ class Shape {
   bool IsToken() const { return element_type() == TOKEN; }
   bool IsOpaque() const { return element_type() == OPAQUE_TYPE; }
 
+  // Returns whether all elements in the shape are integer.
+  // A nested tuple of integers is considered as integer.
+  bool IsInteger() const;
+
   // Returns true if no array dimension in the shape is dynamically sized. Tuple
   // shapes are traversed recursively.
   bool is_static() const;
+
+  bool is_dynamic() const { return !is_static(); }
 
   // Returns true if the given dimension is dynamically-sized.
   bool is_dynamic_dimension(int dimension) const {
@@ -72,8 +88,12 @@ class Shape {
     dynamic_dimensions_[dimension] = is_dynamic;
   }
 
-  const std::vector<bool>& dynamic_dimensions() const {
+  absl::Span<const bool> dynamic_dimensions() const {
     return dynamic_dimensions_;
+  }
+
+  absl::Span<bool> mutable_dynamic_dimensions() {
+    return absl::MakeSpan(dynamic_dimensions_);
   }
 
   // Add dimension_upper_bound().
@@ -104,7 +124,7 @@ class Shape {
     dimensions_.clear();
     dynamic_dimensions_.clear();
   }
-  const std::vector<int64>& dimensions() const { return dimensions_; }
+  absl::Span<const int64> dimensions() const { return dimensions_; }
   absl::Span<int64> mutable_dimensions() { return absl::MakeSpan(dimensions_); }
 
   // Methods for accessing the tuple subshapes. This field only non-empty for
@@ -126,6 +146,19 @@ class Shape {
   Layout* mutable_layout() { return &layout_; }
   void clear_layout() { layout_.Clear(); }
 
+  // Recursively clear dynamic dimension of a shape.
+  void clear_dynamic_dimensions() {
+    if (!IsTuple()) {
+      for (int64 i = 0; i < dynamic_dimensions_.size(); ++i) {
+        dynamic_dimensions_[i] = false;
+      }
+      return;
+    }
+    for (auto& subshape : tuple_shapes_) {
+      subshape.clear_dynamic_dimensions();
+    }
+  }
+
   void Swap(Shape* other) {
     using std::swap;
     swap(*this, *other);
@@ -133,7 +166,7 @@ class Shape {
 
   void Clear() {
     element_type_ = PRIMITIVE_TYPE_INVALID;
-    dimensions_.clear();
+    clear_dimensions();
     tuple_shapes_.clear();
     clear_layout();
   }
@@ -169,9 +202,14 @@ class Shape {
       ignore_element_size_in_layout_ = true;
       return *this;
     }
+    Equal& IgnoreMemorySpaceInLayout() {
+      ignore_memory_space_in_layout_ = true;
+      return *this;
+    }
     Equal& MinorToMajorOnlyInLayout() {
       ignore_tiles_in_layout_ = true;
       ignore_element_size_in_layout_ = true;
+      ignore_memory_space_in_layout_ = true;
       return *this;
     }
     Equal& IgnoreElementType() {
@@ -186,14 +224,20 @@ class Shape {
       ignore_dynamic_dimension_ = true;
       return *this;
     }
+    Equal& IgnoreDimensions() {
+      ignore_dimensions_ = true;
+      return *this;
+    }
 
    private:
     bool ignore_layout_ = false;
     bool ignore_tiles_in_layout_ = false;
     bool ignore_element_size_in_layout_ = false;
+    bool ignore_memory_space_in_layout_ = false;
     bool ignore_element_type_ = false;
     bool ignore_fp_precision_ = false;
     bool ignore_dynamic_dimension_ = false;
+    bool ignore_dimensions_ = false;
   };
 
   // Test that all fields of the shape are the same, equivalent to Equal().
@@ -213,11 +257,11 @@ class Shape {
   // The array bounds of the dimensions. This is nonempty only for array
   // shapes. For a dynamically-sized dimension, the respective value in this
   // vector is an inclusive upper limit of the array bound.
-  std::vector<int64> dimensions_;
+  absl::InlinedVector<int64, 6> dimensions_;
 
   // This vector is the same size as 'dimensions_' and indicates whether the
   // respective dimension is dynamically sized.
-  std::vector<bool> dynamic_dimensions_;
+  absl::InlinedVector<bool, 6> dynamic_dimensions_;
 
   // The tuple element subshapes. This is nonempty only for tuple shapes.
   std::vector<Shape> tuple_shapes_;

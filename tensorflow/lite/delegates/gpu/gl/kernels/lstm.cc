@@ -43,8 +43,8 @@ namespace {
 //
 class LstmNodeShader : public NodeShader {
  public:
-  Status GenerateCode(const GenerationContext& ctx,
-                      GeneratedCode* generated_code) const final {
+  absl::Status GenerateCode(const GenerationContext& ctx,
+                            GeneratedCode* generated_code) const final {
     std::string code = R"(
       vec4 prev_state  = $input_data_1[gid.x, gid.y, gid.z]$;
 
@@ -73,13 +73,14 @@ class LstmNodeShader : public NodeShader {
     *generated_code = {
         /*parameters=*/{},
         /*objects=*/{},
+        /*shared_variables=*/{},
         /*workload=*/uint3(),
         /*workgroup=*/uint3(),
         /*source_code=*/std::move(code),
         /*input=*/IOStructure::ONLY_DEFINITIONS,
         /*output=*/IOStructure::AUTO,
     };
-    return OkStatus();
+    return absl::OkStatus();
   }
 };
 

@@ -10,7 +10,7 @@ tf_module {
   }
   member {
     name: "DType"
-    mtype: "<type \'type\'>"
+    mtype: "<class \'pybind11_builtins.pybind11_type\'>"
   }
   member {
     name: "DeviceSpec"
@@ -29,6 +29,10 @@ tf_module {
     mtype: "<type \'type\'>"
   }
   member {
+    name: "IndexedSlicesSpec"
+    mtype: "<type \'type\'>"
+  }
+  member {
     name: "Module"
     mtype: "<type \'type\'>"
   }
@@ -37,7 +41,15 @@ tf_module {
     mtype: "<type \'type\'>"
   }
   member {
+    name: "OptionalSpec"
+    mtype: "<type \'type\'>"
+  }
+  member {
     name: "RaggedTensor"
+    mtype: "<type \'type\'>"
+  }
+  member {
+    name: "RaggedTensorSpec"
     mtype: "<type \'type\'>"
   }
   member {
@@ -49,6 +61,10 @@ tf_module {
     mtype: "<type \'type\'>"
   }
   member {
+    name: "SparseTensorSpec"
+    mtype: "<type \'type\'>"
+  }
+  member {
     name: "Tensor"
     mtype: "<type \'type\'>"
   }
@@ -57,11 +73,19 @@ tf_module {
     mtype: "<type \'type\'>"
   }
   member {
+    name: "TensorArraySpec"
+    mtype: "<type \'type\'>"
+  }
+  member {
     name: "TensorShape"
     mtype: "<type \'type\'>"
   }
   member {
     name: "TensorSpec"
+    mtype: "<type \'type\'>"
+  }
+  member {
+    name: "TypeSpec"
     mtype: "<type \'type\'>"
   }
   member {
@@ -82,6 +106,10 @@ tf_module {
   }
   member {
     name: "audio"
+    mtype: "<type \'module\'>"
+  }
+  member {
+    name: "autodiff"
     mtype: "<type \'module\'>"
   }
   member {
@@ -233,6 +261,14 @@ tf_module {
     mtype: "<type \'module\'>"
   }
   member {
+    name: "mixed_precision"
+    mtype: "<type \'module\'>"
+  }
+  member {
+    name: "mlir"
+    mtype: "<type \'module\'>"
+  }
+  member {
     name: "name_scope"
     mtype: "<type \'type\'>"
   }
@@ -254,6 +290,10 @@ tf_module {
   }
   member {
     name: "optimizers"
+    mtype: "<type \'module\'>"
+  }
+  member {
+    name: "profiler"
     mtype: "<type \'module\'>"
   }
   member {
@@ -350,6 +390,10 @@ tf_module {
   }
   member {
     name: "train"
+    mtype: "<type \'module\'>"
+  }
+  member {
+    name: "types"
     mtype: "<type \'module\'>"
   }
   member {
@@ -465,6 +509,10 @@ tf_module {
     argspec: "args=[\'x\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "batch_mat_mul_v3"
+    argspec: "args=[\'x\', \'y\', \'Tout\', \'adj_x\', \'adj_y\', \'name\'], varargs=None, keywords=None, defaults=[\'False\', \'False\', \'None\'], "
+  }
+  member_method {
     name: "batch_to_space"
     argspec: "args=[\'input\', \'block_shape\', \'crops\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
@@ -546,7 +594,7 @@ tf_module {
   }
   member_method {
     name: "custom_gradient"
-    argspec: "args=[\'f\'], varargs=None, keywords=None, defaults=None"
+    argspec: "args=[\'f\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
     name: "device"
@@ -567,6 +615,14 @@ tf_module {
   member_method {
     name: "edit_distance"
     argspec: "args=[\'hypothesis\', \'truth\', \'normalize\', \'name\'], varargs=None, keywords=None, defaults=[\'True\', \'edit_distance\'], "
+  }
+  member_method {
+    name: "eig"
+    argspec: "args=[\'tensor\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
+    name: "eigvals"
+    argspec: "args=[\'tensor\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
     name: "einsum"
@@ -622,7 +678,7 @@ tf_module {
   }
   member_method {
     name: "function"
-    argspec: "args=[\'func\', \'input_signature\', \'autograph\', \'experimental_autograph_options\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'True\', \'None\'], "
+    argspec: "args=[\'func\', \'input_signature\', \'autograph\', \'jit_compile\', \'experimental_implements\', \'experimental_autograph_options\', \'experimental_relax_shapes\', \'experimental_compile\', \'experimental_follow_type_hints\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'True\', \'None\', \'None\', \'None\', \'False\', \'None\', \'None\'], "
   }
   member_method {
     name: "gather"
@@ -633,12 +689,20 @@ tf_module {
     argspec: "args=[\'params\', \'indices\', \'batch_dims\', \'name\'], varargs=None, keywords=None, defaults=[\'0\', \'None\'], "
   }
   member_method {
+    name: "get_current_name_scope"
+    argspec: "args=[], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
     name: "get_logger"
     argspec: "args=[], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "get_static_value"
     argspec: "args=[\'tensor\', \'partial\'], varargs=None, keywords=None, defaults=[\'False\'], "
+  }
+  member_method {
+    name: "grad_pass_through"
+    argspec: "args=[\'f\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "gradients"
@@ -689,6 +753,10 @@ tf_module {
     argspec: "args=[], varargs=None, keywords=None, defaults=None"
   }
   member_method {
+    name: "inside_function"
+    argspec: "args=[], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
     name: "is_tensor"
     argspec: "args=[\'x\'], varargs=None, keywords=None, defaults=None"
   }
@@ -702,7 +770,7 @@ tf_module {
   }
   member_method {
     name: "linspace"
-    argspec: "args=[\'start\', \'stop\', \'num\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+    argspec: "args=[\'start\', \'stop\', \'num\', \'name\', \'axis\'], varargs=None, keywords=None, defaults=[\'None\', \'0\'], "
   }
   member_method {
     name: "load_library"
@@ -729,12 +797,16 @@ tf_module {
     argspec: "args=[\'tensor\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
+    name: "make_tensor_proto"
+    argspec: "args=[\'values\', \'dtype\', \'shape\', \'verify_shape\', \'allow_broadcast\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'False\', \'False\'], "
+  }
+  member_method {
     name: "map_fn"
-    argspec: "args=[\'fn\', \'elems\', \'dtype\', \'parallel_iterations\', \'back_prop\', \'swap_memory\', \'infer_shape\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'True\', \'False\', \'True\', \'None\'], "
+    argspec: "args=[\'fn\', \'elems\', \'dtype\', \'parallel_iterations\', \'back_prop\', \'swap_memory\', \'infer_shape\', \'name\', \'fn_output_signature\'], varargs=None, keywords=None, defaults=[\'None\', \'None\', \'True\', \'False\', \'True\', \'None\', \'None\'], "
   }
   member_method {
     name: "matmul"
-    argspec: "args=[\'a\', \'b\', \'transpose_a\', \'transpose_b\', \'adjoint_a\', \'adjoint_b\', \'a_is_sparse\', \'b_is_sparse\', \'name\'], varargs=None, keywords=None, defaults=[\'False\', \'False\', \'False\', \'False\', \'False\', \'False\', \'None\'], "
+    argspec: "args=[\'a\', \'b\', \'transpose_a\', \'transpose_b\', \'adjoint_a\', \'adjoint_b\', \'a_is_sparse\', \'b_is_sparse\', \'output_type\', \'name\'], varargs=None, keywords=None, defaults=[\'False\', \'False\', \'False\', \'False\', \'False\', \'False\', \'None\', \'None\'], "
   }
   member_method {
     name: "matrix_square_root"
@@ -770,7 +842,7 @@ tf_module {
   }
   member_method {
     name: "nondifferentiable_batch_function"
-    argspec: "args=[\'num_batch_threads\', \'max_batch_size\', \'batch_timeout_micros\', \'allowed_batch_sizes\', \'max_enqueued_batches\', \'autograph\'], varargs=None, keywords=None, defaults=[\'None\', \'10\', \'True\'], "
+    argspec: "args=[\'num_batch_threads\', \'max_batch_size\', \'batch_timeout_micros\', \'allowed_batch_sizes\', \'max_enqueued_batches\', \'autograph\', \'enable_large_batch_splitting\'], varargs=None, keywords=None, defaults=[\'None\', \'10\', \'True\', \'True\'], "
   }
   member_method {
     name: "norm"
@@ -817,6 +889,10 @@ tf_module {
     argspec: "args=[\'func\', \'inp\', \'Tout\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "quantize_and_dequantize_v4"
+    argspec: "args=[\'input\', \'input_min\', \'input_max\', \'signed_input\', \'num_bits\', \'range_given\', \'round_mode\', \'narrow_range\', \'axis\', \'name\'], varargs=None, keywords=None, defaults=[\'True\', \'8\', \'False\', \'HALF_TO_EVEN\', \'False\', \'-1\', \'None\'], "
+  }
+  member_method {
     name: "range"
     argspec: "args=[\'start\', \'limit\', \'delta\', \'dtype\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'1\', \'None\', \'range\'], "
   }
@@ -827,6 +903,10 @@ tf_module {
   member_method {
     name: "realdiv"
     argspec: "args=[\'x\', \'y\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
+    name: "recompute_grad"
+    argspec: "args=[\'f\'], varargs=None, keywords=None, defaults=None"
   }
   member_method {
     name: "reduce_all"
@@ -865,6 +945,10 @@ tf_module {
     argspec: "args=[\'base_type\', \'conversion_func\', \'priority\'], varargs=None, keywords=None, defaults=[\'100\'], "
   }
   member_method {
+    name: "repeat"
+    argspec: "args=[\'input\', \'repeats\', \'axis\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
+  }
+  member_method {
     name: "required_space_to_batch_paddings"
     argspec: "args=[\'input_shape\', \'block_shape\', \'base_paddings\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
   }
@@ -882,7 +966,7 @@ tf_module {
   }
   member_method {
     name: "roll"
-    argspec: "args=[\'input\', \'shift\', \'axis\'], varargs=None, keywords=None, defaults=None"
+    argspec: "args=[\'input\', \'shift\', \'axis\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
     name: "round"
@@ -957,6 +1041,10 @@ tf_module {
     argspec: "args=[\'input\', \'block_shape\', \'paddings\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "sparse_segment_sum_grad"
+    argspec: "args=[\'grad\', \'indices\', \'segment_ids\', \'output_dim0\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
     name: "split"
     argspec: "args=[\'value\', \'num_or_size_splits\', \'axis\', \'num\', \'name\'], varargs=None, keywords=None, defaults=[\'0\', \'None\', \'split\'], "
   }
@@ -989,6 +1077,10 @@ tf_module {
     argspec: "args=[\'x\', \'y\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
+    name: "switch_case"
+    argspec: "args=[\'branch_index\', \'branch_fns\', \'default\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'switch_case\'], "
+  }
+  member_method {
     name: "tan"
     argspec: "args=[\'x\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
@@ -998,6 +1090,14 @@ tf_module {
   }
   member_method {
     name: "tensor_scatter_nd_add"
+    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
+    name: "tensor_scatter_nd_max"
+    argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
+  }
+  member_method {
+    name: "tensor_scatter_nd_min"
     argspec: "args=[\'tensor\', \'indices\', \'updates\', \'name\'], varargs=None, keywords=None, defaults=[\'None\'], "
   }
   member_method {
@@ -1041,6 +1141,10 @@ tf_module {
     argspec: "args=[\'tensors\', \'control_inputs\', \'name\'], varargs=None, keywords=None, defaults=[\'None\', \'None\'], "
   }
   member_method {
+    name: "type_spec_from_value"
+    argspec: "args=[\'value\'], varargs=None, keywords=None, defaults=None"
+  }
+  member_method {
     name: "unique"
     argspec: "args=[\'x\', \'out_idx\', \'name\'], varargs=None, keywords=None, defaults=[\"<dtype: \'int32\'>\", \'None\'], "
   }
@@ -1062,7 +1166,7 @@ tf_module {
   }
   member_method {
     name: "vectorized_map"
-    argspec: "args=[\'fn\', \'elems\'], varargs=None, keywords=None, defaults=None"
+    argspec: "args=[\'fn\', \'elems\', \'fallback_to_while_loop\'], varargs=None, keywords=None, defaults=[\'True\'], "
   }
   member_method {
     name: "where"

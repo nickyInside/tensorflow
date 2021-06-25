@@ -20,8 +20,10 @@ limitations under the License.
 #include <set>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/types/span.h"
 #include "tensorflow/compiler/xla/literal.h"
+#include "tensorflow/compiler/xla/service/executable.h"
 #include "tensorflow/compiler/xla/service/shaped_buffer.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/types.h"
@@ -30,6 +32,7 @@ limitations under the License.
 #include "tensorflow/core/platform/stream_executor_no_cuda.h"
 #include "tensorflow/core/platform/thread_annotations.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/stream_executor/device_memory.h"
 
 namespace xla {
 
@@ -49,7 +52,11 @@ class TransferManager {
   // pre-allocated by the host, e.g. TransferLiteralToDevice, without the user
   // needing to consider device-specific behaviors.
   virtual Shape HostShapeToDeviceShape(const Shape& host_shape) const {
-    return host_shape;
+    // Strips off any preexisting tiling or memory space information.
+    // TODO(phawkins): fix clients not to including tiling or memory space
+    // information in shapes passed to this function and turn this into an
+    // assertion.
+    return ShapeUtil::DeviceShapeToHostShape(host_shape);
   }
 
   // Base class for specifying platform specific transfer metadata that can be
@@ -182,16 +189,25 @@ class TransferManager {
       const se::DeviceMemoryBase& source,
       const TransferMetadata* transfer_metadata = nullptr);
 
+  // Read from a device buffer and update the dynamic dimension sizes of
+  // `host_shape` and `device_shape`. The function takes in bounded dynamic
+  // shapes, and returns static shapes with dynamic shapes updated.
+  // The shape of the buffer also have to be compatible with the host shape and
+  // device shape.
+  virtual Status ReadDynamicShapes(se::Stream* stream,
+                                   ShapedBuffer* device_buffer,
+                                   Shape* device_shape);
+
   // Transfers the given literal into the Infeed interface of the device,
   // using the given executor.
   virtual Status TransferLiteralToInfeed(se::StreamExecutor* executor,
                                          const LiteralSlice& literal) = 0;
 
   // Transfers the given literal from the Outfeed interface of the device,
-  // using the given executor.
+  // using the given executor. The shape and layout are determined by the
+  // shape and layout of `literal`.
   virtual Status TransferLiteralFromOutfeed(
-      se::StreamExecutor* executor, const Shape& literal_shape,
-      MutableBorrowingLiteral literal) = 0;
+      se::StreamExecutor* executor, MutableBorrowingLiteral literal) = 0;
 
   // Resets the devices associated with this transfer manager.
   virtual Status ResetDevices(
@@ -210,6 +226,9 @@ class TransferManager {
   // rather than writing all subbuffers. This method is always asynchronous.
   Status WriteRootTupleIndexTable(se::Stream* stream,
                                   const ShapedBuffer& device_buffer);
+  Status WriteRootTupleIndexTable(
+      se::Stream* stream,
+      const ShapeTree<MaybeOwningDeviceMemory>& buffer_tree);
 
   // Determines the byte size requirement for the given shape on the underlying
   // architecture. This will be used to allocate an appropriately sized memory
@@ -225,12 +244,15 @@ class TransferManager {
   virtual StatusOr<Shape> ChooseCompactLayoutForShape(
       const Shape& host_shape) const;
 
+  typedef std::function<Shape(const Shape&)> DeviceShapeRepresentationFn;
+
   // Allocates a ScopedShapedBuffer which can hold data with the given on-host
   // shape. The on-device shape may be different as indicated by
   // HostShapeToDeviceShape.
   StatusOr<ScopedShapedBuffer> AllocateScopedShapedBuffer(
       const Shape& on_host_shape, se::DeviceMemoryAllocator* allocator,
-      int device_ordinal);
+      int device_ordinal,
+      DeviceShapeRepresentationFn shape_representation_fn = nullptr);
 
   // The given ShapedBuffer holds a handle to allocated memory, but it is not
   // in the general case legal to immediately copy or access that allocated
@@ -252,6 +274,13 @@ class TransferManager {
     return false;
   }
 
+  // Equivalent to CanShapedBufferBeAccessedNow but for a single device buffer.
+  virtual bool CanBufferBeAccessedNow(
+      se::StreamExecutor* executor,
+      const se::DeviceMemoryBase& device_buffer) const {
+    return false;
+  }
+
   /////
   // The TransferManager class also serves as a point to register objects for
   // the various platforms.
@@ -270,6 +299,13 @@ class TransferManager {
   static StatusOr<TransferManager*> GetForPlatform(
       const se::Platform* platform);
 
+  // Writes the given device-memory pointers in 'elements' to the given region
+  // to construct a tuple index table in the platform-specific tuple
+  // representation.
+  virtual Status WriteSingleTupleIndexTable(
+      se::Stream* stream, absl::Span<const se::DeviceMemoryBase> elements,
+      const Shape& shape, se::DeviceMemoryBase* region) = 0;
+
  protected:
   // Transfer a memory block of the given size from the device source into the
   // 'destination' buffer.
@@ -287,13 +323,6 @@ class TransferManager {
                                         const void* source,
                                         se::DeviceMemoryBase* destination);
 
-  // Writes the given device-memory pointers in 'elements' to the given region
-  // to construct a tuple index table in the platform-specific tuple
-  // representation.
-  virtual Status WriteSingleTupleIndexTable(
-      se::Stream* stream, absl::Span<const se::DeviceMemoryBase> elements,
-      const Shape& shape, se::DeviceMemoryBase* region) = 0;
-
  private:
   // The mutex that guards the platform-to-transfer manager map.
   static tensorflow::mutex platform_transfer_manager_mutex_;
@@ -307,7 +336,8 @@ class TransferManager {
   };
 
   // Map from platform kind to transfer manager singleton.
-  static std::map<se::Platform::Id, State>* GetPlatformTransferManagers();
+  static absl::flat_hash_map<se::Platform::Id, State>*
+  GetPlatformTransferManagers();
 };
 
 }  // namespace xla

@@ -15,6 +15,7 @@ limitations under the License.
 
 // XLA specific pooling ops.
 
+#include "tensorflow/compiler/tf2xla/mlir_xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
@@ -31,7 +32,8 @@ limitations under the License.
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/kernels/pooling_ops_common.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/util/tensor_format.h"
 
 namespace tensorflow {
 namespace {
@@ -73,7 +75,7 @@ class PoolingOp : public XlaOpKernel {
   int num_dims() const { return num_spatial_dims_ + 2; }
 
  protected:
-  xla::StatusOr<std::vector<int64>> GetKernelSize(XlaOpKernelContext* ctx) {
+  StatusOr<std::vector<int64>> GetKernelSize(XlaOpKernelContext* ctx) {
     if (ctx->num_inputs() == 1) {
       return ksize_;
     }
@@ -97,7 +99,7 @@ class PoolingOp : public XlaOpKernel {
     return ksize;
   }
 
-  xla::StatusOr<std::vector<int64>> GetStride(XlaOpKernelContext* ctx) {
+  StatusOr<std::vector<int64>> GetStride(XlaOpKernelContext* ctx) {
     if (ctx->num_inputs() == 1) {
       return stride_;
     }
@@ -157,6 +159,13 @@ class MaxPoolOp : public PoolingOp {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("data_format", &data_format_str));
     OP_REQUIRES(ctx, FormatFromString(data_format_str, &data_format_),
                 errors::InvalidArgument("Invalid data format"));
+    OP_REQUIRES(
+        ctx,
+        data_format_ != FORMAT_NCHW_VECT_C &&
+            data_format_ != FORMAT_NHWC_VECT_W,
+        errors::Unimplemented("XLA does not support the VECT_* data formats. "
+                              "Returning unimplemented from MaxPool to keep "
+                              "Tensorflow's intended optimized MaxPool here."));
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
@@ -249,12 +258,7 @@ class AvgPool2DOp : public AvgPoolOp {
 };
 REGISTER_XLA_OP(Name("AvgPool"), AvgPool2DOp);
 
-class AvgPool3DOp : public AvgPoolOp {
- public:
-  explicit AvgPool3DOp(OpKernelConstruction* ctx)
-      : AvgPoolOp(ctx, /*num_spatial_dims=*/3) {}
-};
-REGISTER_XLA_OP(Name("AvgPool3D"), AvgPool3DOp);
+REGISTER_XLA_OP(Name("AvgPool3D"), MlirXlaOpKernel);
 
 // The operation to compute MaxPool gradients.
 // It takes three inputs:
@@ -329,7 +333,7 @@ class MaxPoolGradOp : public XlaOpKernel {
         (padding_ == VALID) ? xla::Padding::kValid : xla::Padding::kSame;
 
     // Create a MaxPool operation to check the expected resulting shape, and
-    // then throw away the operation because we don't actually neeed it here.
+    // then throw away the operation because we don't actually need it here.
     TensorShape expected_out_shape;
     auto pooling =
         xla::MaxPool(ctx->Input(0), ksize_, stride_, xla_padding,
@@ -378,12 +382,7 @@ REGISTER_XLA_OP(Name("MaxPoolGradV2")
                     .CompileTimeConstantInput("strides"),
                 MaxPool2DGradOp);
 
-class MaxPool3DGradOp : public MaxPoolGradOp {
- public:
-  explicit MaxPool3DGradOp(OpKernelConstruction* ctx)
-      : MaxPoolGradOp(ctx, /*num_spatial_dims=*/3) {}
-};
-REGISTER_XLA_OP(Name("MaxPool3DGrad"), MaxPool3DGradOp);
+REGISTER_XLA_OP(Name("MaxPool3DGrad"), MlirXlaOpKernel);
 
 // Average-pooling gradient
 class AvgPoolGradOp : public XlaOpKernel {

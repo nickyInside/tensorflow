@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/stream_executor/cuda/cuda_platform.h"
 
+#include "absl/base/call_once.h"
 #include "absl/base/const_init.h"
 #include "absl/memory/memory.h"
 #include "absl/strings/str_cat.h"
@@ -76,12 +77,10 @@ CudaPlatform::~CudaPlatform() {}
 void CudaPlatform::InspectNumaNodes() {
   // To get NUMA node information, we need to create all executors, so we can
   // examine their device descriptions to see their bus assignments.
-  static std::once_flag once;
-  std::call_once(once, [&] {
-    StreamExecutorConfig config;
+  static absl::once_flag once;
+  absl::call_once(once, [&] {
     for (int i = 0; i < VisibleDeviceCount(); i++) {
-      config.ordinal = i;
-      StreamExecutor* exec = GetExecutor(config).ValueOrDie();
+      StreamExecutor* exec = *ExecutorForDevice(i);
       if (i == 0) {
         // NUMA nodes may not start at 0, so set the minimum node  based on the
         // first executor we see.
@@ -103,9 +102,7 @@ int CudaPlatform::BusCount() {
 }
 
 int CudaPlatform::DeviceToBus(int device_ordinal) {
-  StreamExecutorConfig config;
-  config.ordinal = device_ordinal;
-  StreamExecutor* exec = GetExecutor(config).ValueOrDie();
+  StreamExecutor* exec = *ExecutorForDevice(device_ordinal);
   return exec->GetDeviceDescription().numa_node() - min_numa_node_;
 }
 
@@ -115,9 +112,7 @@ port::StatusOr<StreamExecutor*> CudaPlatform::FirstExecutorForBus(
   CHECK_LT(bus_ordinal, BusCount()) << "bus ordinal out of available range";
   for (int i = 0; i < VisibleDeviceCount(); i++) {
     if (DeviceToBus(i) == bus_ordinal) {
-      StreamExecutorConfig config;
-      config.ordinal = i;
-      return GetExecutor(config).ValueOrDie();
+      return *ExecutorForDevice(i);
     }
   }
 
@@ -138,7 +133,7 @@ int CudaPlatform::VisibleDeviceCount() const {
   return GpuDriver::GetDeviceCount();
 }
 
-const string& CudaPlatform::Name() const { return name_; }
+const std::string& CudaPlatform::Name() const { return name_; }
 
 port::StatusOr<std::unique_ptr<DeviceDescription>>
 CudaPlatform::DescriptionForDevice(int ordinal) const {
@@ -171,8 +166,9 @@ port::StatusOr<StreamExecutor*> CudaPlatform::GetExecutor(
 port::StatusOr<std::unique_ptr<StreamExecutor>>
 CudaPlatform::GetUncachedExecutor(const StreamExecutorConfig& config) {
   auto executor = absl::make_unique<StreamExecutor>(
-      this, absl::make_unique<GpuExecutor>(config.plugin_config));
-  auto init_status = executor->Init(config.ordinal, config.device_options);
+      this, absl::make_unique<GpuExecutor>(config.plugin_config),
+      config.ordinal);
+  auto init_status = executor->Init(config.device_options);
   if (!init_status.ok()) {
     return port::Status(
         port::error::INTERNAL,

@@ -16,9 +16,9 @@ limitations under the License.
 #define TENSORFLOW_LITE_DELEGATES_FLEX_UTIL_H_
 
 #include "tensorflow/c/c_api_internal.h"
-#include "tensorflow/lite/c/c_api_internal.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/lite/c/common.h"
 
 namespace tflite {
 namespace flex {
@@ -40,6 +40,9 @@ TF_DataType GetTensorFlowDataType(TfLiteType type);
 
 // Returns the TfLiteType that corresponds to the given TF C API Data type.
 TfLiteType GetTensorFlowLiteType(TF_DataType);
+
+// Returns the TF type name that corresponds to the given TfLiteType.
+const char* TfLiteTypeToTfTypeName(TfLiteType type);
 
 }  // namespace flex
 }  // namespace tflite

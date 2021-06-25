@@ -48,9 +48,8 @@ class ResourceOpKernel : public OpKernel {
       // The resource variant of the op may be placed on non-CPU devices, but
       // this allocation is always on the host. Fortunately we don't need it in
       // the resource case.
-      OP_REQUIRES_OK(context,
-                     context->allocate_persistent(DT_STRING, TensorShape({2}),
-                                                  &handle_, nullptr));
+      OP_REQUIRES_OK(context, context->allocate_temp(
+                                  DT_STRING, TensorShape({2}), &tensor_));
     }
   }
 
@@ -70,23 +69,23 @@ class ResourceOpKernel : public OpKernel {
     }
   }
 
-  void Compute(OpKernelContext* context) override LOCKS_EXCLUDED(mu_) {
+  void Compute(OpKernelContext* context) override TF_LOCKS_EXCLUDED(mu_) {
     mutex_lock l(mu_);
     if (resource_ == nullptr) {
       ResourceMgr* mgr = context->resource_manager();
       OP_REQUIRES_OK(context, cinfo_.Init(mgr, def()));
 
       T* resource;
-      OP_REQUIRES_OK(
-          context,
-          mgr->LookupOrCreate<T>(cinfo_.container(), cinfo_.name(), &resource,
-                                 [this](T** ret) EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-                                   Status s = CreateResource(ret);
-                                   if (!s.ok() && *ret != nullptr) {
-                                     CHECK((*ret)->Unref());
-                                   }
-                                   return s;
-                                 }));
+      OP_REQUIRES_OK(context,
+                     mgr->LookupOrCreate<T>(
+                         cinfo_.container(), cinfo_.name(), &resource,
+                         [this](T** ret) TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
+                           Status s = CreateResource(ret);
+                           if (!s.ok() && *ret != nullptr) {
+                             CHECK((*ret)->Unref());
+                           }
+                           return s;
+                         }));
 
       Status s = VerifyResource(resource);
       if (TF_PREDICT_FALSE(!s.ok())) {
@@ -96,7 +95,7 @@ class ResourceOpKernel : public OpKernel {
       }
 
       if (!has_resource_type_) {
-        auto h = handle_.AccessTensor(context)->template flat<string>();
+        auto h = tensor_.template flat<tstring>();
         h(0) = cinfo_.container();
         h(1) = cinfo_.name();
       }
@@ -105,22 +104,23 @@ class ResourceOpKernel : public OpKernel {
     if (has_resource_type_) {
       OP_REQUIRES_OK(context, MakeResourceHandleToOutput(
                                   context, 0, cinfo_.container(), cinfo_.name(),
-                                  MakeTypeIndex<T>()));
+                                  TypeIndex::Make<T>()));
     } else {
-      context->set_output_ref(0, &mu_, handle_.AccessTensor(context));
+      context->set_output_ref(0, &mu_, &tensor_);
     }
   }
 
  protected:
   // Variables accessible from subclasses.
   mutex mu_;
-  ContainerInfo cinfo_ GUARDED_BY(mu_);
-  T* resource_ GUARDED_BY(mu_) = nullptr;
+  ContainerInfo cinfo_ TF_GUARDED_BY(mu_);
+  T* resource_ TF_GUARDED_BY(mu_) = nullptr;
 
  private:
   // Must return a T descendant allocated with new that ResourceOpKernel will
   // take ownership of.
-  virtual Status CreateResource(T** resource) EXCLUSIVE_LOCKS_REQUIRED(mu_) = 0;
+  virtual Status CreateResource(T** resource)
+      TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) = 0;
 
   // During the first Compute(), resource is either created or looked up using
   // shared_name. In the latter case, the resource found should be verified if
@@ -129,7 +129,7 @@ class ResourceOpKernel : public OpKernel {
   // inconsistent capacities.
   virtual Status VerifyResource(T* resource) { return Status::OK(); }
 
-  PersistentTensor handle_ GUARDED_BY(mu_);
+  Tensor tensor_ TF_GUARDED_BY(mu_);
 
   // Is the output of the operator of type DT_RESOURCE?
   bool has_resource_type_;

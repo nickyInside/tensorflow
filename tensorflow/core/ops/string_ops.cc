@@ -80,6 +80,21 @@ REGISTER_OP("StringToHashBucketFast")
     .Attr("num_buckets: int >= 1")
     .SetShapeFn(shape_inference::UnchangedShape);
 
+REGISTER_OP("_TensorToHashBucketFast")
+    .Input("input: T")
+    .Output("output: int64")
+    .Attr("T: {int8, uint8, int16, uint16, int32, uint32, int64, uint64}")
+    .Attr("num_buckets: int >= 1")
+    .SetShapeFn(shape_inference::UnchangedShape)
+    .Doc(R"doc(
+Internal operation which is a composition of converting the tensor to a string
+tensor (AsString) and then calling hash functions (StringToHashBucketFast):
+reserved for internal use.
+
+Do not invoke this operator directly in Python. A fusion optimization is
+expected to create these operators.
+)doc");
+
 REGISTER_OP("StringToHashBucketStrong")
     .Input("input: string")
     .Output("output: int64")
@@ -101,12 +116,20 @@ REGISTER_OP("ReduceJoin")
     .Output("output: string")
     .SetShapeFn(shape_inference::ReductionShape);
 
+REGISTER_OP("UnsortedSegmentJoin")
+    .Input("inputs: string")
+    .Input("segment_ids: Tindices")
+    .Input("num_segments: Tnumsegments")
+    .Attr("separator: string = ''")
+    .Attr("Tindices: {int32,int64}")
+    .Attr("Tnumsegments: {int32,int64} = DT_INT32")
+    .Output("output: string")
+    .SetShapeFn(shape_inference::UnsortedSegmentReductionShapeFn);
+
 REGISTER_OP("AsString")
     .Input("input: T")
     .Output("output: string")
-    .Attr(
-        "T: {int8, int16, int32, int64, complex64, complex128, float, double, "
-        "bool}")
+    .Attr("T: {realnumbertype, complex64, complex128, bool, variant}")
     .Attr("precision: int = -1")
     .Attr("scientific: bool = false")
     .Attr("shortest: bool = false")
@@ -251,8 +274,10 @@ REGISTER_OP("Substr")
       ShapeHandle pos_shape = c->input(1);
       ShapeHandle len_shape = c->input(2);
       ShapeHandle unused;
-      // Check that pos/len have same rank
-      TF_RETURN_IF_ERROR(c->WithRank(pos_shape, c->Rank(len_shape), &unused));
+      // If len rank is known, check that pos and len have the same rank
+      if (c->RankKnown(len_shape)) {
+        TF_RETURN_IF_ERROR(c->WithRank(pos_shape, c->Rank(len_shape), &unused));
+      }
       // Check that dimensions are equal
       for (int32 i = 0; i < c->Rank(pos_shape); ++i) {
         DimensionHandle pos_dim = c->Dim(pos_shape, i);
@@ -352,6 +377,28 @@ REGISTER_OP("UnicodeDecodeWithOffsets")
       DimensionHandle num_chars = c->UnknownDim();
       c->set_output(1, c->Vector(num_chars));
       c->set_output(2, c->Vector(num_chars));
+      return Status::OK();
+    });
+
+REGISTER_OP("StringNGrams")
+    .Attr("separator: string")
+    .Attr("ngram_widths: list(int) >= 0")
+    .Attr("left_pad: string")
+    .Attr("right_pad: string")
+    .Attr("pad_width: int")
+    .Attr("preserve_short_sequences: bool")
+    .Attr("Tsplits: {int32, int64} = DT_INT64")
+    .Input("data: string")
+    .Input("data_splits: Tsplits")
+    .Output("ngrams: string")
+    .Output("ngrams_splits: Tsplits")
+    .SetShapeFn([](InferenceContext* c) {
+      c->set_output(0, c->UnknownShapeOfRank(1));
+      ShapeHandle data = c->input(0);
+      TF_RETURN_IF_ERROR(c->WithRank(data, 1, &data));
+      ShapeHandle data_splits = c->input(1);
+      TF_RETURN_IF_ERROR(c->WithRank(data_splits, 1, &data_splits));
+      c->set_output(1, data_splits);
       return Status::OK();
     });
 

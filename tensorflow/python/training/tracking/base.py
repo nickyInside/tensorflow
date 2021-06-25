@@ -31,8 +31,9 @@ from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import gen_io_ops as io_ops
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training.saving import saveable_object
-from tensorflow.python.util import nest
+from tensorflow.python.util import tf_contextlib
 from tensorflow.python.util import tf_decorator
+from tensorflow.python.util.tf_export import tf_export
 
 # Key where the object graph proto is saved in a TensorBundle
 OBJECT_GRAPH_PROTO_KEY = "_CHECKPOINTABLE_OBJECT_GRAPH"
@@ -44,16 +45,54 @@ OBJECT_GRAPH_PROTO_KEY = "_CHECKPOINTABLE_OBJECT_GRAPH"
 VARIABLE_VALUE_KEY = "VARIABLE_VALUE"
 OBJECT_CONFIG_JSON_KEY = "OBJECT_CONFIG_JSON"
 
-TrackableReference = collections.namedtuple(
-    "TrackableReference",
-    [
-        # The local name for this dependency.
-        "name",
-        # The Trackable object being referenced.
-        "ref"
-    ])
+
+@tf_export("__internal__.tracking.TrackableReference", v1=[])
+class TrackableReference(
+    collections.namedtuple("TrackableReference", ["name", "ref"])):
+  """A named reference to a trackable object for use with the `Trackable` class.
+
+  These references mark named `Trackable` dependencies of a `Trackable` object
+  and should be created when overriding `Trackable._checkpoint_dependencies`.
+
+  Attributes:
+    name: The local name for this dependency.
+    ref: The `Trackable` object being referenced.
+  """
 
 
+# TODO(bfontain):  Update once sharded initialization interface is finalized.
+ShardInfo = collections.namedtuple(
+    "CheckpointInitialValueShardInfo", ["shape", "offset"])
+
+
+@tf_export("__internal__.tracking.CheckpointInitialValueCallable", v1=[])
+class CheckpointInitialValueCallable(object):
+  """A callable object that returns a CheckpointInitialValue.
+
+  See CheckpointInitialValue for more information.
+  """
+
+  def __init__(self, checkpoint_position):
+    self._checkpoint_position = checkpoint_position
+
+  @property
+  def checkpoint_position(self):
+    return self._checkpoint_position
+
+  def __call__(self, shape=None, dtype=None, shard_info=None):
+    # Note that the signature here is for compatibility with normal callable
+    # initializers which take shape and dtype. Although dtype isn't used, it
+    # will get passed in by a functool.partial_wrapper in places like
+    # base_layer_utils.py's make_variable.
+    return CheckpointInitialValue(
+        self._checkpoint_position, shape, shard_info=shard_info)
+
+  @property
+  def restore_uid(self):
+    return self._checkpoint_position.restore_uid
+
+
+@tf_export("__internal__.tracking.CheckpointInitialValue", v1=[])
 class CheckpointInitialValue(ops.Tensor):
   """Tensor wrapper for managing update UIDs in `Variables`.
 
@@ -67,12 +106,16 @@ class CheckpointInitialValue(ops.Tensor):
   how `CheckpointInitialValue` is used.
   """
 
-  def __init__(self, checkpoint_position, shape=None):
-    self.wrapped_value = checkpoint_position.value_tensors()[VARIABLE_VALUE_KEY]
-    if shape:
-      # We need to set the static shape information on the initializer if
-      # possible so we don't get a variable with an unknown shape.
-      self.wrapped_value.set_shape(shape)
+  def __init__(self, checkpoint_position, shape=None, shard_info=None):
+    if shard_info:
+      full_shape_str = " ".join("%d" % d for d in shape) + " "
+      slice_spec = ":".join(
+          "%d,%d" % (o, s) for o, s in zip(shard_info.offset, shard_info.shape))
+      shape_and_slice = full_shape_str + slice_spec
+    else:
+      shape_and_slice = ""
+    self.wrapped_value = checkpoint_position.value_tensors(
+        {VARIABLE_VALUE_KEY: shape_and_slice})[VARIABLE_VALUE_KEY]
     self._checkpoint_position = checkpoint_position
 
   def __getattr__(self, attr):
@@ -190,6 +233,8 @@ class PythonStringStateSaveable(PythonStateSaveable):
 class CheckpointPosition(object):
   """Indicates a position within a `_CheckpointRestoreCoordinator`."""
 
+  __slots__ = ["_checkpoint", "_proto_id"]
+
   def __init__(self, checkpoint, proto_id):
     """Specify an object within a checkpoint.
 
@@ -249,7 +294,12 @@ class CheckpointPosition(object):
                       original_variable=trackable,
                       slot_variable_id=slot_restoration.slot_variable_id,
                       slot_name=slot_restoration.slot_name))
-        else:
+
+        # `optimizer_object` can be a `Checkpoint` when user only needs the
+        # attributes the optimizer holds, such as `iterations`. In those cases,
+        # it would not have the optimizer's `_create_or_restore_slot_variable`
+        # method.
+        elif hasattr(optimizer_object, "_create_or_restore_slot_variable"):
           optimizer_object._create_or_restore_slot_variable(  # pylint: disable=protected-access
               slot_variable_position=CheckpointPosition(
                   checkpoint=checkpoint,
@@ -279,11 +329,17 @@ class CheckpointPosition(object):
             attributes[0].name == VARIABLE_VALUE_KEY and
             not self.object_proto.children)
 
-  def value_tensors(self):
+  def value_tensors(self, shape_and_slices=None):
     """Create value `Tensor`s for this object's attributes.
 
     Does not require that the Python object has been created. Used for
     restore-on-create when executing eagerly.
+
+    Args:
+      shape_and_slices: A dict mapping from object attribute names to a shape
+        and slice string that will be passed to a RestoreV2 op. If the dict is
+        None or if an object attribute is not in the dict, the full tensor will
+        be restored.
 
     Returns:
       A dictionary mapping from object attribute names to `Tensor`s.
@@ -293,20 +349,26 @@ class CheckpointPosition(object):
       checkpoint_key = serialized_tensor.checkpoint_key
       dtype = self._checkpoint.dtype_map[checkpoint_key]
       base_type = dtype.base_dtype
+      io_device = self._checkpoint.options.experimental_io_device or "cpu:0"
       with ops.init_scope():
-        with ops.device("/cpu:0"):
-          # Run the restore itself on the CPU.
+        with ops.device(io_device):
+          # Run the restore itself on the io_device(CPU or specified).
+          if (shape_and_slices is not None and
+              serialized_tensor.name in shape_and_slices):
+            shape_and_slice = shape_and_slices[serialized_tensor.name]
+          else:
+            shape_and_slice = ""
           value, = io_ops.restore_v2(
               prefix=self._checkpoint.save_path_tensor,
               tensor_names=[checkpoint_key],
-              shape_and_slices=[""],
+              shape_and_slices=[shape_and_slice],
               dtypes=[base_type],
               name="%s_checkpoint_read" % (serialized_tensor.name,))
         # Copy the value to the current device if necessary.
         value_tensors[serialized_tensor.name] = array_ops.identity(value)
-      return value_tensors
+    return value_tensors
 
-  def _gather_ops_or_named_saveables(self):
+  def gather_ops_or_named_saveables(self):
     """Looks up or creates SaveableObjects which don't have cached ops."""
     saveables = self.trackable._gather_saveables_for_checkpoint()  # pylint: disable=protected-access
     # Name saveables based on the name this object had when it was checkpointed.
@@ -352,7 +414,6 @@ class CheckpointPosition(object):
         if serialized_tensor.checkpoint_key not in saveable.name:
           saveable = None
           del saveables_cache[self.trackable]
-          break
       if saveable is None:
         # If there was no cached SaveableObject, we should check if the Python
         # object has the attribute.
@@ -390,7 +451,7 @@ class CheckpointPosition(object):
       eagerly.
     """
     (restore_ops, tensor_saveables,
-     python_saveables) = self._gather_ops_or_named_saveables()
+     python_saveables) = self.gather_ops_or_named_saveables()
     restore_ops.extend(
         self._checkpoint.restore_saveables(tensor_saveables, python_saveables))
     return restore_ops
@@ -414,6 +475,17 @@ class CheckpointPosition(object):
   def __repr__(self):
     return repr(self.object_proto)
 
+  def value_shape(self):
+    """The shape of the VARIABLE_VALUE tensor.
+
+    Returns:
+      If found a TensorShape object, otherwise None.
+    """
+    for serialized_tensor in self.object_proto.attributes:
+      if serialized_tensor.name == VARIABLE_VALUE_KEY:
+        return self._checkpoint.shape_map[serialized_tensor.checkpoint_key]
+    return None
+
 
 _DeferredSlotVariableRestoration = collections.namedtuple(
     "_DeferredSlotVariableRestoration", [
@@ -433,6 +505,7 @@ _SlotVariableRestoration = collections.namedtuple(
     ])
 
 
+@tf_export("__internal__.tracking.no_automatic_dependency_tracking", v1=[])
 def no_automatic_dependency_tracking(method):
   """Disables automatic dependency tracking on attribute assignment.
 
@@ -463,6 +536,71 @@ def no_automatic_dependency_tracking(method):
       target=method, decorator_func=_method_wrapper)
 
 
+@tf_contextlib.contextmanager
+def no_manual_dependency_tracking_scope(obj):
+  """A context that disables manual dependency tracking for the given `obj`.
+
+  Sometimes library methods might track objects on their own and we might want
+  to disable that and do the tracking on our own. One can then use this context
+  manager to disable the tracking the library method does and do your own
+  tracking.
+
+  For example:
+
+  class TestLayer(tf.keras.Layer):
+    def build():
+      with no_manual_dependency_tracking_scope(self):
+        var = self.add_variable("name1")  # Creates a var and doesn't track it
+      self._track_trackable("name2", var)  # We track variable with name `name2`
+
+  Args:
+    obj: A trackable object.
+
+  Yields:
+    a scope in which the object doesn't track dependencies manually.
+  """
+  # pylint: disable=protected-access
+  previous_value = getattr(obj, "_manual_tracking", True)
+  obj._manual_tracking = False
+  try:
+    yield
+  finally:
+    obj._manual_tracking = previous_value
+
+
+@tf_contextlib.contextmanager
+def no_automatic_dependency_tracking_scope(obj):
+  """A context that disables automatic dependency tracking when assigning attrs.
+
+  Objects that inherit from Autotrackable automatically creates dependencies
+  to trackable objects through attribute assignments, and wraps data structures
+  (lists or dicts) with trackable classes. This scope may be used to temporarily
+  disable this behavior. This works similar to the decorator
+  `no_automatic_dependency_tracking`.
+
+  Example usage:
+  ```
+  model = tf.keras.Model()
+  model.arr1 = []  # Creates a ListWrapper object
+  with no_automatic_dependency_tracking_scope(model):
+    model.arr2 = []  # Creates a regular, untracked python list
+  ```
+
+  Args:
+    obj: A trackable object.
+
+  Yields:
+    a scope in which the object doesn't track dependencies.
+  """
+  previous_value = getattr(obj, "_setattr_tracking", True)
+  obj._setattr_tracking = False  # pylint: disable=protected-access
+  try:
+    yield
+  finally:
+    obj._setattr_tracking = previous_value  # pylint: disable=protected-access
+
+
+@tf_export("__internal__.tracking.Trackable", v1=[])
 class Trackable(object):
   """Base class for `Trackable` objects without automatic dependencies.
 
@@ -547,6 +685,24 @@ class Trackable(object):
     # restore-on-create when executing eagerly, and so is unused when graph
     # building.
     self._self_name_based_restores = set()
+
+    # Dictionary of SaveableObjects factories. This dictionary is defined when
+    # the object is loaded from the SavedModel. When writing a custom class,
+    # prefer overriding "_gather_saveables_from_checkpoint" to using this
+    # attribute.
+    self._self_saveable_object_factories = {}
+
+  @property
+  def _object_identifier(self):
+    """String used to identify this object in a SavedModel.
+
+    Generally, the object identifier is constant across objects of the same
+    class, while the metadata field is used for instance-specific data.
+
+    Returns:
+      String object identifier.
+    """
+    return "_generic_user_object"
 
   def _no_dependency(self, value):
     """If automatic dependency tracking is enabled, ignores `value`."""
@@ -641,11 +797,11 @@ class Trackable(object):
         # then assigning (when executing eagerly). This call returns None if
         # there is nothing to restore.
         checkpoint_initializer = self._preload_simple_restoration(
-            name=name, shape=shape)
+            name=name)
       else:
         checkpoint_initializer = None
       if (checkpoint_initializer is not None and
-          not (isinstance(initializer, CheckpointInitialValue) and
+          not (isinstance(initializer, CheckpointInitialValueCallable) and
                (initializer.restore_uid > checkpoint_initializer.restore_uid))):
         # If multiple Trackable objects are "creating" the same variable
         # via the magic of custom getters, the one with the highest restore UID
@@ -654,7 +810,6 @@ class Trackable(object):
         # then we'll catch that when we call _track_trackable. So this is
         # "best effort" to set the initializer with the highest restore UID.
         initializer = checkpoint_initializer
-        shape = None
     new_variable = getter(
         name=name,
         shape=shape,
@@ -673,7 +828,7 @@ class Trackable(object):
       # fallback once all get_variable() return types are Trackable.
       return new_variable
 
-  def _preload_simple_restoration(self, name, shape):
+  def _preload_simple_restoration(self, name):
     """Return a dependency's value for restore-on-create.
 
     Note the restoration is not deleted; if for some reason preload is called
@@ -684,7 +839,6 @@ class Trackable(object):
     Args:
       name: The object-local name of the dependency holding the variable's
         value.
-      shape: The shape of the variable being loaded into.
 
     Returns:
       An callable for use as a variable's initializer/initial_value, or None if
@@ -707,8 +861,8 @@ class Trackable(object):
     checkpoint_position = max(
         deferred_dependencies_list,
         key=lambda restore: restore.checkpoint.restore_uid)
-    return CheckpointInitialValue(
-        checkpoint_position=checkpoint_position, shape=shape)
+    return CheckpointInitialValueCallable(
+        checkpoint_position=checkpoint_position)
 
   def _track_trackable(self, trackable, name, overwrite=False):
     """Declare a dependency on another `Trackable` object.
@@ -741,6 +895,8 @@ class Trackable(object):
     if not isinstance(trackable, Trackable):
       raise TypeError(("Trackable._track_trackable() passed type %s, not a "
                        "Trackable.") % (type(trackable),))
+    if not getattr(self, "_manual_tracking", True):
+      return trackable
     new_reference = TrackableReference(name=name, ref=trackable)
     current_object = self._lookup_dependency(name)
     if (current_object is not None and current_object is not trackable):
@@ -808,13 +964,21 @@ class Trackable(object):
     # traversals will happen later).
     visit_queue = collections.deque([checkpoint_position])
     restore_ops = []
+    tensor_saveables = {}
+    python_saveables = []
     while visit_queue:
       current_position = visit_queue.popleft()
-      restore_ops.extend(
-          nest.flatten(current_position.trackable  # pylint: disable=protected-access
-                       ._single_restoration_from_checkpoint_position(
-                           checkpoint_position=current_position,
-                           visit_queue=visit_queue)))
+      new_restore_ops, new_tensor_saveables, new_python_saveables = (
+          current_position.trackable  # pylint: disable=protected-access
+          ._single_restoration_from_checkpoint_position(
+              checkpoint_position=current_position,
+              visit_queue=visit_queue))
+      restore_ops.extend(new_restore_ops)
+      tensor_saveables.update(new_tensor_saveables)
+      python_saveables.extend(new_python_saveables)
+    restore_ops.extend(
+        current_position.checkpoint.restore_saveables(
+            tensor_saveables, python_saveables))
     return restore_ops
 
   def _single_restoration_from_checkpoint_position(self, checkpoint_position,
@@ -826,10 +990,13 @@ class Trackable(object):
     # need to actually restore the object. However, we should pass the
     # restoration on to our dependencies.
     if checkpoint.restore_uid > self._self_update_uid:
-      restore_ops = checkpoint_position.restore_ops()
+      restore_ops, tensor_saveables, python_saveables = (
+          checkpoint_position.gather_ops_or_named_saveables())
       self._self_update_uid = checkpoint.restore_uid
     else:
       restore_ops = ()
+      tensor_saveables = {}
+      python_saveables = ()
     for child in checkpoint_position.object_proto.children:
       child_position = CheckpointPosition(
           checkpoint=checkpoint, proto_id=child.node_id)
@@ -846,7 +1013,7 @@ class Trackable(object):
           # resolution order (shallowest paths first). The caller is responsible
           # for emptying visit_queue.
           visit_queue.append(child_position)
-    return restore_ops
+    return restore_ops, tensor_saveables, python_saveables
 
   def _gather_saveables_for_checkpoint(self):
     """Returns a dictionary of values to checkpoint with this object.
@@ -879,17 +1046,73 @@ class Trackable(object):
        lambda name="global_name_for_this_object":
        SaveableObject(name=name, ...)}
     """
-    return {}
+    return self._self_saveable_object_factories
 
-  def _list_functions_for_serialization(self):
+  def _list_extra_dependencies_for_serialization(self, serialization_cache):
+    """Lists extra dependencies to serialize.
+
+    Internal sub-classes can override this method to return extra dependencies
+    that should be saved with the object during SavedModel serialization. For
+    example, this is used to save `trainable_variables` in Keras models. The
+    python property `trainable_variables` contains logic to iterate through the
+    weights from the model and its sublayers. The serialized Keras model saves
+    `trainable_weights` as a trackable list of variables.
+
+    PLEASE NOTE when overriding this method:
+      1. This function may only generate new trackable objects the first time it
+         is called.
+      2. The returned dictionary must not have naming conflicts with
+         dependencies tracked by the root. In other words, if the root is
+         tracking `object_1` with name 'x', and this functions returns
+         `{'x': object_2}`, an error is raised when saving.
+
+    Args:
+      serialization_cache: A dictionary shared between all objects in the same
+        object graph. This object is passed to both
+        `_list_extra_dependencies_for_serialization` and
+        `_list_functions_for_serialization`.
+
+    Returns:
+      A dictionary mapping attribute names to trackable objects.
+    """
+    del serialization_cache
+    return dict()
+
+  def _list_functions_for_serialization(self, serialization_cache):
     """Lists the functions of this trackable to serialize.
 
     Internal sub-classes can override this with specific logic. E.g.
     `AutoTrackable` provides an implementation that returns the `attr`
     that return functions.
 
+    Args:
+      serialization_cache: Dictionary passed to all objects in the same object
+        graph during serialization.
+
     Returns:
         A dictionary mapping attribute names to `Function` or
         `ConcreteFunction`.
     """
+    del serialization_cache
     return dict()
+
+  def _map_resources(self, save_options):  # pylint: disable=unused-argument
+    """Makes new resource handle ops corresponding to existing resource tensors.
+
+    Internal sub-classes can override this to inform model saving how to add new
+    resource handle ops to the main GraphDef of a SavedModel (TF 1.x style
+    graph), which allows session based APIs (e.g, C++ loader API) to interact
+    with resources owned by this object.
+
+    Args:
+      save_options: A tf.saved_model.SaveOptions instance.
+
+    Returns:
+      A tuple of (object_map, resource_map):
+        object_map: A dictionary mapping from objects that hold existing
+          resource tensors to replacement objects created to hold the new
+          resource tensors.
+        resource_map: A dictionary mapping from existing resource tensors to
+          newly created resource tensors.
+    """
+    return {}, {}

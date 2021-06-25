@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/core/framework/variant_op_registry.h"
 #include "tensorflow/core/kernels/dense_update_functor.h"
 #include "tensorflow/core/kernels/variable_ops.h"
+#include "tensorflow/core/lib/core/refcount.h"
 
 namespace tensorflow {
 
@@ -40,16 +41,15 @@ Status EnsureSparseVariableAccess(OpKernelContext* ctx, Var* var) {
     var->copy_on_read_mode.store(true);
     return Status::OK();
   }
-  PersistentTensor unused;
-  Tensor* tmp;
+  Tensor tmp;
   if (std::is_same<T, Variant>::value) {
     AllocatorAttributes attr;
     attr.set_on_host(true);
-    TF_RETURN_IF_ERROR(ctx->allocate_persistent(
-        var->tensor()->dtype(), var->tensor()->shape(), &unused, &tmp, attr));
+    TF_RETURN_IF_ERROR(ctx->allocate_temp(var->tensor()->dtype(),
+                                          var->tensor()->shape(), &tmp, attr));
 
     const auto elements_in = var->tensor()->flat<Variant>();
-    auto elements_out = tmp->flat<Variant>();
+    auto elements_out = tmp.flat<Variant>();
     for (int64 i = 0; i < elements_in.size(); ++i) {
       elements_out(i) = elements_in(i);
     }
@@ -57,13 +57,13 @@ Status EnsureSparseVariableAccess(OpKernelContext* ctx, Var* var) {
     AllocatorAttributes attr;
     attr.set_gpu_compatible(true);
     attr.set_nic_compatible(true);
-    TF_RETURN_IF_ERROR(ctx->allocate_persistent(
-        var->tensor()->dtype(), var->tensor()->shape(), &unused, &tmp, attr));
+    TF_RETURN_IF_ERROR(ctx->allocate_temp(var->tensor()->dtype(),
+                                          var->tensor()->shape(), &tmp, attr));
     functor::DenseUpdate<Device, T, ASSIGN> copy_functor;
-    copy_functor(ctx->eigen_device<Device>(), tmp->flat<T>(),
+    copy_functor(ctx->eigen_device<Device>(), tmp.flat<T>(),
                  const_cast<const Tensor*>(var->tensor())->flat<T>());
   }
-  *var->tensor() = *tmp;
+  *var->tensor() = tmp;
   var->copy_on_read_mode.store(true);
   return Status::OK();
 }
@@ -167,10 +167,8 @@ VariableInputLockHolder MaybeLockVariableInputMutexesInOrder(
   std::sort(acquire_order.begin(), acquire_order.end(),
             [&mutexes](int a, int b) { return mutexes[a] < mutexes[b]; });
 
-  std::unique_ptr<std::vector<mutex_lock>> locks =
-      absl::make_unique<std::vector<mutex_lock>>();
-  std::unique_ptr<std::vector<tf_shared_lock>> shared_locks =
-      absl::make_unique<std::vector<tf_shared_lock>>();
+  auto locks = absl::make_unique<std::vector<mutex_lock>>();
+  auto shared_locks = absl::make_unique<std::vector<tf_shared_lock>>();
   locks->reserve(acquire_order.size());
 
   for (auto input : acquire_order) {
@@ -201,16 +199,15 @@ Status PrepareToUpdateVariable(OpKernelContext* ctx, Tensor* tensor,
   if (copy_on_read_mode || !tensor->RefCountIsOne()) {
     // Tensor's buffer is in use by some read, so we need to copy before
     // updating.
-    PersistentTensor unused;
-    Tensor* tmp;
+    Tensor tmp;
     if (std::is_same<T, Variant>::value) {
       AllocatorAttributes attr;
       attr.set_on_host(true);
-      TF_RETURN_IF_ERROR(ctx->allocate_persistent(
-          tensor->dtype(), tensor->shape(), &unused, &tmp, attr));
+      TF_RETURN_IF_ERROR(
+          ctx->allocate_temp(tensor->dtype(), tensor->shape(), &tmp, attr));
 
       const auto elements_in = tensor->flat<Variant>();
-      auto elements_out = tmp->flat<Variant>();
+      auto elements_out = tmp.flat<Variant>();
       for (int64 i = 0; i < elements_in.size(); ++i) {
         elements_out(i) = elements_in(i);
       }
@@ -218,13 +215,13 @@ Status PrepareToUpdateVariable(OpKernelContext* ctx, Tensor* tensor,
       AllocatorAttributes attr;
       attr.set_gpu_compatible(true);
       attr.set_nic_compatible(true);
-      TF_RETURN_IF_ERROR(ctx->allocate_persistent(
-          tensor->dtype(), tensor->shape(), &unused, &tmp, attr));
+      TF_RETURN_IF_ERROR(
+          ctx->allocate_temp(tensor->dtype(), tensor->shape(), &tmp, attr));
       functor::DenseUpdate<Device, T, ASSIGN> copy_functor;
-      copy_functor(ctx->eigen_device<Device>(), tmp->flat<T>(),
+      copy_functor(ctx->eigen_device<Device>(), tmp.flat<T>(),
                    const_cast<const Tensor*>(tensor)->flat<T>());
     }
-    *tensor = *tmp;
+    *tensor = tmp;
   }
   return Status::OK();
 }
@@ -241,11 +238,10 @@ template <typename Device, typename T>
 Status GetInputTensorFromVariable(OpKernelContext* ctx, int input,
                                   bool lock_held, bool sparse, Tensor* out) {
   if (ctx->input_dtype(input) == DT_RESOURCE) {
-    Var* var;
+    core::RefCountPtr<Var> var;
     TF_RETURN_IF_ERROR(LookupResource(ctx, HandleFromInput(ctx, input), &var));
-    core::ScopedUnref unref_var(var);
     if (sparse) {
-      TF_RETURN_IF_ERROR(EnsureSparseVariableAccess<Device, T>(ctx, var));
+      TF_RETURN_IF_ERROR(EnsureSparseVariableAccess<Device, T>(ctx, var.get()));
       *out = *var->tensor();
       return Status::OK();
     }

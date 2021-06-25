@@ -29,6 +29,10 @@ class WhileUtil {
     // The new while operation that has the requested values live in.
     HloInstruction* new_while_instr;
 
+    // The new tuple instruction that replaced the original while instruction
+    // with the same shape.
+    HloInstruction* replacement_instr;
+
     // The i'th element of `while_body_live_in_values` is an instruction in the
     // while body that holds the i'th *newly added* live in value at runtime.
     std::vector<HloInstruction*> while_body_live_in_values;
@@ -80,6 +84,19 @@ class WhileUtil {
       HloComputation* computation, int32 trip_count,
       const LoopStateTy& init_values,
       const LoopBodyGeneratorTy& loop_body_generator,
+      const OpMetadata& metadata);
+
+  struct OwningLoopStateTy {
+    std::vector<std::unique_ptr<HloInstruction>> instructions_to_add;
+    WhileUtil::LoopStateTy while_results;
+  };
+  // As above but does not add the while loop or other instructions created
+  // around it in any particular computation. The caller can instead add it to a
+  // computation of their choosing.
+  static StatusOr<OwningLoopStateTy> MakeCountedLoop(
+      HloModule* module, int32 trip_count,
+      const WhileUtil::LoopStateTy& init_values,
+      const WhileUtil::LoopBodyGeneratorTy& loop_body_generator,
       const OpMetadata& metadata);
 
   // Returns the GetTupleElement instructions in `while_body` that access

@@ -202,9 +202,9 @@ class SparseReduceOp : public OpKernel {
     }
 
     auto CoordinatesToFlatIndex = [](ArraySlice<int64> coords,
-                                     ArraySlice<int64> strides) {
+                                     ArraySlice<int64> strides) -> int64 {
       if (strides.empty()) {  // Reduce all.
-        return 0LL;
+        return 0;
       }
       CHECK_EQ(coords.size(), strides.size());
       int64 idx = 0;
@@ -221,7 +221,7 @@ class SparseReduceOp : public OpKernel {
       Op::template Run<T>(ctx, reduced_val, g.template values<T>());
       const int64 idx = CoordinatesToFlatIndex(g.group(), output_strides);
       out_flat(idx) = reduced_val();
-      VLOG(2) << "coords: " << str_util::Join(g.group(), ",")
+      VLOG(2) << "coords: " << absl::StrJoin(g.group(), ",")
               << "; idx: " << idx << "; group " << Op::Name() << ": "
               << reduced_val();
     }
@@ -309,7 +309,7 @@ class SparseReduceSparseOp : public OpKernel {
       }
       out_flat(i) = reduced_val();
       i++;
-      VLOG(2) << "coords: " << str_util::Join(g.group(), ",")
+      VLOG(2) << "coords: " << absl::StrJoin(g.group(), ",")
               << "; group " << Op::Name() << ": "
               << reduced_val();
     }
@@ -320,7 +320,9 @@ class SparseReduceSparseOp : public OpKernel {
                             &out_shape_t));
     auto out_shape_flat = out_shape_t->flat<int64>();
     auto out_dim_sizes = reduction.reduced_shape.dim_sizes();
-    std::copy(out_dim_sizes.begin(), out_dim_sizes.end(), &out_shape_flat(0));
+    if (!out_dim_sizes.empty()) {
+      std::copy(out_dim_sizes.begin(), out_dim_sizes.end(), &out_shape_flat(0));
+    }
   }
 
  private:

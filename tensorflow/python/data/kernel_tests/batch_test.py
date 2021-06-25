@@ -18,18 +18,22 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import time
+
 from absl.testing import parameterized
 import numpy as np
 
+from tensorflow.python.data.kernel_tests import checkpoint_test_base
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.data.util import nest
+from tensorflow.python.framework import combinations
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import sparse_tensor
-from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import script_ops
 from tensorflow.python.ops.ragged import ragged_concat_ops
 from tensorflow.python.ops.ragged import ragged_factory_ops
 from tensorflow.python.ops.ragged import ragged_math_ops
@@ -37,16 +41,17 @@ from tensorflow.python.ops.ragged import ragged_tensor
 from tensorflow.python.platform import test
 
 
-@test_util.run_all_in_graph_and_eager_modes
 class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
 
-  @parameterized.named_parameters(
-      ('even', 28, 14, False),
-      ('uneven_with_remainder', 28, 15, False),
-      ('uneven_without_remainder', 28, 15, True),
-      ('empty', 0, 14, False),
-  )
-  def testBatchDataset(self, count, batch_size, drop_remainder):
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          combinations.combine(
+              count=[0, 28],
+              batch_size=[14, 15],
+              drop_remainder=[True, False],
+              num_parallel_calls=[None, 1, 2, 4])))
+  def testBasic(self, count, batch_size, drop_remainder, num_parallel_calls):
     """Tests the batch dataset logic for various input configurations.
 
     Args:
@@ -54,6 +59,8 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
       batch_size: the batch size
       drop_remainder: whether a smaller batch size should be produced if batch
         size does not divide number of inputs evenly
+      num_parallel_calls: the number batches to process asynchronously in
+        parallel
     """
 
     # The pipeline is TensorSliceDataset -> MapDataset(square_3) ->
@@ -66,7 +73,8 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
       return math_ops.square(x), math_ops.square(y), math_ops.square(z)
 
     dataset = dataset_ops.Dataset.from_tensor_slices(components).map(
-        _map_fn).repeat(count).batch(batch_size, drop_remainder)
+        _map_fn).repeat(count).batch(batch_size, drop_remainder,
+                                     num_parallel_calls)
     get_next = self.getNext(dataset)
 
     if drop_remainder:
@@ -95,12 +103,24 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
     with self.assertRaises(errors.OutOfRangeError):
       result = self.evaluate(get_next())
 
-  def testBatchDatasetInvalidBatchSize(self):
+  @combinations.generate(test_base.default_test_combinations())
+  def testInvalidBatchSize(self):
     with self.assertRaises(errors.InvalidArgumentError):
       dataset = (dataset_ops.Dataset.range(10).batch(0))
       self.evaluate(dataset._variant_tensor)
 
-  def testBatchSparse(self):
+  @combinations.generate(test_base.default_test_combinations())
+  def testDataset(self):
+
+    def map_fn(i):
+      return dataset_ops.Dataset.from_tensors(i)
+
+    dataset = dataset_ops.Dataset.range(10).map(map_fn).batch(5)
+    dataset = dataset.map(lambda x: x)
+    dataset = dataset.unbatch().flat_map(lambda x: x)
+    self.assertDatasetProduces(dataset, expected_output=range(10))
+
+  def testSparse(self):
 
     def _sparse(i):
       return sparse_tensor.SparseTensorValue(
@@ -115,7 +135,8 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
     ]
     self.assertDatasetProduces(dataset, expected_output=expected_output)
 
-  def testBatchSparseWithDifferentDenseShapes(self):
+  @combinations.generate(test_base.default_test_combinations())
+  def testSparseWithDifferentDenseShapes(self):
 
     def _sparse(i):
       return sparse_tensor.SparseTensorValue(
@@ -140,7 +161,8 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
               dense_shape=[5, (i + 1) * 5 - 1]))
     self.assertDatasetProduces(dataset, expected_output=expected_output)
 
-  def testNestedBatchSparse(self):
+  @combinations.generate(test_base.default_test_combinations())
+  def testSparseNested(self):
 
     def _sparse(i):
       return sparse_tensor.SparseTensorValue(
@@ -156,7 +178,8 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
     ]
     self.assertDatasetProduces(dataset, expected_output=expected_output)
 
-  def testBatchShapeError(self):
+  @combinations.generate(test_base.default_test_combinations())
+  def testShapeError(self):
 
     def generator():
       yield [1.0, 2.0, 3.0]
@@ -173,8 +196,8 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
             r'Cannot batch tensors with different shapes in component 0. First '
             r'element had shape \[3\] and element 2 had shape \[4\].'))
 
-  # Ragged Tensors.
-  def testBatchRagged(self):
+  @combinations.generate(test_base.default_test_combinations())
+  def testRagged(self):
 
     def _ragged(i):
       return ragged_tensor.RaggedTensor.from_tensor(i * [[1]])
@@ -186,7 +209,8 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
     ]
     self.assertDatasetProduces(dataset, expected_output=expected_output)
 
-  def testBatchRaggedWithDifferentShapes(self):
+  @combinations.generate(test_base.default_test_combinations())
+  def testRaggedWithDifferentShapes(self):
     dataset = dataset_ops.Dataset.range(10).map(ragged_math_ops.range).batch(5)
     expected_output = [
         ragged_concat_ops.stack([ragged_math_ops.range(i) for i in range(5)]),
@@ -195,7 +219,8 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
     ]
     self.assertDatasetProduces(dataset, expected_output=expected_output)
 
-  def testNestedBatchRagged(self):
+  @combinations.generate(test_base.default_test_combinations())
+  def testRaggedNested(self):
 
     def _ragged(i):
       return ragged_tensor.RaggedTensor.from_tensor(i * [[1]])
@@ -206,6 +231,92 @@ class BatchTest(test_base.DatasetTestBase, parameterized.TestCase):
                                      [[[5]], [[6]], [[7]], [[8]], [[9]]]])
     ]
     self.assertDatasetProduces(dataset, expected_output=expected_output)
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testNoneComponent(self):
+    dataset = dataset_ops.Dataset.range(10).map(lambda x: (x, None)).batch(
+        10).map(lambda x, y: x)
+    self.assertDatasetProduces(dataset, expected_output=[list(range(10))])
+
+  @combinations.generate(
+      combinations.times(
+          test_base.default_test_combinations(),
+          combinations.combine(
+              local_determinism=[None, True, False],
+              global_determinism=[True, False])))
+  def testDeterminismConfiguration(self, local_determinism, global_determinism):
+    expect_determinism = local_determinism or (local_determinism is None and
+                                               global_determinism)
+    elements = list(range(100))
+
+    def dataset_fn(delay_ms):
+
+      def sleep(x):
+        time.sleep(delay_ms / 1000)
+        return x
+
+      def map_function(x):
+        if math_ops.equal(x, 0):
+          return script_ops.py_func(sleep, [x], x.dtype)
+        else:
+          return x
+
+      dataset = dataset_ops.Dataset.from_tensor_slices(elements)
+      dataset = dataset.map(
+          map_function, num_parallel_calls=2, deterministic=local_determinism)
+      dataset = dataset.batch(
+          batch_size=6, num_parallel_calls=2,
+          deterministic=local_determinism).unbatch()
+      opts = dataset_ops.Options()
+      opts.experimental_deterministic = global_determinism
+      dataset = dataset.with_options(opts)
+      return dataset
+
+    self.checkDeterminism(dataset_fn, expect_determinism, elements)
+
+
+class BatchCheckpointTest(checkpoint_test_base.CheckpointTestBase,
+                          parameterized.TestCase):
+
+  def build_dataset(self, multiplier=15.0, tensor_slice_len=2, batch_size=2):
+    components = (np.arange(tensor_slice_len), np.array([[1, 2, 3]]) *
+                  np.arange(tensor_slice_len)[:, np.newaxis],
+                  np.array(multiplier) * np.arange(tensor_slice_len))
+
+    return dataset_ops.Dataset.from_tensor_slices(components).batch(batch_size)
+
+  @combinations.generate(
+      combinations.times(test_base.default_test_combinations(),
+                         checkpoint_test_base.default_test_combinations()))
+  def test(self, verify_fn):
+    tensor_slice_len = 8
+    batch_size = 2
+    num_outputs = tensor_slice_len // batch_size
+    verify_fn(self,
+              lambda: self.build_dataset(15.0, tensor_slice_len, batch_size),
+              num_outputs)
+
+  def _sparse(self, i):
+    return sparse_tensor.SparseTensorValue(
+        indices=[[0]], values=(i * [1]), dense_shape=[1])
+
+  def _build_dataset_sparse(self, batch_size=5):
+    return dataset_ops.Dataset.range(10).map(self._sparse).batch(batch_size)
+
+  @combinations.generate(
+      combinations.times(test_base.default_test_combinations(),
+                         checkpoint_test_base.default_test_combinations()))
+  def testSparse(self, verify_fn):
+    verify_fn(self, self._build_dataset_sparse, num_outputs=2)
+
+  def _build_dataset_nested_sparse(self):
+    return dataset_ops.Dataset.range(10).map(self._sparse).batch(5).batch(2)
+
+  @combinations.generate(
+      combinations.times(test_base.default_test_combinations(),
+                         checkpoint_test_base.default_test_combinations()))
+  def testNestedSparse(self, verify_fn):
+    verify_fn(self, self._build_dataset_nested_sparse, num_outputs=1)
 
 
 if __name__ == '__main__':

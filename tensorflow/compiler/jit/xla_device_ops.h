@@ -20,24 +20,18 @@ limitations under the License.
 
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/resource_mgr.h"
-#include "tensorflow/core/kernels/cast_op.h"
 #include "tensorflow/core/kernels/constant_op.h"
-#include "tensorflow/core/kernels/control_flow_ops.h"
+#include "tensorflow/core/kernels/data/finalize_dataset_op.h"
 #include "tensorflow/core/kernels/data/generator_dataset_op.h"
 #include "tensorflow/core/kernels/data/iterator_ops.h"
 #include "tensorflow/core/kernels/data/optional_ops.h"
+#include "tensorflow/core/kernels/data/options_dataset_op.h"
 #include "tensorflow/core/kernels/data/prefetch_dataset_op.h"
 #include "tensorflow/core/kernels/fifo_queue.h"
 #include "tensorflow/core/kernels/function_ops.h"
-#include "tensorflow/core/kernels/host_constant_op.h"
-#include "tensorflow/core/kernels/identity_n_op.h"
 #include "tensorflow/core/kernels/identity_op.h"
-#include "tensorflow/core/kernels/no_op.h"
-#include "tensorflow/core/kernels/queue_op.h"
 #include "tensorflow/core/kernels/resource_variable_ops.h"
-#include "tensorflow/core/kernels/sendrecv_ops.h"
 #include "tensorflow/core/kernels/shape_ops.h"
-#include "tensorflow/core/kernels/stack.h"
 #include "tensorflow/core/kernels/variable_ops.h"
 
 namespace tensorflow {
@@ -81,43 +75,14 @@ class XlaAssignVariableOp : public OpKernel {
   REGISTER_KERNEL_BUILDER(Name("_XlaRun").Device(DEVICE), KERNEL);
 
 #define REGISTER_XLA_DEVICE_KERNELS(DEVICE, TYPES)                             \
-  REGISTER_KERNEL_BUILDER(Name("_Send").Device(DEVICE), SendOp);               \
-  REGISTER_KERNEL_BUILDER(Name("_Recv").Device(DEVICE), RecvOp);               \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("_HostSend").Device(DEVICE).HostMemory("tensor"), SendOp);          \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("_HostRecv").Device(DEVICE).HostMemory("tensor"), RecvOp);          \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("_HostCast").Device(DEVICE).HostMemory("x").HostMemory("y"),        \
-      CpuCastOp);                                                              \
-  REGISTER_KERNEL_BUILDER(Name("NoOp").Device(DEVICE), NoOp);                  \
   REGISTER_KERNEL_BUILDER(                                                     \
       Name("Const").Device(DEVICE).TypeConstraint("dtype", TYPES),             \
       ConstantOp);                                                             \
   REGISTER_KERNEL_BUILDER(                                                     \
-      Name("HostConst").Device(DEVICE).HostMemory("output"), _HostConstantOp); \
-  REGISTER_KERNEL_BUILDER(                                                     \
       Name("Identity").Device(DEVICE).TypeConstraint("T", TYPES), IdentityOp); \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("Identity").Device(DEVICE).TypeConstraint("T", DT_STRING),          \
-      IdentityOp);                                                             \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("Identity").Device(DEVICE).TypeConstraint<Variant>("T"),            \
-      IdentityOp);                                                             \
-  REGISTER_KERNEL_BUILDER(Name("Identity")                                     \
-                              .Device(DEVICE)                                  \
-                              .TypeConstraint<ResourceHandle>("T")             \
-                              .HostMemory("input")                             \
-                              .HostMemory("output"),                           \
-                          IdentityOp);                                         \
-  REGISTER_KERNEL_BUILDER(Name("IdentityN").Device(DEVICE), IdentityNOp);      \
-  REGISTER_KERNEL_BUILDER(Name("Placeholder").Device(DEVICE), PlaceholderOp);  \
-  REGISTER_KERNEL_BUILDER(Name("PlaceholderV2").Device(DEVICE),                \
-                          PlaceholderOp);                                      \
                                                                                \
   REGISTER_KERNEL_BUILDER(                                                     \
-      Name("VarHandleOp").Device(DEVICE).HostMemory("resource"),               \
-      ResourceHandleOp<Var>);                                                  \
+      Name("VarHandleOp").Device(DEVICE).HostMemory("resource"), VarHandleOp); \
   REGISTER_KERNEL_BUILDER(                                                     \
       Name("_VarHandlesOp").Device(DEVICE).HostMemory("resources"),            \
       ResourceHandlesOp<Var>);                                                 \
@@ -154,6 +119,18 @@ class XlaAssignVariableOp : public OpKernel {
                               .TypeConstraint<int64>("out_type")               \
                               .TypeConstraint("T", TYPES),                     \
                           ShapeNOp<int64>);                                    \
+  REGISTER_KERNEL_BUILDER(Name("VariableShape")                                \
+                              .Device(DEVICE)                                  \
+                              .TypeConstraint<int32>("out_type")               \
+                              .HostMemory("output")                            \
+                              .HostMemory("input"),                            \
+                          VariableShapeOp<int32>);                             \
+  REGISTER_KERNEL_BUILDER(Name("VariableShape")                                \
+                              .Device(DEVICE)                                  \
+                              .TypeConstraint<int64>("out_type")               \
+                              .HostMemory("output")                            \
+                              .HostMemory("input"),                            \
+                          VariableShapeOp<int64>);                             \
   REGISTER_KERNEL_BUILDER(Name("Size")                                         \
                               .Device(DEVICE)                                  \
                               .HostMemory("output")                            \
@@ -173,36 +150,6 @@ class XlaAssignVariableOp : public OpKernel {
   REGISTER_KERNEL_BUILDER(                                                     \
       Name("AssignVariableOp").Device(DEVICE).HostMemory("resource"),          \
       XlaAssignVariableOp);                                                    \
-  REGISTER_KERNEL_BUILDER(Name("ControlTrigger").Device(DEVICE),               \
-                          ControlTriggerOp);                                   \
-  REGISTER_KERNEL_BUILDER(Name("Switch").Device(DEVICE).HostMemory("pred"),    \
-                          SwitchOp);                                           \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("Merge").Device(DEVICE).HostMemory("value_index"), MergeOp);        \
-  REGISTER_KERNEL_BUILDER(Name("Enter").Device(DEVICE), EnterOp);              \
-  REGISTER_KERNEL_BUILDER(Name("Exit").Device(DEVICE), ExitOp);                \
-  REGISTER_KERNEL_BUILDER(Name("NextIteration").Device(DEVICE),                \
-                          NextIterationOp);                                    \
-  REGISTER_KERNEL_BUILDER(Name("LoopCond")                                     \
-                              .Device(DEVICE)                                  \
-                              .HostMemory("input")                             \
-                              .HostMemory("output"),                           \
-                          LoopCondOp);                                         \
-                                                                               \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("QueueEnqueueV2").Device(DEVICE).HostMemory("handle"), EnqueueOp);  \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("QueueDequeueV2").Device(DEVICE).HostMemory("handle"), DequeueOp);  \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("QueueCloseV2").Device(DEVICE).HostMemory("handle"), QueueCloseOp); \
-  REGISTER_KERNEL_BUILDER(Name("QueueSizeV2")                                  \
-                              .Device(DEVICE)                                  \
-                              .HostMemory("size")                              \
-                              .HostMemory("handle"),                           \
-                          QueueSizeOp);                                        \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("QueueIsClosedV2").Device(DEVICE).HostMemory("handle"),             \
-      QueueIsClosedOp);                                                        \
                                                                                \
   REGISTER_KERNEL_BUILDER(                                                     \
       Name("FIFOQueueV2").Device(DEVICE).HostMemory("handle"), FIFOQueueOp);   \
@@ -239,6 +186,16 @@ class XlaAssignVariableOp : public OpKernel {
                               .HostMemory("input_dataset")                     \
                               .HostMemory("handle"),                           \
                           data::PrefetchDatasetOp);                            \
+  REGISTER_KERNEL_BUILDER(Name("OptionsDataset")                               \
+                              .Device(DEVICE)                                  \
+                              .HostMemory("input_dataset")                     \
+                              .HostMemory("handle"),                           \
+                          data::OptionsDatasetOp);                             \
+  REGISTER_KERNEL_BUILDER(Name("FinalizeDataset")                              \
+                              .Device(DEVICE)                                  \
+                              .HostMemory("input_dataset")                     \
+                              .HostMemory("handle"),                           \
+                          data::FinalizeDatasetOp);                            \
                                                                                \
   REGISTER_KERNEL_BUILDER(Name("IteratorV2").Device(DEVICE),                   \
                           data::IteratorHandleOp);                             \
@@ -247,15 +204,16 @@ class XlaAssignVariableOp : public OpKernel {
       data::MakeIteratorOp);                                                   \
   REGISTER_KERNEL_BUILDER(Name("AnonymousIterator").Device(DEVICE),            \
                           data::AnonymousIteratorHandleOp);                    \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("AnonymousIteratorV2").Device(DEVICE).HostMemory("deleter"),        \
-      data::AnonymousIteratorHandleOp);                                        \
+  REGISTER_KERNEL_BUILDER(Name("AnonymousIteratorV2").Device(DEVICE),          \
+                          data::AnonymousIteratorHandleOp);                    \
+  REGISTER_KERNEL_BUILDER(Name("DeleteIterator").Device(DEVICE),               \
+                          data::DeleteIteratorOp);                             \
   REGISTER_KERNEL_BUILDER(Name("IteratorGetNext").Device(DEVICE),              \
                           data::IteratorGetNextOp);                            \
   REGISTER_KERNEL_BUILDER(Name("IteratorGetNextAsOptional").Device(DEVICE),    \
                           data::IteratorGetNextAsOptionalOp);                  \
   REGISTER_KERNEL_BUILDER(Name("IteratorGetNextSync").Device(DEVICE),          \
-                          data::IteratorGetNextSyncOp);                        \
+                          data::IteratorGetNextOp);                            \
   REGISTER_KERNEL_BUILDER(Name("IteratorToStringHandle")                       \
                               .Device(DEVICE)                                  \
                               .HostMemory("string_handle"),                    \
@@ -276,31 +234,13 @@ class XlaAssignVariableOp : public OpKernel {
   REGISTER_KERNEL_BUILDER(Name(FunctionLibraryDefinition::kArgOp)              \
                               .Device(DEVICE)                                  \
                               .HostMemory("output")                            \
-                              .TypeConstraint<string>("T"),                    \
+                              .TypeConstraint<tstring>("T"),                   \
                           ArgOp);                                              \
   REGISTER_KERNEL_BUILDER(Name(FunctionLibraryDefinition::kRetOp)              \
                               .Device(DEVICE)                                  \
-                              .TypeConstraint<string>("T")                     \
+                              .TypeConstraint<tstring>("T")                    \
                               .HostMemory("input"),                            \
-                          RetvalOp);                                           \
-                                                                               \
-  REGISTER_KERNEL_BUILDER(Name("StackV2")                                      \
-                              .Device(DEVICE)                                  \
-                              .HostMemory("max_size")                          \
-                              .HostMemory("handle"),                           \
-                          StackOp);                                            \
-  REGISTER_KERNEL_BUILDER(Name("StackPushV2")                                  \
-                              .Device(DEVICE)                                  \
-                              .HostMemory("handle")                            \
-                              .TypeConstraint("T", TYPES),                     \
-                          TemplatedStackPushOp</*allow_swapping=*/false>);     \
-  REGISTER_KERNEL_BUILDER(Name("StackPopV2")                                   \
-                              .Device(DEVICE)                                  \
-                              .HostMemory("handle")                            \
-                              .TypeConstraint("elem_type", TYPES),             \
-                          StackPopOp);                                         \
-  REGISTER_KERNEL_BUILDER(                                                     \
-      Name("StackCloseV2").Device(DEVICE).HostMemory("handle"), StackCloseOp);
+                          RetvalOp);
 
 // TODO(b/118881356): currently we do not register the QueueEnqueueMany,
 // QueueDequeueMany, or QueueDequeueUpTo kernels because they attempt to read

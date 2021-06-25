@@ -19,20 +19,21 @@ limitations under the License.
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "tensorflow/compiler/xla/layout.h"
+#include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
+#include "tensorflow/compiler/xla/service/gpu/launch_dimensions.h"
 #include "tensorflow/compiler/xla/service/hlo_module_config.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/core/platform/stream_executor_no_cuda.h"
+#include "tensorflow/core/protobuf/autotuning.pb.h"
+#include "tensorflow/stream_executor/gpu/gpu_asm_opts.h"
 #include "tensorflow/stream_executor/kernel_spec.h"
 
 // Helper functions for interacting with StreamExecutor.
 
 namespace xla {
 namespace gpu {
-
-// Returns true if the given StreamExecutor is for a Volta or newer nvidia GPU.
-bool IsVoltaOrLater(const se::StreamExecutor& stream_exec);
 
 // Returns (input, filter, output) XLA Layout protos given the StreamExecutor
 // layouts.
@@ -45,9 +46,23 @@ StreamExecutorConvLayoutsToXlaLayouts(const ConvolutionDimensionNumbers& dnums,
 // Returns (input, filter, output) StreamExecutor layouts given the XLA layouts.
 StatusOr<
     std::tuple<se::dnn::DataLayout, se::dnn::FilterLayout, se::dnn::DataLayout>>
-XlaConvLayoutsToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
-                                      const Layout& input, const Layout& filter,
-                                      const Layout& output);
+XlaConvShapesToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
+                                     const Shape& input, const Shape& filter,
+                                     const Shape& output);
+
+// Finds the VECT_C dimension in input/filter/output, if present.
+//
+// A cudnn convolution may have layout NCHW_VECT_C, which means instead of
+// [N,C,H,W], the layout is [N,C/k,H,W,k] for some k (usually 4 or 32).
+//
+// ConvolutionDimensionNumbers doesn't explicitly store which is the `k`
+// dimension, because only cudnn convolutions have this feature; it's not
+// applicable elsewhere.  We find it by finding a dimension in the
+// input/filter/output shape that is *not* in dnums.
+std::tuple<absl::optional<int64>, absl::optional<int64>, absl::optional<int64>>
+FindVectorizedFeatureDims(const ConvolutionDimensionNumbers& dnums,
+                          const Shape& input, const Shape& filter,
+                          const Shape& output);
 
 // Generates and returns a unique lock per each provided executor.
 // Guarantees that blocks of code both holding a lock for the same provided
@@ -56,36 +71,6 @@ XlaConvLayoutsToStreamExecutorLayouts(const ConvolutionDimensionNumbers& dnums,
 // This is used to prevent other XLA instances from trying to autotune on a
 // device while another thread is using it.
 tensorflow::mutex_lock LockGpu(const se::StreamExecutor* stream_exec);
-
-// Creates a kernel which can be launched with stream.ThenLaunch, such that
-// the types of the arguments provided for launch would have to match
-// types of the arguments provided at creation time.
-//
-// The kernel has a name kernel_name, and is based from provided PTX in ptx,
-// and (optional) compiled PTX in cubin_data.
-// The canonical storage for both ptx and cubin_data should outlive the
-// lifetime of the kernel.
-//
-// This is a preferred API since it provides type safety for kernel launches.
-template <typename... Args>
-StatusOr<std::unique_ptr<se::TypedKernel<Args...>>> CreateTypedKernel(
-    absl::string_view kernel_name, absl::string_view ptx,
-    absl::Span<const uint8> cubin_data, se::StreamExecutor* stream_exec) {
-  auto kernel_base = absl::make_unique<se::TypedKernel<Args...>>(stream_exec);
-  se::MultiKernelLoaderSpec loader_spec(kernel_base->kNumberOfParameters);
-  loader_spec.AddCudaPtxInMemory(ptx, kernel_name);
-
-  if (!cubin_data.empty()) {
-    loader_spec.AddCudaCubinInMemory(
-        reinterpret_cast<const char*>(cubin_data.data()), kernel_name);
-  }
-
-  if (!stream_exec->GetKernel(loader_spec, kernel_base.get())) {
-    return InternalError("Unable to load kernel '%s'", kernel_name);
-  }
-
-  return std::move(kernel_base);
-}
 
 // Creates a kernel with a provided name, based from provided PTX in ptx.
 // The kernel should be executed using the provided executor.
@@ -100,56 +85,46 @@ StatusOr<std::unique_ptr<se::KernelBase>> CreateKernel(
 // Runs loaded kernel on the stream with the provided arguments.
 Status ExecuteKernelOnStream(const se::KernelBase& kernel,
                              absl::Span<const se::DeviceMemoryBase> args,
-                             int64 threads_per_block, int64 block_count,
-                             se::Stream* stream);
+                             const LaunchDimensions& dims, se::Stream* stream);
 
-// Options for compiling with PTX.
-struct PtxCompilationOptions {
-  bool xla_gpu_disable_ptxas_optimizations;
-  std::string xla_gpu_cuda_data_dir;
+// Create GpuAsmOpts out of HloModuleConfig.
+se::GpuAsmOpts PtxOptsFromConfig(const HloModuleConfig& hlo_module_config);
 
-  using PtxOptionsTuple = std::tuple<bool, std::string>;
-
-  explicit PtxCompilationOptions(const HloModuleConfig& hlo_module_config)
-      : xla_gpu_disable_ptxas_optimizations(
-            hlo_module_config.debug_options()
-                .xla_gpu_disable_ptxas_optimizations()),
-        xla_gpu_cuda_data_dir(
-            hlo_module_config.debug_options().xla_gpu_cuda_data_dir()) {}
-
-  // For comparison and hashing.
-  PtxOptionsTuple ToTuple() {
-    return std::make_tuple(xla_gpu_disable_ptxas_optimizations,
-                           xla_gpu_cuda_data_dir);
-  }
-};
-
-// Compiles the given PTX string using ptxas and returns the resulting machine
-// code (i.e. a cubin) as a byte array.
+// Initializes `buffer` with random data on `stream`.
+// `rng_state` is an inout parameter for the pseudorandom generator state.
+// `buffer_type` determines what buffer would be filled out with.
 //
-// Queries stream executor stream_exec to get CUDA compute capability from the
-// device.
-//
-// compile_ptx_options is used to query for the CUDA location in case it is
-// customized in a passed flag, and for controlling ptxas optimizations.
-// It can be constructed from HloModuleConfig.
-StatusOr<std::vector<uint8>> CompilePtx(
-    se::StreamExecutor* stream_exec, absl::string_view ptx,
-    PtxCompilationOptions compile_ptx_options);
+// Precondition: `buffer_type` is a floating point type, `rng_state` needs to be
+// initialized to zero on the first use.
+void InitializeBuffer(se::Stream* stream, PrimitiveType buffer_type,
+                      int64* rng_state, se::DeviceMemoryBase buffer);
 
-// Same as CompilePtx, but caches the result, and returns unowned view of
-// the compiled binary.
-//
-// A copy of the string provided in ptx will be made.
-StatusOr<absl::Span<const uint8>> CompilePtxOrGetCached(
-    se::StreamExecutor* executor, absl::string_view ptx,
-    PtxCompilationOptions compilation_options);
+StatusOr<se::dnn::ConvolutionKind> GetDNNConvKindFromCudnnConvKind(
+    CudnnConvKind kind);
+StatusOr<se::dnn::DataType> GetDNNDataTypeFromPrimitiveType(PrimitiveType type);
 
-// Returns a vector of potential locations of the CUDA root directory.
-// Searches through tensorflow CUDA locations AND through the CUDA location
-// specified in compile_ptx_options (can be constructed from HloModuleConfig).
-std::vector<string> GetCudaRootCandidates(
-    PtxCompilationOptions compile_ptx_options);
+// Returns result with the smallest time which has not failed.
+// If deterministic output is requested, returns first (not failing) result.
+StatusOr<tensorflow::AutotuneResult> PickBestResult(
+    absl::Span<tensorflow::AutotuneResult const> profile_results,
+    const HloInstruction& instr);
+
+// Returns whether determinism is required.
+//
+// The following function allows deterministic ops to be implemented relatively
+// quickly using environment variables. It is intended to be temporary. The
+// longer-term intention is to enable deterministic ops via tf.config and
+// appropriate plumbing. See the discussion on PR 34951 for more information:
+// https://github.com/tensorflow/tensorflow/pull/34951#discussion_r355682316
+// This function and associated comment are replicated in the following three
+// places:
+//   1. tensorflow/core/kernels/gpu_utils.cc
+//   2. tensorflow/stream_executor/cuda/cuda_dnn.cc
+// When implementing the plumbing, you should also search for the use of
+// TF_DETERMINISTIC_OPS on its own.
+// TODO(duncanriach): move to an API that uses tf.config and implement the first
+//                    phase of plumbing.
+bool RequireDeterminism(const HloModuleConfig& config);
 
 }  // namespace gpu
 }  // namespace xla

@@ -1,3 +1,5 @@
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+
 licenses(["restricted"])  # MPL2, portions GPL v3, LGPL v3, BSD-like
 
 package(default_visibility = ["//visibility:public"])
@@ -19,6 +21,7 @@ cc_library(
         ".",
         "rocm/include",
         "rocm/include/rocrand",
+        "rocm/include/roctracer",
     ],
     visibility = ["//visibility:public"],
 )
@@ -48,9 +51,9 @@ cc_library(
 )
 
 cc_library(
-    name = "rocfft",
-    srcs = ["rocm/lib/%{rocfft_lib}"],
-    data = ["rocm/lib/%{rocfft_lib}"],
+    name = "%{hipfft_or_rocfft}",
+    srcs = ["rocm/lib/%{hipfft_or_rocfft_lib}"],
+    data = ["rocm/lib/%{hipfft_or_rocfft_lib}"],
     includes = [
         ".",
         "rocm/include",
@@ -85,15 +88,79 @@ cc_library(
 )
 
 cc_library(
+    name = "rccl",
+    srcs = ["rocm/lib/%{rccl_lib}"],
+    data = ["rocm/lib/%{rccl_lib}"],
+    includes = [
+        ".",
+        "rocm/include",
+    ],
+    linkstatic = 1,
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "rocm",
     visibility = ["//visibility:public"],
     deps = [
         ":rocm_headers",
         ":hip",
         ":rocblas",
-        ":rocfft",
+        ":%{hipfft_or_rocfft}",
         ":hiprand",
         ":miopen",
+        ":hipsparse",
+        ":roctracer",
+        ":rocsolver",
+    ],
+)
+
+bzl_library(
+    name = "build_defs_bzl",
+    srcs = ["build_defs.bzl"],
+)
+
+cc_library(
+    name = "rocprim",
+    srcs = [
+        "rocm/include/hipcub/hipcub_version.hpp",
+        "rocm/include/rocprim/rocprim_version.hpp",
+    ],
+    hdrs = glob([
+        "rocm/include/hipcub/**",
+        "rocm/include/rocprim/**",
+    ]),
+    includes = [
+        ".",
+        "rocm/include/hipcub",
+        "rocm/include/rocprim",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@local_config_rocm//rocm:rocm_headers",
+    ],
+)
+
+cc_library(
+    name = "hipsparse",
+    data = ["rocm/lib/%{hipsparse_lib}"],
+)
+
+cc_library(
+    name = "roctracer",
+    data = ["rocm/lib/%{roctracer_lib}"],
+)
+
+cc_library(
+    name = "rocsolver",
+    srcs = ["rocm/lib/%{rocsolver_lib}"],
+    data = ["rocm/lib/%{rocsolver_lib}"],
+)
+
+filegroup(
+    name = "rocm_root",
+    srcs = [
+        "rocm/bin/clang-offload-bundler",
     ],
 )
 

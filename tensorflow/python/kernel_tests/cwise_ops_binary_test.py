@@ -22,6 +22,7 @@ import numpy as np
 
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes as dtypes_lib
+from tensorflow.python.framework import errors
 from tensorflow.python.framework import errors_impl
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
@@ -198,8 +199,8 @@ class BinaryOpTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def testFloatBasic(self):
-    x = np.linspace(-5, 20, 15).reshape(1, 3, 5).astype(np.float32)
-    y = np.linspace(20, -5, 15).reshape(1, 3, 5).astype(np.float32)
+    x = np.linspace(-5, 20, 15).reshape(1, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
+    y = np.linspace(20, -5, 15).reshape(1, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
     self._compareBoth(x, y, np.add, math_ops.add, also_compare_variables=True)
     self._compareBoth(x, y, np.subtract, math_ops.subtract)
     self._compareBoth(x, y, np.multiply, math_ops.multiply)
@@ -219,8 +220,8 @@ class BinaryOpTest(test.TestCase):
     self._compareBoth(x1, x2, np.arctan2, math_ops.atan2)
     try:
       from scipy import special  # pylint: disable=g-import-not-at-top
-      a_pos_small = np.linspace(0.1, 2, 15).reshape(1, 3, 5).astype(np.float32)
-      x_pos_small = np.linspace(0.1, 10, 15).reshape(1, 3, 5).astype(np.float32)
+      a_pos_small = np.linspace(0.1, 2, 15).reshape(1, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
+      x_pos_small = np.linspace(0.1, 10, 15).reshape(1, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
       self._compareBoth(a_pos_small, x_pos_small, special.gammainc,
                         math_ops.igamma)
       self._compareBoth(a_pos_small, x_pos_small, special.gammaincc,
@@ -255,10 +256,9 @@ class BinaryOpTest(test.TestCase):
     var_x = variables.Variable(x)
     var_y = variables.Variable(y)
 
-    with self.cached_session() as sess:
-      self.evaluate([var_x.initializer, var_y.initializer])
-      left_result = self.evaluate(var_x * y)
-      right_result = self.evaluate(x * var_y)
+    self.evaluate([var_x.initializer, var_y.initializer])
+    left_result = self.evaluate(var_x * y)
+    right_result = self.evaluate(x * var_y)
 
     np_result = x * y
     self.assertAllEqual(np_result, left_result)
@@ -266,8 +266,8 @@ class BinaryOpTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def testDoubleBasic(self):
-    x = np.linspace(-5, 20, 15).reshape(1, 3, 5).astype(np.float64)
-    y = np.linspace(20, -5, 15).reshape(1, 3, 5).astype(np.float64)
+    x = np.linspace(-5, 20, 15).reshape(1, 3, 5).astype(np.float64)  # pylint: disable=too-many-function-args
+    y = np.linspace(20, -5, 15).reshape(1, 3, 5).astype(np.float64)  # pylint: disable=too-many-function-args
     self._compareBoth(x, y, np.add, math_ops.add)
     self._compareBoth(x, y, np.subtract, math_ops.subtract)
     self._compareBoth(x, y, np.multiply, math_ops.multiply)
@@ -287,8 +287,8 @@ class BinaryOpTest(test.TestCase):
     self._compareBoth(x1, x2, np.arctan2, math_ops.atan2)
     try:
       from scipy import special  # pylint: disable=g-import-not-at-top
-      a_pos_small = np.linspace(0.1, 2, 15).reshape(1, 3, 5).astype(np.float32)
-      x_pos_small = np.linspace(0.1, 10, 15).reshape(1, 3, 5).astype(np.float32)
+      a_pos_small = np.linspace(0.1, 2, 15).reshape(1, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
+      x_pos_small = np.linspace(0.1, 10, 15).reshape(1, 3, 5).astype(np.float32)  # pylint: disable=too-many-function-args
       self._compareBoth(a_pos_small, x_pos_small, special.gammainc,
                         math_ops.igamma)
       self._compareBoth(a_pos_small, x_pos_small, special.gammaincc,
@@ -342,6 +342,11 @@ class BinaryOpTest(test.TestCase):
     # _MOD for int32 on GPU by calling _compareGpu
     self._compareGpu(x, y, np.mod, _MOD)
 
+  def testUint32Basic(self):
+    x = np.arange(1, 13, 2).reshape(1, 3, 2).astype(np.uint32)
+    y = np.arange(1, 7, 1).reshape(1, 3, 2).astype(np.uint32)
+    self._compareBoth(x, y, np.add, math_ops.add_v2)
+
   def testInt64Basic(self):
     x = np.arange(1 << 40, 13 << 40, 2 << 40).reshape(1, 3, 2).astype(np.int64)
     y = np.arange(1, 7, 1).reshape(1, 3, 2).astype(np.int64)
@@ -358,9 +363,9 @@ class BinaryOpTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def testComplex64Basic(self):
-    x = np.complex(1, 1) * np.linspace(-10, 10, 6).reshape(1, 3, 2).astype(
+    x = np.complex(1, 1) * np.linspace(-10, 10, 6).reshape(1, 3, 2).astype(  # pylint: disable=too-many-function-args
         np.complex64)
-    y = np.complex(1, 1) * np.linspace(20, -20, 6).reshape(1, 3, 2).astype(
+    y = np.complex(1, 1) * np.linspace(20, -20, 6).reshape(1, 3, 2).astype(  # pylint: disable=too-many-function-args
         np.complex64)
     self._compareBoth(x, y, np.add, math_ops.add)
     self._compareBoth(x, y, np.subtract, math_ops.subtract)
@@ -373,9 +378,9 @@ class BinaryOpTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def testComplex128Basic(self):
-    x = np.complex(1, 1) * np.linspace(-10, 10, 6).reshape(1, 3, 2).astype(
+    x = np.complex(1, 1) * np.linspace(-10, 10, 6).reshape(1, 3, 2).astype(  # pylint: disable=too-many-function-args
         np.complex128)
-    y = np.complex(1, 1) * np.linspace(20, -20, 6).reshape(1, 3, 2).astype(
+    y = np.complex(1, 1) * np.linspace(20, -20, 6).reshape(1, 3, 2).astype(  # pylint: disable=too-many-function-args
         np.complex128)
     self._compareBoth(x, y, np.add, math_ops.add)
     self._compareBoth(x, y, np.subtract, math_ops.subtract)
@@ -788,10 +793,10 @@ class BinaryOpTest(test.TestCase):
       self._compareCpu(x1, x2, np.arctan2, math_ops.atan2)
       self._compareGpu(x1, x2, np.arctan2, math_ops.atan2)
 
-  def testPowNegativeExponent(self):
+  def testPowNegativeExponentCpu(self):
     for dtype in [np.int32, np.int64]:
       with test_util.force_cpu():
-        with self.assertRaisesRegexp(
+        with self.assertRaisesRegex(
             errors_impl.InvalidArgumentError,
             "Integers to negative integer powers are not allowed"):
           x = np.array([5, 2]).astype(dtype)
@@ -799,7 +804,7 @@ class BinaryOpTest(test.TestCase):
           self.evaluate(math_ops.pow(x, y))
 
       with test_util.force_cpu():
-        with self.assertRaisesRegexp(
+        with self.assertRaisesRegex(
             errors_impl.InvalidArgumentError,
             "Integers to negative integer powers are not allowed"):
           x = np.array([5, 2]).astype(dtype)
@@ -807,12 +812,22 @@ class BinaryOpTest(test.TestCase):
           self.evaluate(math_ops.pow(x, y))
 
       with test_util.force_cpu():
-        with self.assertRaisesRegexp(
+        with self.assertRaisesRegex(
             errors_impl.InvalidArgumentError,
             "Integers to negative integer powers are not allowed"):
           x = np.array([5, 2]).astype(dtype)
           y = -3
           self.evaluate(math_ops.pow(x, y))
+
+  def testPowNegativeExponentGpu(self):
+    if not test_util.is_gpu_available():
+      self.skipTest("Requires GPU")
+    # Negative integer powers return zero on GPUs for abs(LHS) > 1. Negative
+    # integer powers for 1 and -1 will return the correct result.
+    x = np.array([2, 3, 1, -1, -1]).astype(np.int64)
+    y = np.array([-1, 0, -2, -2, -3]).astype(np.int64)
+    z = math_ops.pow(x, y)
+    self.assertAllEqual(self.evaluate(z), [0, 1, 1, 1, -1])
 
 
 class ComparisonOpTest(test.TestCase):
@@ -857,8 +872,8 @@ class ComparisonOpTest(test.TestCase):
     self.assertAllEqual(np_ans, tf_ans)
 
   def testTensorCompareTensor(self):
-    x = np.linspace(-15, 15, 6).reshape(1, 3, 2)
-    y = np.linspace(20, -10, 6).reshape(1, 3, 2)
+    x = np.linspace(-15, 15, 6).reshape(1, 3, 2)  # pylint: disable=too-many-function-args
+    y = np.linspace(20, -10, 6).reshape(1, 3, 2)  # pylint: disable=too-many-function-args
     for t in [np.float16, np.float32, np.float64, np.int32, np.int64]:
       xt = x.astype(t)
       yt = y.astype(t)
@@ -933,7 +948,6 @@ class ComparisonOpTest(test.TestCase):
     self._testBCastByFunc(
         np.not_equal, math_ops.not_equal, include_complex=True)
 
-  @test_util.run_deprecated_v1
   def testShapeMismatch(self):
     dtypes = [np.float16, np.float32, np.float64, np.int32, np.int64]
     funcs = [
@@ -944,9 +958,67 @@ class ComparisonOpTest(test.TestCase):
     y = np.arange(0, 10).reshape([5, 2])
     for t in dtypes:
       for f in funcs:
-        with self.assertRaisesWithPredicateMatch(
-            ValueError, lambda e: "Dimensions must" in str(e)):
+        with self.assertRaisesIncompatibleShapesError(
+            (ValueError, errors.InvalidArgumentError)):
           f(x.astype(t), y.astype(t))
+
+  def testEqualDType(self):
+    dtypes = [
+        np.float16,
+        np.float32,
+        np.float64,
+        np.int8,
+        np.int16,
+        np.int32,
+        np.int64,
+        np.uint8,
+        np.uint16,
+        np.uint32,
+        np.uint64,
+        np.bool,
+    ]
+    x = np.asarray([0, 1, 2, 3, 4])
+    y = np.asarray([0, 1, 2, 3, 4])
+    for dtype in dtypes:
+      xt = x.astype(dtype)
+      yt = y.astype(dtype)
+      cmp_eq = math_ops.equal(xt, yt)
+      cmp_ne = math_ops.not_equal(xt, yt)
+      values = self.evaluate([cmp_eq, cmp_ne])
+      self.assertAllEqual(
+          [[True, True, True, True, True], [False, False, False, False, False]],
+          values)
+    for dtype in [np.complex64, np.complex128]:
+      xt = x.astype(dtype)
+      xt -= 1j * xt
+      yt = y.astype(dtype)
+      yt -= 1j * yt
+      cmp_eq = math_ops.equal(xt, yt)
+      cmp_ne = math_ops.not_equal(xt, yt)
+      values = self.evaluate([cmp_eq, cmp_ne])
+      self.assertAllEqual(
+          [[True, True, True, True, True], [False, False, False, False, False]],
+          values)
+
+  @test_util.disable_tfrt("b/169901260")
+  def testEqualQuantizeDType(self):
+    dtypes = [
+        dtypes_lib.qint8,
+        dtypes_lib.qint16,
+        dtypes_lib.quint8,
+        dtypes_lib.quint16,
+    ]
+    x = np.asarray([0, 1, 2, 3, 4])
+    y = np.asarray([0, 1, 2, 3, 4])
+    for dtype in dtypes:
+      xt = x.astype(dtype.as_numpy_dtype)
+      yt = y.astype(dtype.as_numpy_dtype)
+      cmp_eq = math_ops.equal(xt, yt)
+      cmp_ne = math_ops.not_equal(xt, yt)
+      values = self.evaluate([cmp_eq, cmp_ne])
+      self.assertAllEqual(
+          [[True, True, True, True, True], [False, False, False, False, False]],
+          values)
 
 
 if __name__ == "__main__":

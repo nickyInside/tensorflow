@@ -26,12 +26,11 @@ from tensorflow.python.framework import test_util
 from tensorflow.python.ops import ragged
 from tensorflow.python.ops.ragged import ragged_factory_ops
 from tensorflow.python.ops.ragged import ragged_tensor
-from tensorflow.python.ops.ragged import ragged_test_util
 from tensorflow.python.platform import googletest
 
 
 @test_util.run_all_in_graph_and_eager_modes
-class RaggedConstOpTest(ragged_test_util.RaggedTensorTestCase,
+class RaggedConstOpTest(test_util.TensorFlowTestCase,
                         parameterized.TestCase):
 
   @parameterized.parameters(
@@ -203,7 +202,7 @@ class RaggedConstOpTest(ragged_test_util.RaggedTensorTestCase,
         pylist, dtype=dtype, ragged_rank=ragged_rank, inner_shape=inner_shape)
     # Normalize the pylist, i.e., convert all np.arrays to list.
     # E.g., [np.array((1,2))] --> [[1,2]]
-    pylist = self._normalize_pylist(pylist)
+    pylist = _normalize_pylist(pylist)
 
     # If dtype was explicitly specified, check it.
     if dtype is not None:
@@ -227,8 +226,11 @@ class RaggedConstOpTest(ragged_test_util.RaggedTensorTestCase,
 
     if expected_shape is not None:
       self.assertEqual(tuple(rt.shape.as_list()), expected_shape)
+      if (expected_shape and expected_shape[0] == 0 and
+          None not in expected_shape):
+        pylist = np.zeros(expected_shape, rt.dtype.as_numpy_dtype)
 
-    self.assertRaggedEqual(rt, pylist)
+    self.assertAllEqual(rt, pylist)
 
   @parameterized.parameters(
       dict(
@@ -299,7 +301,7 @@ class RaggedConstOpTest(ragged_test_util.RaggedTensorTestCase,
                            exception=None,
                            message=None):
     """Tests that `ragged_const()` raises an expected exception."""
-    self.assertRaisesRegexp(
+    self.assertRaisesRegex(
         exception,
         message,
         ragged_factory_ops.constant,
@@ -339,9 +341,9 @@ class RaggedConstOpTest(ragged_test_util.RaggedTensorTestCase,
                                   message=None):
     """Tests for the _find_scalar_and_max_depth helper function."""
     if exception is not None:
-      self.assertRaisesRegexp(exception, message,
-                              ragged_factory_ops._find_scalar_and_max_depth,
-                              pylist)
+      self.assertRaisesRegex(exception, message,
+                             ragged_factory_ops._find_scalar_and_max_depth,
+                             pylist)
     else:
       self.assertEqual(
           ragged_factory_ops._find_scalar_and_max_depth(pylist),
@@ -389,7 +391,7 @@ class RaggedConstOpTest(ragged_test_util.RaggedTensorTestCase,
                                            message=None):
     """Tests for the _default_inner_shape_for_pylist helper function."""
     if exception is not None:
-      self.assertRaisesRegexp(
+      self.assertRaisesRegex(
           exception, message,
           ragged.ragged_factory_ops._default_inner_shape_for_pylist, pylist,
           ragged_rank)
@@ -397,6 +399,15 @@ class RaggedConstOpTest(ragged_test_util.RaggedTensorTestCase,
       self.assertEqual(
           ragged.ragged_factory_ops._default_inner_shape_for_pylist(
               pylist, ragged_rank), inner_shape)
+
+
+def _normalize_pylist(item):
+  """Convert all (possibly nested) np.arrays contained in item to list."""
+  # convert np.arrays in current level to list
+  if np.ndim(item) == 0:
+    return item
+  level = (x.tolist() if isinstance(x, np.ndarray) else x for x in item)
+  return [_normalize_pylist(el) if np.ndim(el) != 0 else el for el in level]
 
 
 if __name__ == '__main__':

@@ -57,7 +57,8 @@ bool RoundTripPartialName(int parts_to_test, const std::vector<string>& parts,
       strings::StrAppend(&expected, "/device:", parts[3]);
     } else {
       strings::StrAppend(&original, "/", parts[3]);
-      strings::StrAppend(&expected, "/device:", str_util::Uppercase(parts[3]));
+      strings::StrAppend(&expected,
+                         "/device:", absl::AsciiStrToUpper(parts[3]));
     }
   }
   return RoundTripParsedName(original, expected);
@@ -103,6 +104,8 @@ TEST(DeviceNameUtilsTest, Basic) {
     // Allow _ in job names.
     DeviceNameUtils::ParsedName p;
     EXPECT_TRUE(DeviceNameUtils::ParseFullName(
+        "/job:foo_bar/replica:1/task:2/device:GPU:3", &p));
+    EXPECT_TRUE(DeviceNameUtils::ParseFullOrLocalName(
         "/job:foo_bar/replica:1/task:2/device:GPU:3", &p));
     EXPECT_TRUE(p.has_job);
     EXPECT_TRUE(p.has_replica);
@@ -245,12 +248,14 @@ TEST(DeviceNameUtilsTest, Basic) {
   {
     DeviceNameUtils::ParsedName p;
     EXPECT_TRUE(DeviceNameUtils::ParseLocalName("CPU:10", &p));
+    EXPECT_TRUE(DeviceNameUtils::ParseFullOrLocalName("CPU:10", &p));
     EXPECT_EQ(p.type, "CPU");
     EXPECT_EQ(p.id, 10);
     EXPECT_FALSE(DeviceNameUtils::ParseLocalName("cpu:abc", &p));
     EXPECT_FALSE(DeviceNameUtils::ParseLocalName("abc:", &p));
     EXPECT_FALSE(DeviceNameUtils::ParseLocalName("abc", &p));
     EXPECT_FALSE(DeviceNameUtils::ParseLocalName("myspecialdevice", &p));
+    EXPECT_FALSE(DeviceNameUtils::ParseFullOrLocalName("myspecialdevice", &p));
   }
 
   // Test that all parts are round-tripped correctly.
@@ -275,6 +280,19 @@ TEST(DeviceNameUtilsTest, Basic) {
       EXPECT_TRUE(RoundTripPartialName(i, {"foo", "3", "2", "someDevice:3"},
                                        /*explicitDevice=*/true));
     }
+  }
+  {
+    DeviceNameUtils::ParsedName x, y;
+    DeviceNameUtils::ParseFullName("/job:work/replica:1/task:3/device:GPU:*",
+                                   &x);
+    DeviceNameUtils::ParseFullName("/device:CPU:*", &y);
+    EXPECT_FALSE(DeviceNameUtils::AreCompatibleDevNames(x, y));
+  }
+  {
+    DeviceNameUtils::ParsedName x, y;
+    DeviceNameUtils::ParseFullName("/job:work/replica:1/task:3", &x);
+    DeviceNameUtils::ParseFullName("/device:CPU:*", &y);
+    EXPECT_TRUE(DeviceNameUtils::AreCompatibleDevNames(x, y));
   }
 }
 
@@ -408,8 +426,7 @@ static void MergeDevNamesError(const string& name_a, const string& name_b,
   DeviceNameUtils::ParsedName target_a = Name(name_a);
   Status s = DeviceNameUtils::MergeDevNames(&target_a, Name(name_b));
   EXPECT_EQ(s.code(), error::INVALID_ARGUMENT);
-  EXPECT_TRUE(str_util::StrContains(s.error_message(), expected_error_substr))
-      << s;
+  EXPECT_TRUE(absl::StrContains(s.error_message(), expected_error_substr)) << s;
 }
 
 static void MergeOverrideHelper(const string& target, const string& name,
@@ -425,9 +442,18 @@ static void MergeOverrideHelper(const string& target, const string& name,
       << DeviceNameUtils::ParsedNameToString(parsed_expected);
 }
 
-TEST(DeviceNameUtilsTest, MergeDevNames) {
-  DeviceNameUtils::ParsedName target;
+static void MergeUnsetDevNamesHelper(const string& name_a, const string& name_b,
+                                     const string& expected_merge_name_ab,
+                                     const string& expected_merge_name_ba) {
+  DeviceNameUtils::ParsedName target_a = Name(name_a);
+  DeviceNameUtils::MergeUnsetDevNames(&target_a, Name(name_b));
+  EXPECT_EQ(target_a, Name(expected_merge_name_ab));
+  DeviceNameUtils::ParsedName target_b = Name(name_b);
+  DeviceNameUtils::MergeUnsetDevNames(&target_b, Name(name_a));
+  EXPECT_EQ(target_b, Name(expected_merge_name_ba));
+}
 
+TEST(DeviceNameUtilsTest, MergeDevNames) {
   // Idempotence tests.
   MergeDevNamesHelper("", "", "");
   MergeDevNamesHelper("/job:foo/replica:1/task:2/cpu:1",
@@ -508,14 +534,57 @@ TEST(DeviceNameUtilsTest, MergeOverrideDevNames) {
   MergeOverrideHelper("/cpu:*", "/task:0/device:GPU:1", "/task:0/GPU:1");
 }
 
+TEST(DeviceNameUtilsTest, MergeUnsetDevNames) {
+  // Idempotence tests.
+  MergeUnsetDevNamesHelper("", "", "", "");
+  MergeUnsetDevNamesHelper(
+      "/job:foo/replica:1/task:2/cpu:1", "/job:foo/replica:1/task:2/cpu:1",
+      "/job:foo/replica:1/task:2/cpu:1", "/job:foo/replica:1/task:2/cpu:1");
+
+  // Merging with empty device has no effect.
+  MergeUnsetDevNamesHelper("", "/job:foo", "/job:foo", "/job:foo");
+  MergeUnsetDevNamesHelper("", "/replica:2", "/replica:2", "/replica:2");
+  MergeUnsetDevNamesHelper("", "/task:7", "/task:7", "/task:7");
+  MergeUnsetDevNamesHelper("", "/device:GPU:1", "/device:GPU:1",
+                           "/device:GPU:1");
+
+  // Combining disjoint names.
+  MergeUnsetDevNamesHelper("/job:foo", "/task:7", "/job:foo/task:7",
+                           "/job:foo/task:7");
+  MergeUnsetDevNamesHelper("/job:foo", "/device:GPU:1", "/job:foo/device:GPU:1",
+                           "/job:foo/device:GPU:1");
+
+  // Combining overlapping names.
+  MergeUnsetDevNamesHelper("/job:foo/replica:0", "/replica:0/task:1",
+                           "/job:foo/replica:0/task:1",
+                           "/job:foo/replica:0/task:1");
+
+  // Wildcard tests.
+  MergeUnsetDevNamesHelper("", "/gpu:*", "/gpu:*", "/gpu:*");
+  MergeUnsetDevNamesHelper("/gpu:*", "/gpu:*", "/gpu:*", "/gpu:*");
+  MergeUnsetDevNamesHelper("/device:GPU:1", "/gpu:*", "/device:GPU:1",
+                           "/device:GPU:1");
+
+  // Incompatible components.
+  MergeUnsetDevNamesHelper("/job:foo", "/job:bar", "/job:foo", "/job:bar");
+  MergeUnsetDevNamesHelper("/replica:0", "/replica:1", "/replica:0",
+                           "/replica:1");
+  MergeUnsetDevNamesHelper("/task:0", "/task:1", "/task:0", "/task:1");
+  MergeUnsetDevNamesHelper("/gpu:*", "/cpu:*", "/gpu:*", "/cpu:*");
+  MergeUnsetDevNamesHelper("/device:GPU:0", "/device:GPU:1", "/device:GPU:0",
+                           "/device:GPU:1");
+  MergeUnsetDevNamesHelper("/job:foo/device:GPU", "/job:bar",
+                           "/job:foo/device:GPU", "/job:bar/device:GPU");
+}
+
 TEST(DeviceNameUtilsTest, GetNamesForDeviceMappings) {
   DeviceNameUtils::ParsedName p =
       Name("/job:foo/replica:10/task:0/device:GPU:1");
-  EXPECT_EQ(str_util::Join(DeviceNameUtils::GetNamesForDeviceMappings(p), ","),
+  EXPECT_EQ(absl::StrJoin(DeviceNameUtils::GetNamesForDeviceMappings(p), ","),
             "/job:foo/replica:10/task:0/device:GPU:1,"
             "/job:foo/replica:10/task:0/gpu:1");
   p.has_task = false;
-  EXPECT_EQ(str_util::Join(DeviceNameUtils::GetNamesForDeviceMappings(p), ","),
+  EXPECT_EQ(absl::StrJoin(DeviceNameUtils::GetNamesForDeviceMappings(p), ","),
             "");
 }
 
@@ -557,9 +626,9 @@ TEST(DeviceNameUtilsTest, CanonicalizeDeviceName) {
   }
 }
 
-static void BM_ParseFullName(int iters) {
+static void BM_ParseFullName(::testing::benchmark::State& state) {
   DeviceNameUtils::ParsedName p;
-  while (iters--) {
+  for (auto s : state) {
     DeviceNameUtils::ParseFullName("/job:worker/replica:3/task:0/cpu:0", &p);
   }
 }

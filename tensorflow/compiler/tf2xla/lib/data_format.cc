@@ -14,12 +14,14 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/tf2xla/lib/data_format.h"
+
+#include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/errors.h"
 
 namespace tensorflow {
 namespace {
 
-xla::StatusOr<xla::XlaOp> Contract(xla::XlaOp input, int64 dim) {
+StatusOr<xla::XlaOp> Contract(xla::XlaOp input, int64 dim) {
   xla::XlaBuilder* builder = input.builder();
   TF_ASSIGN_OR_RETURN(xla::Shape input_shape, builder->GetShape(input));
 
@@ -45,7 +47,7 @@ xla::StatusOr<xla::XlaOp> Contract(xla::XlaOp input, int64 dim) {
   return xla::Reshape(xla::Transpose(input, permutation), contracted_shape);
 }
 
-xla::StatusOr<xla::XlaOp> Expand(xla::XlaOp input, int64 dim) {
+StatusOr<xla::XlaOp> Expand(xla::XlaOp input, int64 dim) {
   xla::XlaBuilder* builder = input.builder();
   TF_ASSIGN_OR_RETURN(xla::Shape input_shape, builder->GetShape(input));
 
@@ -57,13 +59,14 @@ xla::StatusOr<xla::XlaOp> Expand(xla::XlaOp input, int64 dim) {
 
   // Split the `dim` into two dimensions with a reshape. The size of the new
   // dimension is always 4.
-  std::vector<int64> expanded_shape(input_shape.dimensions());
+  std::vector<int64> expanded_shape =
+      xla::SpanToVector(input_shape.dimensions());
   expanded_shape[dim] /= 4;
-  expanded_shape.insert(expanded_shape.begin() + dim, 4);
+  expanded_shape.insert(expanded_shape.begin() + dim + 1, 4);
 
   // Move the newly created dimension to the end with a transpose.
   std::vector<int64> permutation;
-  for (int64 i = 0; i != expanded_shape.size(); ++i) {
+  for (int64 i = 0, end = expanded_shape.size(); i != end; ++i) {
     permutation.push_back(i);
     if (i == dim) {
       ++i;
@@ -76,11 +79,11 @@ xla::StatusOr<xla::XlaOp> Expand(xla::XlaOp input, int64 dim) {
 
 }  // namespace
 
-xla::StatusOr<xla::XlaOp> NCHW_VECT_CToNCHW(xla::XlaOp input) {
+StatusOr<xla::XlaOp> NCHW_VECT_CToNCHW(xla::XlaOp input) {
   return Contract(input, 1);
 }
 
-xla::StatusOr<xla::XlaOp> NCHWToNCHW_VECT_C(xla::XlaOp input) {
+StatusOr<xla::XlaOp> NCHWToNCHW_VECT_C(xla::XlaOp input) {
   return Expand(input, 1);
 }
 

@@ -1,4 +1,6 @@
-licenses(["notice"])  # Apache 2.0
+package(
+    licenses = ["notice"],
+)
 
 filegroup(
     name = "nnapi_delegate_src",

@@ -18,6 +18,7 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/kernels/ops_testutil.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 
 namespace tensorflow {
 
@@ -52,7 +53,7 @@ class QuantOpsTest : public OpsTestBase {
   void RunTestFakeQuantWithMinMaxArgs(const int num_bits,
                                       const bool narrow_range, const float min,
                                       const float max, const TensorShape& shape,
-                                      const gtl::ArraySlice<float>& data,
+                                      const gtl::ArraySlice<float> data,
                                       gtl::ArraySlice<float> expected_data) {
     TF_EXPECT_OK(NodeDefBuilder("op", "FakeQuantWithMinMaxArgs")
                      .Input(FakeInput(DT_FLOAT))  // inputs
@@ -77,7 +78,7 @@ class QuantOpsTest : public OpsTestBase {
   void RunTestFakeQuantWithMinMaxVars(const int num_bits,
                                       const bool narrow_range, const float min,
                                       const float max, const TensorShape& shape,
-                                      const gtl::ArraySlice<float>& data,
+                                      const gtl::ArraySlice<float> data,
                                       gtl::ArraySlice<float> expected_data) {
     TF_EXPECT_OK(NodeDefBuilder("op", "FakeQuantWithMinMaxVars")
                      .Input(FakeInput(DT_FLOAT))  // inputs
@@ -105,10 +106,9 @@ class QuantOpsTest : public OpsTestBase {
 
   void RunTestFakeQuantWithMinMaxVarsPerChannel(
       const int num_bits, const bool narrow_range,
-      const TensorShape& minmax_shape, const gtl::ArraySlice<float>& min,
-      const gtl::ArraySlice<float>& max, const TensorShape& shape,
-      const gtl::ArraySlice<float>& data,
-      gtl::ArraySlice<float> expected_data) {
+      const TensorShape& minmax_shape, const gtl::ArraySlice<float> min,
+      const gtl::ArraySlice<float> max, const TensorShape& shape,
+      const gtl::ArraySlice<float> data, gtl::ArraySlice<float> expected_data) {
     TF_EXPECT_OK(NodeDefBuilder("op", "FakeQuantWithMinMaxVarsPerChannel")
                      .Input(FakeInput(DT_FLOAT))  // inputs
                      .Input(FakeInput(DT_FLOAT))  // min

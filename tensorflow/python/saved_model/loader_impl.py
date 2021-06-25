@@ -24,6 +24,7 @@ import os
 from google.protobuf import message
 from google.protobuf import text_format
 
+from tensorflow.core.protobuf import graph_debug_info_pb2
 from tensorflow.core.protobuf import meta_graph_pb2
 from tensorflow.core.protobuf import saved_model_pb2
 from tensorflow.python.framework import ops
@@ -33,17 +34,52 @@ from tensorflow.python.platform import tf_logging
 from tensorflow.python.saved_model import constants
 from tensorflow.python.saved_model import signature_def_utils
 from tensorflow.python.saved_model import utils_impl as saved_model_utils
+from tensorflow.python.saved_model.experimental.pywrap_libexport import metrics
 from tensorflow.python.training import saver as tf_saver
 from tensorflow.python.util import compat
 from tensorflow.python.util import deprecation
 from tensorflow.python.util.tf_export import tf_export
 
+# API label for SavedModel metrics.
+_LOADER_LABEL = "loader"
 
+
+def parse_saved_model_with_debug_info(export_dir):
+  """Reads the savedmodel as well as the graph debug info.
+
+  Args:
+    export_dir: Directory containing the SavedModel and GraphDebugInfo files.
+
+  Returns:
+    `SavedModel` and `GraphDebugInfo` protocol buffers.
+
+  Raises:
+    IOError: If the saved model file does not exist, or cannot be successfully
+    parsed. Missing graph debug info file is fine.
+  """
+  saved_model = _parse_saved_model(export_dir)
+
+  debug_info_path = os.path.join(
+      saved_model_utils.get_debug_dir(export_dir),
+      constants.DEBUG_INFO_FILENAME_PB)
+  debug_info = graph_debug_info_pb2.GraphDebugInfo()
+  if file_io.file_exists(debug_info_path):
+    with file_io.FileIO(debug_info_path, "rb") as debug_file:
+      try:
+        debug_info.ParseFromString(debug_file.read())
+      except message.DecodeError as e:
+        raise IOError("Cannot parse file %s: %s." % (debug_info_path, str(e)))
+
+  return (saved_model, debug_info)
+
+
+@tf_export("__internal__.saved_model.parse_saved_model", v1=[])
 def parse_saved_model(export_dir):
   """Reads the savedmodel.pb or savedmodel.pbtxt file containing `SavedModel`.
 
   Args:
-    export_dir: Directory containing the SavedModel file.
+    export_dir: String or Pathlike, path to the directory containing the
+    SavedModel file.
 
   Returns:
     A `SavedModel` protocol buffer.
@@ -53,34 +89,36 @@ def parse_saved_model(export_dir):
   """
   # Build the path to the SavedModel in pbtxt format.
   path_to_pbtxt = os.path.join(
-      compat.as_bytes(export_dir),
+      compat.as_bytes(compat.path_to_str(export_dir)),
       compat.as_bytes(constants.SAVED_MODEL_FILENAME_PBTXT))
   # Build the path to the SavedModel in pb format.
   path_to_pb = os.path.join(
-      compat.as_bytes(export_dir),
+      compat.as_bytes(compat.path_to_str(export_dir)),
       compat.as_bytes(constants.SAVED_MODEL_FILENAME_PB))
 
   # Parse the SavedModel protocol buffer.
   saved_model = saved_model_pb2.SavedModel()
   if file_io.file_exists(path_to_pb):
+    with file_io.FileIO(path_to_pb, "rb") as f:
+      file_content = f.read()
     try:
-      file_content = file_io.FileIO(path_to_pb, "rb").read()
       saved_model.ParseFromString(file_content)
       return saved_model
     except message.DecodeError as e:
       raise IOError("Cannot parse file %s: %s." % (path_to_pb, str(e)))
   elif file_io.file_exists(path_to_pbtxt):
+    with file_io.FileIO(path_to_pbtxt, "rb") as f:
+      file_content = f.read()
     try:
-      file_content = file_io.FileIO(path_to_pbtxt, "rb").read()
       text_format.Merge(file_content.decode("utf-8"), saved_model)
       return saved_model
     except text_format.ParseError as e:
       raise IOError("Cannot parse file %s: %s." % (path_to_pbtxt, str(e)))
   else:
-    raise IOError("SavedModel file does not exist at: %s/{%s|%s}" %
-                  (export_dir,
-                   constants.SAVED_MODEL_FILENAME_PBTXT,
-                   constants.SAVED_MODEL_FILENAME_PB))
+    raise IOError(
+        "SavedModel file does not exist at: %s%s{%s|%s}" %
+        (export_dir, os.path.sep, constants.SAVED_MODEL_FILENAME_PBTXT,
+         constants.SAVED_MODEL_FILENAME_PB))
 
 
 # TODO(b/120594573): Make this symbol also available as private, so that
@@ -137,7 +175,7 @@ def _get_main_op_tensor(
 
   Args:
     meta_graph_def_to_load: The meta graph def from the SavedModel to be loaded.
-    init_op_key: name of collection to check; should be one of MAIN_OP_KEY
+    init_op_key: name of the collection to check; should be one of MAIN_OP_KEY
       or the deprecated LEGACY_INIT_OP_KEY
 
   Returns:
@@ -264,6 +302,45 @@ def load(sess, tags, export_dir, import_scope=None, **saver_kwargs):
 
   Raises:
     RuntimeError: MetaGraphDef associated with the tags cannot be found.
+
+  @compatibility(TF2)
+
+  `tf.compat.v1.saved_model.load` or `tf.compat.v1.saved_model.loader.load` is
+  not compatible with eager execution. Please use `tf.saved_model.load` instead
+  to load your model. You can refer to the [SavedModel guide]
+  (https://www.tensorflow.org/guide/saved_model) for more information as well as
+  "Importing SavedModels from TensorFlow 1.x" in the [`tf.saved_model.load`]
+  (https://www.tensorflow.org/api_docs/python/tf/saved_model/load) docstring.
+
+  #### How to Map Arguments
+
+  | TF1 Arg Name          | TF2 Arg Name    | Note                       |
+  | :-------------------- | :-------------- | :------------------------- |
+  | `sess`                | Not supported   | -                          |
+  | `tags`                | `tags`          | -                          |
+  | `export_dir`          | `export_dir`    | -                          |
+  | `import_scope`        | Not supported   | Name scopes are not needed.
+  :                       :                 : By default, variables are  :
+  :                       :                 : associated with the loaded :
+  :                       :                 : object and function names  :
+  :                       :                 : are deduped.               :
+  | `saver_kwargs`        | Not supported   | -                          |
+
+  #### Before & After Usage Example
+
+  Before:
+
+  ```
+  with tf.compat.v1.Session(graph=tf.Graph()) as sess:
+    tf.compat.v1.saved_model.loader.load(sess, ["foo-tag"], export_dir)
+  ```
+
+  After:
+
+  ```
+  model = tf.saved_model.load(export_dir, tags=["foo-tag"])
+  ```
+  @end_compatibility
   """
   loader = SavedModelLoader(export_dir)
   return loader.load(sess, tags, import_scope, **saver_kwargs)
@@ -311,7 +388,9 @@ class SavedModelLoader(object):
       RuntimeError: if no metagraphs were found with the associated tags.
     """
     found_match = False
+    available_tags = []
     for meta_graph_def in self._saved_model.meta_graphs:
+      available_tags.append(set(meta_graph_def.meta_info_def.tags))
       if set(meta_graph_def.meta_info_def.tags) == set(tags):
         meta_graph_def_to_load = meta_graph_def
         found_match = True
@@ -322,7 +401,7 @@ class SavedModelLoader(object):
           "MetaGraphDef associated with tags " + str(tags).strip("[]") +
           " could not be found in SavedModel. To inspect available tag-sets in"
           " the SavedModel, please use the SavedModel CLI: `saved_model_cli`"
-      )
+          "\navailable_tags: " + str(available_tags))
     return meta_graph_def_to_load
 
   def load_graph(self, graph, tags, import_scope=None, **saver_kwargs):
@@ -415,9 +494,12 @@ class SavedModelLoader(object):
     Returns:
       `MetagraphDef` proto of the graph that was loaded.
     """
+    metrics.IncrementReadApi(_LOADER_LABEL)
     with sess.graph.as_default():
       saver, _ = self.load_graph(sess.graph, tags, import_scope,
                                  **saver_kwargs)
       self.restore_variables(sess, saver, import_scope)
       self.run_init_ops(sess, tags, import_scope)
-    return self.get_meta_graph_def_from_tags(tags)
+    meta_graph_def = self.get_meta_graph_def_from_tags(tags)
+    metrics.IncrementRead()
+    return meta_graph_def

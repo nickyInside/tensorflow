@@ -18,6 +18,7 @@ limitations under the License.
 #include <memory>
 #include <vector>
 
+#include "tensorflow/c/c_api.h"
 #include "tensorflow/cc/client/client_session.h"
 #include "tensorflow/cc/framework/ops.h"
 #include "tensorflow/cc/framework/scope.h"
@@ -25,6 +26,8 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/device_factory.h"
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/function.h"
+#include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/lib/gtl/array_slice.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/platform/test_benchmark.h"
@@ -80,6 +83,62 @@ TEST(AttrTypeMap, CacheKey) {
 
   a.Set("x", 1.0);
   ASSERT_FALSE(cache_key == a.CacheKey("cpu:0"));
+}
+
+string ToString(const AttrValueMap& m) {
+  std::vector<string> strs;
+  for (const auto& e : m) {
+    strs.push_back(absl::StrCat(e.first, " -> ", e.second.DebugString()));
+  }
+  return absl::StrJoin(strs, "\n");
+}
+
+TEST(AttrBuilder, FillAttrValueMapWithoutDefaults_MatMul) {
+  AttrBuilder a("MatMul");
+  a.Set("transpose_a", true);
+  a.Set("transpose_b", false);
+
+  AttrValueMap m;
+  a.FillAttrValueMapWithoutDefaults(&m);
+  // Only non-default value must end up in the map
+  ASSERT_EQ(1, m.size()) << ToString(m);
+  ASSERT_EQ(true, m["transpose_a"].b()) << ToString(m);
+}
+
+TEST(AttrBuilder, FillAttrValueMapWithoutDefaults_UnknownOp) {
+  AttrBuilder a("SomeUnknownOp");
+  a.Set("transpose_a", true);
+  a.Set("transpose_b", false);
+
+  AttrValueMap m;
+  a.FillAttrValueMapWithoutDefaults(&m);
+  // Only non-default value must end up in the map
+  ASSERT_EQ(2, m.size()) << ToString(m);
+  ASSERT_EQ(true, m["transpose_a"].b()) << ToString(m);
+  ASSERT_EQ(false, m["transpose_b"].b()) << ToString(m);
+}
+
+TEST(AttrBuilder, GetTypeAndNumber) {
+  AttrBuilder a("Concat");
+  a.Set("T", DT_FLOAT);
+  a.Set("N", 2);
+  DataType type;
+  ASSERT_TRUE(a.GetType("T", &type));
+  ASSERT_EQ(DT_FLOAT, type);
+  int64_t num;
+  ASSERT_TRUE(a.GetInt("N", &num));
+  ASSERT_EQ(2, num);
+}
+
+TEST(AttrBuilder, GetTypeList) {
+  AttrBuilder a("IdentityN");
+  a.Set("T", gtl::ArraySlice<DataType>({DT_FLOAT, DT_INT64}));
+  absl::InlinedVector<DataType, 4> type_list;
+  Status s = a.GetTypeList("T", &type_list);
+  ASSERT_TRUE(s.ok()) << s;
+  ASSERT_EQ(2, type_list.size()) << type_list.size();
+  ASSERT_EQ(DT_FLOAT, type_list[0]) << type_list[0];
+  ASSERT_EQ(DT_INT64, type_list[1]) << type_list[1];
 }
 
 }  // namespace

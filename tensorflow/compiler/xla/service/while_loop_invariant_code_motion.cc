@@ -14,10 +14,12 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/xla/service/while_loop_invariant_code_motion.h"
+
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
+#include "tensorflow/compiler/xla/service/hlo_dce.h"
 #include "tensorflow/compiler/xla/service/tuple_util.h"
 #include "tensorflow/compiler/xla/service/while_loop_analysis.h"
 #include "tensorflow/compiler/xla/service/while_util.h"
@@ -208,7 +210,15 @@ WhileLoopInvariantCodeMotion::TryHoistingInvariantInstructionsFromWhileBody(
       continue;
     }
 
-    if (!hoist_size_inflating_ops_) {
+    if (!hoist_non_constants_ &&
+        instruction->opcode() != HloOpcode::kConstant) {
+      continue;
+    }
+
+    // Constants don't inflate, so size inflation check doesn't make sense for
+    // constants.
+    if (hoist_size_inflation_ratio_ &&
+        instruction->opcode() != HloOpcode::kConstant) {
       // Check that hoisting the instruction doesn't cause a significant memory
       // blow-up. LICM extends the live-range of the output of the hoisted
       // instruction to be the entire while loop, which may be problematic on
@@ -219,22 +229,23 @@ WhileLoopInvariantCodeMotion::TryHoistingInvariantInstructionsFromWhileBody(
 
       for (auto* operand : instruction->operands()) {
         ShapeUtil::ForEachSubshape(
-            operand->shape(),
-            [&input_size](const Shape& subshape, const ShapeIndex& /*index*/) {
+            operand->shape(), [&input_size, this](const Shape& subshape,
+                                                  const ShapeIndex& /*index*/) {
               if (subshape.IsArray()) {
-                input_size += ShapeUtil::ByteSizeOfElements(subshape);
+                input_size += shape_size_function_(subshape);
               }
             });
       }
       ShapeUtil::ForEachSubshape(
           instruction->shape(),
-          [&output_size](const Shape& subshape, const ShapeIndex& /*index*/) {
+          [&output_size, this](const Shape& subshape,
+                               const ShapeIndex& /*index*/) {
             if (subshape.IsArray()) {
-              output_size += ShapeUtil::ByteSizeOfElements(subshape);
+              output_size += shape_size_function_(subshape);
             }
           });
 
-      if (output_size > input_size) {
+      if (output_size > input_size * *hoist_size_inflation_ratio_) {
         continue;
       }
     }
@@ -299,12 +310,12 @@ WhileLoopInvariantCodeMotion::TryHoistingInvariantInstructionsFromWhileBody(
 }
 
 StatusOr<bool> WhileLoopInvariantCodeMotion::Run(HloModule* module) {
-  VLOG(2) << "HLO module before WhileLoopConstantSinking:";
+  VLOG(2) << "HLO module before WhileLoopInvariantCodeMotion:";
   XLA_VLOG_LINES(2, module->ToString());
 
   bool changed = false;
   std::vector<HloInstruction*> while_instrs;
-  for (auto* comp : module->computations()) {
+  for (auto* comp : module->MakeComputationPostOrder()) {
     absl::c_copy_if(comp->instructions(), std::back_inserter(while_instrs),
                     [](const HloInstruction* instr) {
                       return instr->opcode() == HloOpcode::kWhile;
@@ -316,7 +327,7 @@ StatusOr<bool> WhileLoopInvariantCodeMotion::Run(HloModule* module) {
     // TryHoistingInvariantInstructionsFromWhileBody can be generalized to
     // optimize the condition computation too, if needed.
     //
-    // The transform we do here is a pessmization for while loops that execute
+    // The transform we do here is a pessimization for while loops that execute
     // zero times*, but at this time we expect those to be rare.  If this
     // becomes a problem we can consider using the conditional HLO to avoid
     // doing extra work for while loops with zero trip count.
@@ -331,10 +342,19 @@ StatusOr<bool> WhileLoopInvariantCodeMotion::Run(HloModule* module) {
   }
 
   if (changed) {
-    VLOG(2) << "HLO module after WhileLoopConstantSinking:";
+    // Run DCE if changed. This pass may create new while loops with new
+    // computations and if we don't delete the old ones, we can have spurious
+    // verification failures (e.g., the verifier may see multiple channel
+    // instructions that have the same channel ids).
+    HloDCE dce;
+    TF_RETURN_IF_ERROR(dce.Run(module).status());
+  }
+
+  if (changed) {
+    VLOG(2) << "HLO module after WhileLoopInvariantCodeMotion:";
     XLA_VLOG_LINES(2, module->ToString());
   } else {
-    VLOG(2) << "HLO module unchanged after WhileLoopConstantSinking";
+    VLOG(2) << "HLO module unchanged after WhileLoopInvariantCodeMotion";
   }
 
   return changed;

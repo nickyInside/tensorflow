@@ -24,9 +24,14 @@ namespace tensorflow {
 
 // Broadcasts 'input' up to shape 'output_dims', using TensorFlow broadcasting
 // rules. Supports broadcasting a dimension of size x to size x*y, i.e., tiling.
-xla::StatusOr<xla::XlaOp> BroadcastTo(xla::XlaOp input,
-                                      absl::Span<int64 const> output_dims);
+StatusOr<xla::XlaOp> BroadcastTo(xla::XlaOp input,
+                                 absl::Span<int64 const> output_dims);
 
+// Both ops are broadcasted to the same dimensions, so that each dimension is
+// the max of the two.
+// An InvalidArgument will be returned if the operations are of different rank
+// or they share a dimension where they are unequal and neither is 1.
+Status BroadcastOpsToSame(xla::XlaOp* lhs, xla::XlaOp* rhs);
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_COMPILER_TF2XLA_LIB_BROADCAST_H_

@@ -17,23 +17,26 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections
+
+from absl.testing import parameterized
 import numpy as np
 
+from tensorflow.python.data.kernel_tests import checkpoint_test_base
 from tensorflow.python.data.kernel_tests import test_base
 from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.framework import combinations
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.framework import tensor_shape
-from tensorflow.python.framework import test_util
 from tensorflow.python.ops.ragged import ragged_factory_ops
-from tensorflow.python.ops.ragged import ragged_tensor
 from tensorflow.python.platform import test
 
 
-@test_util.run_all_in_graph_and_eager_modes
-class FromTensorSlicesTest(test_base.DatasetTestBase):
+class FromTensorSlicesTest(test_base.DatasetTestBase, parameterized.TestCase):
 
+  @combinations.generate(test_base.default_test_combinations())
   def testFromTensorSlices(self):
     """Test a dataset that represents the slices from a tuple of tensors."""
     components = (
@@ -56,6 +59,33 @@ class FromTensorSlicesTest(test_base.DatasetTestBase):
     with self.assertRaises(errors.OutOfRangeError):
       results = self.evaluate(get_next())
 
+  @combinations.generate(test_base.default_test_combinations())
+  def testFromTensorSlicesDataset(self):
+    dss = [dataset_ops.Dataset.range(10) for _ in range(10)]
+    ds = dataset_ops.Dataset.from_tensor_slices(dss)
+    ds = ds.flat_map(lambda x: x)
+    self.assertDatasetProduces(ds, expected_output=list(range(10)) * 10)
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testFromTensorSlicesDatasetOfOrderedDict(self):
+    dss = [dataset_ops.Dataset.range(10).map(
+        lambda x: collections.OrderedDict([("x", x)])) for _ in range(10)]
+    ds = dataset_ops.Dataset.from_tensor_slices(dss)
+    ds = ds.flat_map(lambda x: x)
+    self.assertDatasetProduces(
+        ds,
+        expected_output=[collections.OrderedDict([("x", x)])
+                         for x in list(range(10)) * 10])
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testFromTensorSlicesDatasetInFunction(self):
+    dss = [dataset_ops.Dataset.range(10) for _ in range(10)]
+    ds = dataset_ops.Dataset.from_tensors(dss)
+    ds = ds.flat_map(dataset_ops.Dataset.from_tensor_slices)
+    ds = ds.flat_map(lambda x: x)
+    self.assertDatasetProduces(ds, expected_output=list(range(10)) * 10)
+
+  @combinations.generate(test_base.default_test_combinations())
   def testFromTensorSlicesSparse(self):
     """Test a dataset that represents the slices from a tuple of tensors."""
     components = (sparse_tensor.SparseTensorValue(
@@ -101,6 +131,7 @@ class FromTensorSlicesTest(test_base.DatasetTestBase):
     ]
     self.assertDatasetProduces(dataset, expected_output=expected)
 
+  @combinations.generate(test_base.default_test_combinations())
   def testFromTensorSlicesMixed(self):
     """Test a dataset that represents the slices from a tuple of tensors."""
     components = (np.tile(np.array([[1], [2], [3]]), 20),
@@ -152,13 +183,11 @@ class FromTensorSlicesTest(test_base.DatasetTestBase):
       results = self.evaluate(get_next())
       for component, result_component in zip(
           (list(zip(*components[:3]))[i] + expected[i]), results):
-        if sparse_tensor.is_sparse(component):
-          self.assertSparseValuesEqual(component, result_component)
-        else:
-          self.assertAllEqual(component, result_component)
+        self.assertValuesEqual(component, result_component)
     with self.assertRaises(errors.OutOfRangeError):
       self.evaluate(get_next())
 
+  @combinations.generate(test_base.default_test_combinations())
   def testFromTensorSlicesWithDict(self):
     components = {"foo": [1, 2, 3], "bar": [[4.0], [5.0], [6.0]]}
     dataset = dataset_ops.Dataset.from_tensor_slices(components)
@@ -178,6 +207,7 @@ class FromTensorSlicesTest(test_base.DatasetTestBase):
     with self.assertRaises(errors.OutOfRangeError):
       self.evaluate(get_next())
 
+  @combinations.generate(test_base.default_test_combinations())
   def testFromTensorSlicesRagged(self):
     components = (
         ragged_factory_ops.constant_value([[[0]], [[1]], [[2]]]),
@@ -192,6 +222,7 @@ class FromTensorSlicesTest(test_base.DatasetTestBase):
                  ragged_factory_ops.constant_value([[5]]))]
     self.assertDatasetProduces(dataset, expected_output=expected)
 
+  @combinations.generate(test_base.default_test_combinations())
   def testFromTensorSlicesMixedRagged(self):
     components = (np.tile(np.array([[1], [2], [3]]),
                           20), np.tile(np.array([[12], [13], [14]]),
@@ -242,14 +273,57 @@ class FromTensorSlicesTest(test_base.DatasetTestBase):
       results = self.evaluate(get_next())
       for component, result_component in zip(
           (list(zip(*components[:3]))[i] + expected[i]), results):
-        if sparse_tensor.is_sparse(component):
-          self.assertSparseValuesEqual(component, result_component)
-        elif ragged_tensor.is_ragged(component):
-          self.assertRaggedEqual(component, result_component)
-        else:
-          self.assertAllEqual(component, result_component)
+        self.assertValuesEqual(component, result_component)
     with self.assertRaises(errors.OutOfRangeError):
       self.evaluate(get_next())
+
+  @combinations.generate(test_base.default_test_combinations())
+  def testFromTensorSlicesWithUintDtypes(self):
+    components = (
+        np.tile(np.array([[0], [1]], dtype=np.uint8), 2),
+        np.tile(np.array([[2], [256]], dtype=np.uint16), 2),
+        np.tile(np.array([[4], [65536]], dtype=np.uint32), 2),
+        np.tile(np.array([[8], [4294967296]], dtype=np.uint64), 2),
+    )
+    expected_types = (dtypes.uint8, dtypes.uint16, dtypes.uint32, dtypes.uint64)
+    expected_output = [tuple([c[i] for c in components]) for i in range(2)]
+
+    dataset = dataset_ops.Dataset.from_tensor_slices(components)
+    self.assertEqual(expected_types,
+                     dataset_ops.get_legacy_output_types(dataset))
+    self.assertDatasetProduces(dataset, expected_output)
+
+
+class FromTensorSlicesCheckpointTest(checkpoint_test_base.CheckpointTestBase,
+                                     parameterized.TestCase):
+
+  def _build_tensor_slices_dataset(self, components):
+    return dataset_ops.Dataset.from_tensor_slices(components)
+
+  @combinations.generate(
+      combinations.times(test_base.default_test_combinations(),
+                         checkpoint_test_base.default_test_combinations()))
+  def test(self, verify_fn):
+    # Equal length components
+    components = (np.tile(np.array([[1], [2], [3], [4]]),
+                          20), np.tile(np.array([[12], [13], [14], [15]]),
+                                       22), np.array([37.0, 38.0, 39.0, 40.0]))
+
+    verify_fn(
+        self,
+        lambda: self._build_tensor_slices_dataset(components),
+        num_outputs=4)
+
+  @combinations.generate(
+      combinations.times(test_base.default_test_combinations(),
+                         checkpoint_test_base.default_test_combinations()))
+  def testDict(self, verify_fn):
+    dict_components = {"foo": [1, 2, 3], "bar": [[4.0], [5.0], [6.0]]}
+
+    verify_fn(
+        self,
+        lambda: self._build_tensor_slices_dataset(dict_components),
+        num_outputs=3)
 
 
 if __name__ == "__main__":

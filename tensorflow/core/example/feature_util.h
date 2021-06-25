@@ -20,11 +20,11 @@ limitations under the License.
 // So accessing feature values is not very convenient.
 //
 // For example, to read a first value of integer feature "tag":
-//   int id = example.features().feature().at("tag").int64_list().value(0)
+//   int id = example.features().feature().at("tag").int64_list().value(0);
 //
 // to add a value:
 //   auto features = example->mutable_features();
-//   (*features->mutable_feature())["tag"].mutable_int64_list()->add_value(id)
+//   (*features->mutable_feature())["tag"].mutable_int64_list()->add_value(id);
 //
 // For float features you have to use float_list, for string - bytes_list.
 //
@@ -67,7 +67,8 @@ limitations under the License.
 //         feature { float_list { value: [4.0] } }
 //         feature { float_list { value: [5.0, 3.0] } }
 //       }
-//     } }
+//     }
+//   }
 //
 // Functions exposed by this library:
 //   HasFeature<[FeatureType]>(key, proto) -> bool
@@ -119,8 +120,8 @@ limitations under the License.
 #include "absl/base/macros.h"
 #include "tensorflow/core/example/example.pb.h"
 #include "tensorflow/core/example/feature.pb.h"
-#include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/core/platform/stringpiece.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -131,7 +132,7 @@ namespace internal {
 // Returns a reference to a feature corresponding to the name.
 // Note: it will create a new Feature if it is missing in the example.
 ABSL_DEPRECATED("Use GetFeature instead.")
-Feature& ExampleFeature(const string& name, Example* example);
+Feature& ExampleFeature(const std::string& name, Example* example);
 
 // Specializations of RepeatedFieldTrait define a type of RepeatedField
 // corresponding to a selected feature type.
@@ -149,8 +150,13 @@ struct RepeatedFieldTrait<float> {
 };
 
 template <>
-struct RepeatedFieldTrait<string> {
-  using Type = protobuf::RepeatedPtrField<string>;
+struct RepeatedFieldTrait<tstring> {
+  using Type = protobuf::RepeatedPtrField<std::string>;
+};
+
+template <>
+struct RepeatedFieldTrait<std::string> {
+  using Type = protobuf::RepeatedPtrField<std::string>;
 };
 
 // Specializations of FeatureTrait define a type of feature corresponding to a
@@ -180,21 +186,25 @@ struct is_string
 };
 
 template <>
-struct is_string<string> : std::true_type {};
+struct is_string<std::string> : std::true_type {};
 
 template <>
 struct is_string<::tensorflow::StringPiece> : std::true_type {};
 
+template <>
+struct is_string<tstring> : std::true_type {};
+
 template <typename ValueType>
 struct FeatureTrait<
     ValueType, typename std::enable_if<is_string<ValueType>::value>::type> {
-  using Type = string;
+  using Type = std::string;
 };
 
 }  //  namespace internal
 
 // Returns true if sequence_example has a feature_list with the specified key.
-bool HasFeatureList(const string& key, const SequenceExample& sequence_example);
+bool HasFeatureList(const std::string& key,
+                    const SequenceExample& sequence_example);
 
 template <typename T>
 struct TypeHasFeatures : std::false_type {};
@@ -226,7 +236,7 @@ GetFeatureValues(const Feature& feature);
 // specified name and FeatureType. Supported ProtoTypes: Example, Features.
 template <typename FeatureType, typename ProtoType>
 const typename internal::RepeatedFieldTrait<FeatureType>::Type&
-GetFeatureValues(const string& key, const ProtoType& proto) {
+GetFeatureValues(const std::string& key, const ProtoType& proto) {
   return GetFeatureValues<FeatureType>(GetFeatures(proto).feature().at(key));
 }
 
@@ -239,7 +249,7 @@ typename internal::RepeatedFieldTrait<FeatureType>::Type* GetFeatureValues(
 // specified name and FeatureType. Supported ProtoTypes: Example, Features.
 template <typename FeatureType, typename ProtoType>
 typename internal::RepeatedFieldTrait<FeatureType>::Type* GetFeatureValues(
-    const string& key, ProtoType* proto) {
+    const std::string& key, ProtoType* proto) {
   ::tensorflow::Feature& feature =
       (*GetFeatures(proto)->mutable_feature())[key];
   return GetFeatureValues<FeatureType>(&feature);
@@ -249,25 +259,25 @@ typename internal::RepeatedFieldTrait<FeatureType>::Type* GetFeatureValues(
 // std::out_of_range if the key is not found. Supported types for the proto:
 // Example, Features.
 template <typename ProtoType>
-const Feature& GetFeature(const string& key, const ProtoType& proto) {
+const Feature& GetFeature(const std::string& key, const ProtoType& proto) {
   return GetFeatures(proto).feature().at(key);
 }
 
 // Returns a mutable Feature proto for the specified key, creates a new if
 // necessary. Supported types for the proto: Example, Features.
 template <typename ProtoType>
-Feature* GetFeature(const string& key, ProtoType* proto) {
+Feature* GetFeature(const std::string& key, ProtoType* proto) {
   return &(*GetFeatures(proto)->mutable_feature())[key];
 }
 
 // Returns a repeated field with features corresponding to a feature_list key.
 const protobuf::RepeatedPtrField<Feature>& GetFeatureList(
-    const string& key, const SequenceExample& sequence_example);
+    const std::string& key, const SequenceExample& sequence_example);
 
 // Returns a mutable repeated field with features corresponding to a
 // feature_list key. It will create a new FeatureList if necessary.
 protobuf::RepeatedPtrField<Feature>* GetFeatureList(
-    const string& feature_list_key, SequenceExample* sequence_example);
+    const std::string& feature_list_key, SequenceExample* sequence_example);
 
 template <typename IteratorType>
 void AppendFeatureValues(IteratorType first, IteratorType last,
@@ -296,13 +306,13 @@ void AppendFeatureValues(const ContainerType& container, Feature* feature) {
 // obtainable from the (proto, key) combination.
 template <typename IteratorType, typename ProtoType>
 void AppendFeatureValues(IteratorType first, IteratorType last,
-                         const string& key, ProtoType* proto) {
+                         const std::string& key, ProtoType* proto) {
   AppendFeatureValues(first, last, GetFeature(key, GetFeatures(proto)));
 }
 
 // Copies all elements from the container into a feature.
 template <typename ContainerType, typename ProtoType>
-void AppendFeatureValues(const ContainerType& container, const string& key,
+void AppendFeatureValues(const ContainerType& container, const std::string& key,
                          ProtoType* proto) {
   using IteratorType = typename ContainerType::const_iterator;
   AppendFeatureValues<IteratorType>(container.begin(), container.end(), key,
@@ -313,7 +323,7 @@ void AppendFeatureValues(const ContainerType& container, const string& key,
 // Features or Example proto.
 template <typename ValueType, typename ProtoType>
 void AppendFeatureValues(std::initializer_list<ValueType> container,
-                         const string& key, ProtoType* proto) {
+                         const std::string& key, ProtoType* proto) {
   using IteratorType =
       typename std::initializer_list<ValueType>::const_iterator;
   AppendFeatureValues<IteratorType>(container.begin(), container.end(), key,
@@ -355,15 +365,15 @@ void SetFeatureValues(const ContainerType& container, Feature* feature) {
 // elements from the range, defined by [first, last) into the feature's repeated
 // field.
 template <typename IteratorType, typename ProtoType>
-void SetFeatureValues(IteratorType first, IteratorType last, const string& key,
-                      ProtoType* proto) {
+void SetFeatureValues(IteratorType first, IteratorType last,
+                      const std::string& key, ProtoType* proto) {
   SetFeatureValues(first, last, GetFeature(key, GetFeatures(proto)));
 }
 
 // Clears the feature's repeated field (int64, float, or string). Copies all
 // elements from the container into the feature's repeated field.
 template <typename ContainerType, typename ProtoType>
-void SetFeatureValues(const ContainerType& container, const string& key,
+void SetFeatureValues(const ContainerType& container, const std::string& key,
                       ProtoType* proto) {
   using IteratorType = typename ContainerType::const_iterator;
   SetFeatureValues<IteratorType>(container.begin(), container.end(), key,
@@ -374,7 +384,7 @@ void SetFeatureValues(const ContainerType& container, const string& key,
 // elements from the initializer list into the feature's repeated field.
 template <typename ValueType, typename ProtoType>
 void SetFeatureValues(std::initializer_list<ValueType> container,
-                      const string& key, ProtoType* proto) {
+                      const std::string& key, ProtoType* proto) {
   using IteratorType =
       typename std::initializer_list<ValueType>::const_iterator;
   SetFeatureValues<IteratorType>(container.begin(), container.end(), key,
@@ -387,20 +397,20 @@ void SetFeatureValues(std::initializer_list<ValueType> container,
 // the function will not check the feature type. Otherwise it will return false
 // if the feature has a wrong type.
 template <typename... FeatureType>
-bool HasFeature(const string& key, const Features& features);
+bool HasFeature(const std::string& key, const Features& features);
 
 // Returns true if a feature with the specified key belongs to the Example.
 // Doesn't check feature type if used without FeatureType, otherwise the
 // specialized versions return false if the feature has a wrong type.
 template <typename... FeatureType>
-bool HasFeature(const string& key, const Example& example) {
+bool HasFeature(const std::string& key, const Example& example) {
   return HasFeature<FeatureType...>(key, GetFeatures(example));
 }
 
 // TODO(gorban): update all clients in a followup CL.
 template <typename... FeatureType>
 ABSL_DEPRECATED("Use HasFeature instead.")
-bool ExampleHasFeature(const string& key, const Example& example) {
+bool ExampleHasFeature(const std::string& key, const Example& example) {
   return HasFeature<FeatureType...>(key, example);
 }
 

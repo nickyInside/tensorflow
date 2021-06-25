@@ -19,6 +19,7 @@ limitations under the License.
 #include <vector>
 
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/type_traits.h"
 #include "tensorflow/core/framework/variant.h"
 #include "tensorflow/core/lib/core/stringpiece.h"
@@ -48,7 +49,7 @@ void DeepCopy(const Tensor& input, Tensor* output) {
              input_data.size());
     }
   } else if (input.dtype() == DT_STRING) {
-    output->unaligned_flat<string>() = input.unaligned_flat<string>();
+    output->unaligned_flat<tstring>() = input.unaligned_flat<tstring>();
   } else {
     CHECK_EQ(DT_VARIANT, input.dtype());
     output->unaligned_flat<Variant>() = input.unaligned_flat<Variant>();
@@ -74,7 +75,9 @@ Status Concat(const gtl::ArraySlice<Tensor>& tensors, Tensor* result) {
   for (int i = 1; i < tensors.size(); ++i) {
     if (tensors[i].dtype() != dtype) {
       return errors::InvalidArgument(
-          "Cannot concatenate tensors that have different data types");
+          "Cannot concatenate tensors that have different data types.", " Got ",
+          DataTypeString(dtype), " and ", DataTypeString(tensors[i].dtype()),
+          ".");
     }
   }
   *result = Tensor(dtype, shape);
@@ -98,12 +101,12 @@ Status Concat(const gtl::ArraySlice<Tensor>& tensors, Tensor* result) {
     if (dtype != DT_STRING) {
       return errors::Internal("Unexpected data type");
     }
-    string* to_strings =
-        reinterpret_cast<string*>(const_cast<char*>(to_data.data()));
+    tstring* to_strings =
+        reinterpret_cast<tstring*>(const_cast<char*>(to_data.data()));
 
     int64 offset = 0;
     for (const Tensor& tensor : tensors) {
-      auto from_strings = tensor.flat<string>();
+      auto from_strings = tensor.flat<tstring>();
       CHECK_LE(offset + tensor.NumElements(), result->NumElements());
       for (int i = 0; i < tensor.NumElements(); ++i) {
         to_strings[offset + i] = from_strings(i);
@@ -155,7 +158,7 @@ Status Split(const Tensor& tensor, const gtl::ArraySlice<int64>& sizes,
     if (tensor.dtype() != DT_STRING) {
       return errors::Internal("Unexpected data type");
     }
-    auto from_strings = tensor.flat<string>();
+    auto from_strings = tensor.flat<tstring>();
 
     int64 offset = 0;
     for (int64 size : sizes) {
@@ -163,7 +166,7 @@ Status Split(const Tensor& tensor, const gtl::ArraySlice<int64>& sizes,
       shape.set_dim(0, size);
       result->emplace_back(tensor.dtype(), shape);
       Tensor& split = (*result)[result->size() - 1];
-      string* to_strings = reinterpret_cast<string*>(
+      tstring* to_strings = reinterpret_cast<tstring*>(
           const_cast<char*>(split.tensor_data().data()));
 
       CHECK_LE(offset + split.NumElements(), tensor.NumElements());
@@ -210,6 +213,17 @@ bool CompressTensorContent(float min_compression_ratio,
     }
     --last_offset;
     --prev_offset;
+  }
+  if (prev_offset == -1) {
+    // It this is a splat of value 0, it does not need an explicit value, just
+    // erase the content.
+    T splat_value;
+    port::CopySubrangeToArray(tensor->tensor_content(), 0, sizeof(T),
+                              reinterpret_cast<char*>(&splat_value));
+    if (splat_value == T(0)) {
+      tensor->clear_tensor_content();
+      return true;
+    }
   }
   // Round up to the next whole number of element of type T.
   const int64 new_num_values = last_offset / sizeof(T) + 1;
@@ -271,14 +285,14 @@ bool CompressRepeatedField(float min_compression_ratio,
   using TypeHelper = internal::TensorProtoHelper<T>;
   using FieldType = typename internal::TensorProtoHelper<T>::FieldType;
   const int64 num_tensor_values = shape.num_elements();
+  const int64 num_proto_values = TypeHelper::NumValues(*tensor);
+
   // Notice that for complex types the tensor is stored as an array of up to
   // 2 * num_tensor_values real values (real and imaginary parts), possibly
-  // truncated.
-  const int64 num_proto_values = TypeHelper::NumValues(*tensor);
-  if (num_proto_values != num_tensor_values) {
-    // Already compressed or invalid.
-    return false;
-  }
+  // truncated. A 0-splat does not need any value present and is maximally
+  // compressed.
+  if (num_proto_values == 0) return false;
+
   const T last_value = TypeHelper::GetValue(num_proto_values - 1, *tensor);
   int64 last_index = 0;
   for (int64 i = num_proto_values - 2; i >= 0 && last_index == 0; --i) {
@@ -287,6 +301,14 @@ bool CompressRepeatedField(float min_compression_ratio,
       last_index = i + 1;
     }
   }
+
+  // Detect all zeroes tensors: this is default value and the content can be
+  // erased entirely.
+  if (last_index == 0 && last_value == T(0)) {
+    TypeHelper::Truncate(0, tensor);
+    return true;
+  }
+
   const int64 num_truncated_proto_values = last_index + 1;
   const int64 num_bytes_as_field =
       num_truncated_proto_values * sizeof(FieldType);
@@ -299,8 +321,14 @@ bool CompressRepeatedField(float min_compression_ratio,
   if (num_bytes_as_field <= num_bytes_as_tensor_content) {
     TypeHelper::Truncate(num_truncated_proto_values, tensor);
   } else {
-    gtl::InlinedVector<T, 64> tmp(num_tensor_values);
-    TypeHelper::CopyValues(tmp.begin(), *tensor);
+    gtl::InlinedVector<T, 64> tmp;
+    if (num_proto_values == 1) {
+      // Splat case.
+      tmp.resize(num_tensor_values, last_value);
+    } else {
+      tmp.resize(num_tensor_values, T(0));
+      TypeHelper::CopyValues(tmp.begin(), *tensor);
+    }
     TypeHelper::Truncate(0, tensor);
     port::CopyFromArray(tensor->mutable_tensor_content(),
                         reinterpret_cast<const char*>(tmp.data()),
@@ -365,6 +393,23 @@ bool CompressTensorProtoInPlace(int64 min_num_elements,
 }
 
 #undef HANDLE_COMPRESS_CASE
+
+Status MakeShape(const Tensor& shape, TensorShape* out) {
+  if (!TensorShapeUtils::IsVector(shape.shape())) {
+    return errors::InvalidArgument(
+        "shape must be a vector of {int32,int64}, got shape ",
+        shape.shape().DebugString());
+  }
+  if (shape.dtype() == DataType::DT_INT32) {
+    auto vec = shape.flat<int32>();
+    return TensorShapeUtils::MakeShape(vec.data(), vec.size(), out);
+  } else if (shape.dtype() == DataType::DT_INT64) {
+    auto vec = shape.flat<int64>();
+    return TensorShapeUtils::MakeShape(vec.data(), vec.size(), out);
+  } else {
+    return errors::InvalidArgument("shape must be a vector of {int32,int64}.");
+  }
+}
 
 }  // namespace tensor
 }  // namespace tensorflow

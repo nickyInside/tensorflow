@@ -18,9 +18,6 @@ limitations under the License.
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/platform/init_main.h"
-#include "tensorflow/core/util/command_line_flags.h"
 #include "tensorflow/lite/model.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #include "tensorflow/lite/tools/optimize/test_util.h"
@@ -55,16 +52,6 @@ TEST(ModelUtilsTest, HasBuffer) {
   EXPECT_TRUE(HasBuffer(&model, model.subgraphs[0].get(), 0));
 }
 
-TEST(ModelUtilsTest, IsQuantized) {
-  tflite::SubGraphT subgraph;
-  auto tensor = absl::make_unique<tflite::TensorT>();
-  tensor->type = TensorType_UINT8;
-  subgraph.tensors.push_back(std::move(tensor));
-  EXPECT_TRUE(IsQuantized(&subgraph, 0));
-  subgraph.tensors[0]->type = TensorType_FLOAT32;
-  EXPECT_FALSE(IsQuantized(&subgraph, 0));
-}
-
 TEST(ModelUtilsTest, HasMinMax) {
   TensorT tensor;
   tensor.quantization = absl::make_unique<QuantizationParametersT>();
@@ -78,5 +65,3 @@ TEST(ModelUtilsTest, HasMinMax) {
 }  // namespace utils
 }  // namespace optimize
 }  // namespace tflite
-
-int main(int argc, char** argv) { return RUN_ALL_TESTS(); }

@@ -16,21 +16,20 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_DATA_AUTO_SHARD_H_
 #define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_DATA_AUTO_SHARD_H_
 
+#include "tensorflow/core/framework/dataset_options.pb.h"
 #include "tensorflow/core/grappler/optimizers/data/optimizer_base.h"
 
 namespace tensorflow {
 namespace grappler {
 
-// AutoShard takes a Dataset graph and tries to insert a shard node
-// automatically before a ReaderDataset (e.g. a CSVDataset or a TFRecordDataset)
-// such that the dataset is sharded without any modifications to the original
-// dataset-based input pipeline.
 class AutoShard : public TFDataOptimizerBase {
  public:
   AutoShard() = default;
   ~AutoShard() override = default;
 
   string name() const override { return "tf_auto_shard"; }
+
+  bool UsesFunctionLibrary() const override { return true; }
 
   Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override;
@@ -39,12 +38,11 @@ class AutoShard : public TFDataOptimizerBase {
                                  GraphDef* output,
                                  OptimizationStats* stats) override;
 
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimize_output, double result) override {}
-
  private:
   int64 num_workers_;
+  int64 num_replicas_;
   int64 index_;
+  tensorflow::data::AutoShardPolicy auto_shard_policy_;
 };
 
 }  // namespace grappler

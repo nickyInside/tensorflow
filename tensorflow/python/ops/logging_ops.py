@@ -18,15 +18,16 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import collections as py_collections
 import os
 import pprint
 import random
 import sys
 
+from absl import logging
 import six
 
-from tensorflow.python import pywrap_tensorflow
-from tensorflow.python.compat import compat
+from tensorflow.python import pywrap_tfe
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import sparse_tensor
@@ -38,6 +39,7 @@ from tensorflow.python.ops import string_ops
 from tensorflow.python.ops.gen_logging_ops import *
 # pylint: enable=wildcard-import
 from tensorflow.python.platform import tf_logging
+from tensorflow.python.util import dispatch
 from tensorflow.python.util import nest
 from tensorflow.python.util.deprecation import deprecated
 from tensorflow.python.util.tf_export import tf_export
@@ -45,7 +47,7 @@ from tensorflow.python.util.tf_export import tf_export
 # Register printing to the cell output if we are in a Colab or Jupyter Notebook.
 try:
   get_ipython()  # Exists in an ipython env like Jupyter or Colab
-  pywrap_tensorflow.TFE_Py_EnableInteractivePythonLogging()
+  pywrap_tfe.TFE_Py_EnableInteractivePythonLogging()
 except NameError:
   pass
 
@@ -53,11 +55,9 @@ except NameError:
 # call relies on certain conditionals for its dependencies.  Use
 # control_flow_ops.Assert.
 
-# Assert and Print are special symbols in python, so we must
-# have an upper-case version of them.
-#
-# For users with Python 3 or Python 2.7
-# with `from __future__ import print_function`, we could also allow lowercase.
+# Assert and Print are special symbols in Python 2, so we must
+# have an upper-case version of them. When support for it is dropped,
+# we can allow lowercase.
 # See https://github.com/tensorflow/tensorflow/issues/18053
 
 
@@ -69,22 +69,9 @@ except NameError:
             "directly specified in session.run or used as a "
             "control dependency for other operators. This is "
             "only a concern in graph mode. Below is an example "
-            "of how to ensure tf.print executes in graph mode:\n"
-            """```python
-    sess = tf.compat.v1.Session()
-    with sess.as_default():
-        tensor = tf.range(10)
-        print_op = tf.print(tensor)
-        with tf.control_dependencies([print_op]):
-          out = tf.add(tensor, tensor)
-        sess.run(out)
-    ```
-Additionally, to use tf.print in python 2.7, users must make sure to import
-the following:
-
-  `from __future__ import print_function`
-""")
+            "of how to ensure tf.print executes in graph mode:\n")
 @tf_export(v1=["Print"])
+@dispatch.add_dispatch_support
 def Print(input_, data, message=None, first_n=None, summarize=None, name=None):
   """Prints a list of tensors.
 
@@ -107,6 +94,16 @@ def Print(input_, data, message=None, first_n=None, summarize=None, name=None):
 
   Returns:
     A `Tensor`. Has the same type and contents as `input_`.
+
+    ```python
+    sess = tf.compat.v1.Session()
+    with sess.as_default():
+        tensor = tf.range(10)
+        print_op = tf.print(tensor)
+        with tf.control_dependencies([print_op]):
+          out = tf.add(tensor, tensor)
+        sess.run(out)
+    ```
   """
   return gen_logging_ops._print(input_, data, message, first_n, summarize, name)
 
@@ -135,50 +132,49 @@ def _is_filepath(output_stream):
 # function definition.
 # pylint: disable=g-doc-args
 @tf_export("print")
+@dispatch.add_dispatch_support
 def print_v2(*inputs, **kwargs):
   """Print the specified inputs.
 
-  Returns an operator that prints the specified inputs to a desired
+  A TensorFlow operator that prints the specified inputs to a desired
   output stream or logging level. The inputs may be dense or sparse Tensors,
-  primitive python objects, data structures that contain Tensors, and printable
-  python objects. Printed tensors will recursively show the first and last
-  `summarize` elements of each dimension.
-
-  With eager execution enabled and/or inside a `tf.contrib.eager.defun` this
-  operator will automatically execute, and users only need to call `tf.print`
-  without using the return value. When constructing graphs outside of a
-  `tf.contrib.eager.defun`, one must either include the returned op
-  in the input to `session.run`, or use the operator as a control dependency for
-  executed ops by specifying `with tf.control_dependencies([print_op])`.
-
-  @compatibility(python2)
-  In python 2.7, make sure to import the following:
-  `from __future__ import print_function`
-  @end_compatibility
+  primitive python objects, data structures that contain tensors, and printable
+  Python objects. Printed tensors will recursively show the first and last
+  elements of each dimension to summarize.
 
   Example:
     Single-input usage:
+
     ```python
-    tf.compat.v1.enable_eager_execution()
     tensor = tf.range(10)
     tf.print(tensor, output_stream=sys.stderr)
     ```
+
     (This prints "[0 1 2 ... 7 8 9]" to sys.stderr)
 
     Multi-input usage:
+
     ```python
-    tf.compat.v1.enable_eager_execution()
     tensor = tf.range(10)
     tf.print("tensors:", tensor, {2: tensor * 2}, output_stream=sys.stdout)
     ```
+
     (This prints "tensors: [0 1 2 ... 7 8 9] {2: [0 2 4 ... 14 16 18]}" to
     sys.stdout)
 
-    Usage in a defun:
+    Changing the input separator:
     ```python
-    tf.compat.v1.enable_eager_execution()
+    tensor_a = tf.range(2)
+    tensor_b = tensor_a * 2
+    tf.print(tensor_a, tensor_b, output_stream=sys.stderr, sep=',')
+    ```
 
-    @tf.contrib.eager.defun
+    (This prints "[0 1],[0 2]" to sys.stderr)
+
+    Usage in a `tf.function`:
+
+    ```python
+    @tf.function
     def f():
         tensor = tf.range(10)
         tf.print(tensor, output_stream=sys.stderr)
@@ -186,9 +182,20 @@ def print_v2(*inputs, **kwargs):
 
     range_tensor = f()
     ```
+
     (This prints "[0 1 2 ... 7 8 9]" to sys.stderr)
 
-    Usage when constructing graphs:
+  @compatibility(TF 1.x Graphs and Sessions)
+  In graphs manually created outside of `tf.function`, this method returns
+  the created TF operator that prints the data. To make sure the
+  operator runs, users need to pass the produced op to
+  `tf.compat.v1.Session`'s run method, or to use the op as a control
+  dependency for executed ops by specifying
+  `with tf.compat.v1.control_dependencies([print_op])`.
+  @end_compatibility
+
+    Compatibility usage in TF 1.x graphs:
+
     ```python
     sess = tf.compat.v1.Session()
     with sess.as_default():
@@ -199,10 +206,11 @@ def print_v2(*inputs, **kwargs):
           tripled_tensor = tensor * 3
         sess.run(tripled_tensor)
     ```
+
     (This prints "tensors: [0 1 2 ... 7 8 9] {2: [0 2 4 ... 14 16 18]}" to
     sys.stdout)
 
-  Note: In Jupyter notebooks and colabs, this operator prints to the notebook
+  Note: In Jupyter notebooks and colabs, `tf.print` prints to the notebook
     cell outputs. It will not write to the notebook kernel's console logs.
 
   Args:
@@ -213,10 +221,10 @@ def print_v2(*inputs, **kwargs):
       ways), and printable python objects.
     output_stream: The output stream, logging level, or file to print to.
       Defaults to sys.stderr, but sys.stdout, tf.compat.v1.logging.info,
-      tf.compat.v1.logging.warning, and tf.compat.v1.logging.error are also
-      supported. To print to
-      a file, pass a string started with "file://" followed by the file path,
-      e.g., "file:///tmp/foo.out".
+      tf.compat.v1.logging.warning, tf.compat.v1.logging.error,
+      absl.logging.info, absl.logging.warning and absl.logging.error are also
+      supported. To print to a file, pass a string started with "file://"
+      followed by the file path, e.g., "file:///tmp/foo.out".
     summarize: The first and last `summarize` elements within each dimension are
       recursively printed per Tensor. If None, then the first 3 and last 3
       elements of each dimension are printed for each tensor. If set to -1, it
@@ -227,8 +235,10 @@ def print_v2(*inputs, **kwargs):
     name: A name for the operation (optional).
 
   Returns:
-    A print operator that prints the specified inputs in the specified output
-    stream or logging level.
+    None when executing eagerly. During graph tracing this returns
+    a TF operator that prints the specified inputs in the specified output
+    stream or logging level. This operator will be automatically executed
+    except inside of `tf.compat.v1` graphs and sessions.
 
   Raises:
     ValueError: If an unsupported output stream is specified.
@@ -260,6 +270,15 @@ def print_v2(*inputs, **kwargs):
       tf_logging.warn: "log(warning)",
       tf_logging.ERROR: "log(error)",
       tf_logging.error: "log(error)",
+      logging.INFO: "log(info)",
+      logging.info: "log(info)",
+      logging.INFO: "log(info)",
+      logging.WARNING: "log(warning)",
+      logging.WARN: "log(warning)",
+      logging.warning: "log(warning)",
+      logging.warn: "log(warning)",
+      logging.ERROR: "log(error)",
+      logging.error: "log(error)",
   }
 
   if _is_filepath(output_stream):
@@ -275,7 +294,7 @@ def print_v2(*inputs, **kwargs):
                        "File needs to be in the form of 'file://<filepath>'.")
 
   # If we are only printing a single string scalar, there is no need to format
-  if (len(inputs) == 1 and tensor_util.is_tensor(inputs[0]) and
+  if (len(inputs) == 1 and tensor_util.is_tf_type(inputs[0]) and
       (not isinstance(inputs[0], sparse_tensor.SparseTensor)) and
       (inputs[0].shape.ndims == 0) and (inputs[0].dtype == dtypes.string)):
     formatted_string = inputs[0]
@@ -287,8 +306,21 @@ def print_v2(*inputs, **kwargs):
     # printed input.
     templates = []
     tensors = []
+    # If an input to the print function is of type `OrderedDict`, sort its
+    # elements by the keys for consistency with the ordering of `nest.flatten`.
+    # This is not needed for `dict` types because `pprint.pformat()` takes care
+    # of printing the template in a sorted fashion.
+    inputs_ordered_dicts_sorted = []
+    for input_ in inputs:
+      if isinstance(input_, py_collections.OrderedDict):
+        inputs_ordered_dicts_sorted.append(
+            py_collections.OrderedDict(sorted(input_.items())))
+      else:
+        inputs_ordered_dicts_sorted.append(input_)
     tensor_free_structure = nest.map_structure(
-        lambda x: "" if tensor_util.is_tensor(x) else x, inputs)
+        lambda x: "" if tensor_util.is_tf_type(x) else x,
+        inputs_ordered_dicts_sorted)
+
     tensor_free_template = " ".join(
         pprint.pformat(x) for x in tensor_free_structure)
     placeholder = _generate_placeholder_string(tensor_free_template)
@@ -306,7 +338,7 @@ def print_v2(*inputs, **kwargs):
           placeholders.append(
               "SparseTensor(indices={}, values={}, shape={})".format(
                   placeholder, placeholder, placeholder))
-        elif tensor_util.is_tensor(x):
+        elif tensor_util.is_tf_type(x):
           tensors.append(x)
           placeholders.append(placeholder)
         else:
@@ -345,15 +377,8 @@ def print_v2(*inputs, **kwargs):
         summarize=summarize,
         name=format_name)
 
-  if compat.forward_compatible(2019, 5, 27):
-    return gen_logging_ops.print_v2(
-        formatted_string, output_stream=output_stream_string, name=name,
-        end=end)
-  else:
-    if end == os.linesep:
-      end = ""
-    return gen_logging_ops.print_v2(
-        formatted_string + end, output_stream=output_stream_string, name=name)
+  return gen_logging_ops.print_v2(
+      formatted_string, output_stream=output_stream_string, name=name, end=end)
 
 # pylint: enable=g-doc-args
 

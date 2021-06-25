@@ -63,6 +63,7 @@ def _rotate_last_dim(x, rotate_right=False):
 
 
 @tf_export("linalg.LinearOperatorKronecker")
+@linear_operator.make_composite_tensor
 class LinearOperatorKronecker(linear_operator.LinearOperator):
   """Kronecker product between two `LinearOperators`.
 
@@ -82,10 +83,10 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
   operator = LinearOperatorKronecker([operator_1, operator_2])
 
   operator.to_dense()
-  ==> [[1., 2., 0., 0.],
-       [3., 4., 0., 0.],
-       [2., 4., 1., 2.],
-       [6., 8., 3., 4.]]
+  ==> [[1., 0., 2., 0.],
+       [2., 1., 4., 2.],
+       [3., 0., 4., 0.],
+       [6., 3., 8., 4.]]
 
   operator.shape
   ==> [4, 4]
@@ -167,6 +168,15 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
       TypeError:  If all operators do not have the same `dtype`.
       ValueError:  If `operators` is empty.
     """
+    parameters = dict(
+        operators=operators,
+        is_non_singular=is_non_singular,
+        is_self_adjoint=is_self_adjoint,
+        is_positive_definite=is_positive_definite,
+        is_square=is_square,
+        name=name
+    )
+
     # Validate operators.
     check_ops.assert_proper_iterable(operators)
     operators = list(operators)
@@ -221,12 +231,14 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
     with ops.name_scope(name, values=graph_parents):
       super(LinearOperatorKronecker, self).__init__(
           dtype=dtype,
-          graph_parents=graph_parents,
           is_non_singular=is_non_singular,
           is_self_adjoint=is_self_adjoint,
           is_positive_definite=is_positive_definite,
           is_square=is_square,
+          parameters=parameters,
           name=name)
+    # TODO(b/143910018) Remove graph_parents in V3.
+    self._set_graph_parents(graph_parents)
 
   @property
   def operators(self):
@@ -236,11 +248,11 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
     # Get final matrix shape.
     domain_dimension = self.operators[0].domain_dimension
     for operator in self.operators[1:]:
-      domain_dimension *= operator.domain_dimension
+      domain_dimension = domain_dimension * operator.domain_dimension
 
     range_dimension = self.operators[0].range_dimension
     for operator in self.operators[1:]:
-      range_dimension *= operator.range_dimension
+      range_dimension = range_dimension * operator.range_dimension
 
     matrix_shape = tensor_shape.TensorShape([
         range_dimension, domain_dimension])
@@ -257,11 +269,11 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
   def _shape_tensor(self):
     domain_dimension = self.operators[0].domain_dimension_tensor()
     for operator in self.operators[1:]:
-      domain_dimension *= operator.domain_dimension_tensor()
+      domain_dimension = domain_dimension * operator.domain_dimension_tensor()
 
     range_dimension = self.operators[0].range_dimension_tensor()
     for operator in self.operators[1:]:
-      range_dimension *= operator.range_dimension_tensor()
+      range_dimension = range_dimension * operator.range_dimension_tensor()
 
     matrix_shape = [range_dimension, domain_dimension]
 
@@ -397,7 +409,7 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
     total = self.domain_dimension_tensor()
     determinant = 1.
     for operator in self.operators:
-      determinant *= operator.determinant() ** math_ops.cast(
+      determinant = determinant * operator.determinant() ** math_ops.cast(
           total / operator.domain_dimension_tensor(),
           dtype=operator.dtype)
     return determinant
@@ -416,7 +428,7 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
     # tr(A x B) = tr(A) * tr(B)
     trace = 1.
     for operator in self.operators:
-      trace *= operator.trace()
+      trace = trace * operator.trace()
     return trace
 
   def _solve(self, rhs, adjoint=False, adjoint_arg=False):
@@ -506,7 +518,7 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
     for operator in self.operators[1:]:
       diag_part = diag_part[..., :, array_ops.newaxis]
       op_diag_part = operator.diag_part()[..., array_ops.newaxis, :]
-      diag_part *= op_diag_part
+      diag_part = diag_part * op_diag_part
       diag_part = array_ops.reshape(
           diag_part,
           shape=array_ops.concat(
@@ -522,14 +534,14 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
   def _to_dense(self):
     product = self.operators[0].to_dense()
     for operator in self.operators[1:]:
-      # Product has shape [B, R1, 1, C1].
+      # Product has shape [B, R1, 1, C1, 1].
       product = product[
           ..., :, array_ops.newaxis, :, array_ops.newaxis]
       # Operator has shape [B, 1, R2, 1, C2].
       op_to_mul = operator.to_dense()[
           ..., array_ops.newaxis, :, array_ops.newaxis, :]
       # This is now [B, R1, R2, C1, C2].
-      product *= op_to_mul
+      product = product * op_to_mul
       # Now merge together dimensions to get [B, R1 * R2, C1 * C2].
       product = array_ops.reshape(
           product,
@@ -539,6 +551,25 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
                 array_ops.shape(product)[-2] * array_ops.shape(product)[-1]]
               ], axis=0))
     product.set_shape(self.shape)
+    return product
+
+  def _eigvals(self):
+    # This will be the kronecker product of all the eigenvalues.
+    # Note: It doesn't matter which kronecker product it is, since every
+    # kronecker product of the same matrices are similar.
+    eigvals = [operator.eigvals() for operator in self.operators]
+    # Now compute the kronecker product
+    product = eigvals[0]
+    for eigval in eigvals[1:]:
+      # Product has shape [B, R1, 1].
+      product = product[..., array_ops.newaxis]
+      # Eigval has shape [B, 1, R2]. Produces shape [B, R1, R2].
+      product = product * eigval[..., array_ops.newaxis, :]
+      # Reshape to [B, R1 * R2]
+      product = array_ops.reshape(
+          product,
+          shape=array_ops.concat([array_ops.shape(product)[:-2], [-1]], axis=0))
+    product.set_shape(self.shape[:-1])
     return product
 
   def _assert_non_singular(self):
@@ -558,3 +589,7 @@ class LinearOperatorKronecker(linear_operator.LinearOperator):
       raise errors.InvalidArgumentError(
           node_def=None, op=None, message="All Kronecker factors must be "
           "square for the product to be self adjoint.")
+
+  @property
+  def _composite_tensor_fields(self):
+    return ("operators",)

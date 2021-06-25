@@ -12,15 +12,24 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#include <string.h>
-#include <cmath>
+
+#include "tensorflow/lite/kernels/internal/reference/strided_slice.h"
+
+#include <math.h>
+#include <stdint.h>
+
+#include <algorithm>
 #include <vector>
+
 #include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/c_api_internal.h"
-#include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
+#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/kernels/internal/compatibility.h"
+#include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
+#include "tensorflow/lite/kernels/internal/strided_slice_logic.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
+#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
+#include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
-#include "tensorflow/lite/kernels/op_macros.h"
 
 namespace tflite {
 namespace ops {
@@ -29,7 +38,7 @@ namespace strided_slice {
 
 enum KernelType {
   kReference,
-  // TODO(soroosh): add kGenericOptimized
+  kGenericOptimized,
 };
 
 constexpr int kInputTensor = 0;
@@ -46,7 +55,7 @@ struct StridedSliceContext {
     end = GetInput(context, node, kEndTensor);
     strides = GetInput(context, node, kStridesTensor);
     output = GetOutput(context, node, kOutputTensor);
-    dims = NumDimensions(input);
+    input_dims = NumDimensions(input);
   }
   const TfLiteStridedSliceParams* params;
   const TfLiteTensor* input;
@@ -54,46 +63,120 @@ struct StridedSliceContext {
   const TfLiteTensor* end;
   const TfLiteTensor* strides;
   TfLiteTensor* output;
-  int dims;
+
+  // Equivalent input shape after adding axis according to new_axis_mask.
+  RuntimeShape effective_input_shape;
+  int input_dims;
 };
 
-// This Op only supports 1-4D cases and since we use the reference 4D
-// implementation, the 1-3D tensors are mapped to 4D.
-const int kMaxDim = 4;
+StridedSliceParams BuildStridedSliceParams(StridedSliceContext* op_context) {
+  StridedSliceParams op_params;
 
-inline int32_t PositiveRemainder(int32_t dividend, int32_t divisor) {
-  return (divisor + (dividend % divisor)) % divisor;
-}
+  // The ellipsis_mask and new_axis_mask in op_params are not used. Those masks
+  // are processed here to update begin_mask, end_mask and the index range.
+  op_params.begin_mask = 0;
+  op_params.ellipsis_mask = 0;
+  op_params.end_mask = 0;
+  op_params.new_axis_mask = 0;
+  op_params.shrink_axis_mask = 0;
 
-inline int32_t ClampedIndex(int32_t index, int dim, bool pos_stride) {
-  return pos_stride
-             ? (index >= dim ? dim
-                             : PositiveRemainder(
-                                   std::min(std::max(index, -dim), dim), dim))
-             : (index < -dim
-                    ? -1
-                    : PositiveRemainder(
-                          std::min(std::max(index, -dim), dim - 1), dim));
-}
+  // Count indexes where the new_axis_mask is set but the ellipsis_mask is not.
+  const int begin_count = GetTensorShape(op_context->begin).Dims(0);
+  int num_add_axis = 0;
+  for (int i = 0; i < begin_count; ++i) {
+    if (!((1 << i) & op_context->params->ellipsis_mask) &&
+        ((1 << i) & op_context->params->new_axis_mask)) {
+      num_add_axis++;
+    }
+  }
 
-// TODO(b/77971377) this logic should be removed, as it's a duplication of
-// StartForAxis() & StopForAxis() in kernels/internal/reference/reference_ops.h
-inline int32_t GetBeginValueAtIndex(StridedSliceContext* op_context, int idx) {
-  const int dim = op_context->input->dims->data[idx];
-  const bool pos_stride = GetTensorData<int32_t>(op_context->strides)[idx] > 0;
-  return op_context->params->begin_mask & (1 << idx)
-             ? pos_stride ? 0 : dim - 1
-             : ClampedIndex(GetTensorData<int32_t>(op_context->begin)[idx], dim,
-                            pos_stride);
-}
+  // Calculate the dims of input after adding new axises.
+  const int effective_dims = op_context->input_dims + num_add_axis;
 
-inline int32_t GetEndValueAtIndex(StridedSliceContext* op_context, int idx) {
-  const int dim = op_context->input->dims->data[idx];
-  const bool pos_stride = GetTensorData<int32_t>(op_context->strides)[idx] > 0;
-  return op_context->params->end_mask & (1 << idx)
-             ? pos_stride ? dim : -1
-             : ClampedIndex(GetTensorData<int32_t>(op_context->end)[idx], dim,
-                            pos_stride);
+  // If begin, end and strides are not fully provided, it means Ellipsis should
+  // be expanded to multiple dimensions (Ex: for spec [Ellipsis, 2] on a 3D
+  // input, the Ellipsis should be applied for the first 2 dimensions). Besides,
+  // If the new_axis_mask and the ellipsis_mask are set at the same index, the
+  // new_axis_mask will have no effect.
+  int effective_ellipsis_mask = 0, effective_new_axis_mask = 0;
+  int ellipsis_start_idx = effective_dims, expanded_ellipsis = 0;
+  for (int i = 0; i < effective_dims;) {
+    if ((1 << i) & op_context->params->ellipsis_mask) {
+      ellipsis_start_idx = i;
+      int ellipsis_end_idx =
+          std::min(i + 1 + num_add_axis + op_context->input_dims - begin_count,
+                   effective_dims);
+      expanded_ellipsis = ellipsis_end_idx - ellipsis_start_idx - 1;
+
+      // Set bit for effective_ellipsis_mask.
+      for (; i < ellipsis_end_idx; ++i) {
+        effective_ellipsis_mask |= (1 << i);
+      }
+      continue;
+    }
+
+    if ((1 << (i - expanded_ellipsis)) & op_context->params->new_axis_mask) {
+      effective_new_axis_mask |= (1 << i);
+    }
+    ++i;
+  }
+
+  // Calculate effective_input_shape and its corresponding begin, end, strides.
+  const int32_t* begin_data = GetTensorData<int32_t>(op_context->begin);
+  const int32_t* end_data = GetTensorData<int32_t>(op_context->end);
+  const int32_t* strides_data = GetTensorData<int32_t>(op_context->strides);
+  const RuntimeShape input_shape = GetTensorShape(op_context->input);
+  int added_ellipsis = 0, added_axises = 0;
+  op_context->effective_input_shape.Resize(effective_dims);
+
+  for (int i = 0; i < effective_dims; ++i) {
+    if ((1 << i) & effective_ellipsis_mask) {
+      // If ellipsis_mask, set the begin_mask and end_mask at that index.
+      added_ellipsis = std::max(0, i - ellipsis_start_idx);
+      op_params.begin_mask |= (1 << i);
+      op_params.end_mask |= (1 << i);
+      op_params.strides[i] = 1;
+      op_context->effective_input_shape.SetDim(
+          i, input_shape.Dims(i - added_axises));
+    } else if ((1 << i) & effective_new_axis_mask) {
+      // If new_axis_mask is set, it is equivalent to adding a new dim of 1 to
+      // input tensor. Store added shape to effective_input_shape.
+      op_params.start_indices[i] = 0;
+      op_params.stop_indices[i] = 1;
+      op_params.strides[i] = 1;
+      op_context->effective_input_shape.SetDim(i, 1);
+      added_axises++;
+    } else if (i >= begin_count + expanded_ellipsis) {
+      op_params.start_indices[i] = 0;
+      op_params.stop_indices[i] = 0;
+      op_params.strides[i] = 1;
+      op_params.begin_mask |= (1 << i);
+      op_params.end_mask |= (1 << i);
+      op_context->effective_input_shape.SetDim(
+          i, input_shape.Dims(i - added_axises));
+    } else {
+      const int orig_idx = i - added_ellipsis;
+      op_params.start_indices[i] = begin_data[orig_idx];
+      op_params.stop_indices[i] = end_data[orig_idx];
+      op_params.strides[i] = strides_data[orig_idx];
+      if (op_context->params->begin_mask & (1 << orig_idx)) {
+        op_params.begin_mask |= (1 << i);
+      }
+      if (op_context->params->end_mask & (1 << orig_idx)) {
+        op_params.end_mask |= (1 << i);
+      }
+      if (op_context->params->shrink_axis_mask & (1 << orig_idx)) {
+        op_params.shrink_axis_mask |= (1 << i);
+      }
+      op_context->effective_input_shape.SetDim(
+          i, input_shape.Dims(i - added_axises));
+    }
+  }
+  op_params.start_indices_count = effective_dims;
+  op_params.stop_indices_count = effective_dims;
+  op_params.strides_count = effective_dims;
+
+  return op_params;
 }
 
 // Processes the indexing tensors (begin, end and strides) to resize the
@@ -102,19 +185,26 @@ inline int32_t GetEndValueAtIndex(StridedSliceContext* op_context, int idx) {
 TfLiteStatus ResizeOutputTensor(TfLiteContext* context,
                                 StridedSliceContext* op_context) {
   std::vector<int> output_shape_vector;
+  StridedSliceParams op_params = BuildStridedSliceParams(op_context);
+  const RuntimeShape effective_input_shape = op_context->effective_input_shape;
+  TF_LITE_ENSURE_MSG(
+      context, effective_input_shape.DimensionsCount() <= 5,
+      "StridedSlice op only supports up to 5D output including added axis.");
 
-  for (int idx = op_context->dims - 1; idx >= 0; --idx) {
-    int32_t stride = GetTensorData<int32_t>(op_context->strides)[idx];
+  for (int idx = effective_input_shape.DimensionsCount() - 1; idx >= 0; --idx) {
+    int32_t stride = op_params.strides[idx];
     TF_LITE_ENSURE_MSG(context, stride != 0, "stride value has to be non-zero");
 
-    int32_t begin = GetBeginValueAtIndex(op_context, idx);
-    int32_t end = GetEndValueAtIndex(op_context, idx);
+    int32_t begin = ::tflite::strided_slice::StartForAxis(
+        op_params, effective_input_shape, idx);
+    int32_t end = ::tflite::strided_slice::StopForAxis(
+        op_params, effective_input_shape, idx, begin);
 
     // When shrinking an axis, the end position does not matter (and can be
     // incorrect when negative indexing is used, see Issue #19260). Always use
     // begin + 1 to generate a length 1 slice, since begin has
     // already been adjusted for negative indices by GetBeginValueAtIndex.
-    const bool shrink_axis = op_context->params->shrink_axis_mask & (1 << idx);
+    const bool shrink_axis = op_params.shrink_axis_mask & (1 << idx);
     if (shrink_axis) {
       end = begin + 1;
     }
@@ -149,20 +239,17 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   TF_LITE_ENSURE_EQ(context, NumDimensions(op_context.begin), 1);
   TF_LITE_ENSURE_EQ(context, NumDimensions(op_context.end), 1);
   TF_LITE_ENSURE_EQ(context, NumDimensions(op_context.strides), 1);
+  TF_LITE_ENSURE_EQ(context, NumElements(op_context.begin),
+                    NumElements(op_context.end));
   TF_LITE_ENSURE_EQ(context, op_context.input->type, op_context.output->type);
-  // Only INT32 begin/end/strides are supported
-  // TODO(soroosh) add support for INT64
-  TF_LITE_ENSURE_EQ(context, op_context.begin->type, kTfLiteInt32);
-  TF_LITE_ENSURE_EQ(context, op_context.end->type, kTfLiteInt32);
-  TF_LITE_ENSURE_EQ(context, op_context.strides->type, kTfLiteInt32);
-  TF_LITE_ENSURE_MSG(context, op_context.dims <= 4,
-                     "StridedSlice op only supports 1D-4D input arrays.");
 
-  // TODO(soroosh): add the following missing functionalities
-  TF_LITE_ENSURE_MSG(context, op_context.params->ellipsis_mask == 0,
-                     "ellipsis_mask is not implemented yet.");
-  TF_LITE_ENSURE_MSG(context, op_context.params->new_axis_mask == 0,
-                     "new_axis_mask is not implemented yet.");
+  // Only INT32 begin/end/strides are supported
+  // TODO(b/175642009): add support for INT64
+  TF_LITE_ENSURE_TYPES_EQ(context, op_context.begin->type, kTfLiteInt32);
+  TF_LITE_ENSURE_TYPES_EQ(context, op_context.end->type, kTfLiteInt32);
+  TF_LITE_ENSURE_TYPES_EQ(context, op_context.strides->type, kTfLiteInt32);
+  TF_LITE_ENSURE_MSG(context, op_context.input_dims <= 5,
+                     "StridedSlice op only supports 1D-5D input arrays.");
 
   // Postpone allocation of output if any of the indexing tensors is not
   // constant
@@ -182,68 +269,51 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   if (IsDynamicTensor(op_context.output)) {
     TF_LITE_ENSURE_OK(context, ResizeOutputTensor(context, &op_context));
   }
+  StridedSliceParams op_params = BuildStridedSliceParams(&op_context);
 
-  std::vector<int32_t> starts;
-  std::vector<int32_t> stops;
-  std::vector<int32_t> strides;
-
-  for (int i = op_context.dims; i < kMaxDim; i++) {
-    starts.emplace_back(0);
-    stops.emplace_back(1);
-    strides.emplace_back(1);
+#define TF_LITE_STRIDED_SLICE(data_type)                                 \
+  {                                                                      \
+    if (kernel_type == kGenericOptimized) {                              \
+      optimized_ops::StridedSlice<data_type>(                            \
+          op_params, op_context.effective_input_shape, op_context.input, \
+          GetTensorShape(op_context.output), op_context.output);         \
+    } else {                                                             \
+      reference_ops::StridedSlice<data_type>(                            \
+          op_params, op_context.effective_input_shape, op_context.input, \
+          GetTensorShape(op_context.output), op_context.output);         \
+    }                                                                    \
   }
-
-  for (int idx = 0; idx < op_context.dims; ++idx) {
-    starts.emplace_back(GetTensorData<int32_t>(op_context.begin)[idx]);
-    stops.emplace_back(GetTensorData<int32_t>(op_context.end)[idx]);
-    strides.emplace_back(GetTensorData<int32_t>(op_context.strides)[idx]);
-  }
-
-  int begin_mask = op_context.params->begin_mask << (4 - op_context.dims);
-  int end_mask = op_context.params->end_mask << (4 - op_context.dims);
-  int shrink_axis_mask = op_context.params->shrink_axis_mask
-                         << (4 - op_context.dims);
-  TF_LITE_ENSURE_EQ(context, starts.size(), 4);
-  auto op_params = ::tflite::strided_slice::BuildStridedSliceParams(
-      begin_mask, end_mask, shrink_axis_mask, starts, stops, strides);
-
-#define TF_LITE_STRIDED_SLICE(kernel_type, data_type)                    \
-  kernel_type::StridedSlice(op_params, GetTensorShape(op_context.input), \
-                            GetTensorData<data_type>(op_context.input),  \
-                            GetTensorShape(op_context.output),           \
-                            GetTensorData<data_type>(op_context.output))
 
   switch (op_context.input->type) {
     case kTfLiteFloat32:
-      if (kernel_type == kReference) {
-        TF_LITE_STRIDED_SLICE(reference_ops, float);
-      }
+      TF_LITE_STRIDED_SLICE(float);
       break;
     case kTfLiteInt32:
-      if (kernel_type == kReference) {
-        TF_LITE_STRIDED_SLICE(reference_ops, int32_t);
-      }
+      TF_LITE_STRIDED_SLICE(int32_t);
       break;
     case kTfLiteInt64:
-      if (kernel_type == kReference) {
-        TF_LITE_STRIDED_SLICE(reference_ops, int64_t);
-      }
+      TF_LITE_STRIDED_SLICE(int64_t);
       break;
     case kTfLiteUInt8:
-      if (kernel_type == kReference) {
-        TF_LITE_STRIDED_SLICE(reference_ops, uint8_t);
-      }
+      TF_LITE_STRIDED_SLICE(uint8_t);
       break;
     case kTfLiteInt8:
-      if (kernel_type == kReference) {
-        TF_LITE_STRIDED_SLICE(reference_ops, int8_t);
-      }
+      TF_LITE_STRIDED_SLICE(int8_t);
+      break;
+    case kTfLiteInt16:
+      TF_LITE_STRIDED_SLICE(int16_t);
+      break;
+    case kTfLiteBool:
+      TF_LITE_STRIDED_SLICE(bool);
+      break;
+    case kTfLiteString:
+      TF_LITE_STRIDED_SLICE(string);
       break;
     default:
-      context->ReportError(context,
-                           "Type %d is currently not supported "
-                           "by StridedSlice.",
-                           op_context.input->type);
+      TF_LITE_KERNEL_LOG(context,
+                         "Type %s is currently not supported "
+                         "by StridedSlice.",
+                         TfLiteTypeGetName(op_context.input->type));
       return kTfLiteError;
   }
 #undef TF_LITE_STRIDED_SLICE
@@ -259,9 +329,11 @@ TfLiteRegistration* Register_STRIDED_SLICE_REF() {
   return &r;
 }
 
-// TODO(soroosh): add optimized
 TfLiteRegistration* Register_STRIDED_SLICE() {
-  return Register_STRIDED_SLICE_REF();
+  static TfLiteRegistration r = {
+      nullptr, nullptr, strided_slice::Prepare,
+      strided_slice::Eval<strided_slice::kGenericOptimized>};
+  return &r;
 }
 
 }  // namespace builtin

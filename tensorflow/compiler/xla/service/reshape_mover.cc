@@ -36,6 +36,7 @@ limitations under the License.
 
 #include "absl/algorithm/container.h"
 #include "tensorflow/compiler/xla/literal.h"
+#include "tensorflow/compiler/xla/permutation_util.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/util.h"
@@ -80,7 +81,7 @@ bool CanTriviallyChangeShape(const HloInstruction* instruction) {
     return true;
   }
 
-  // A broadcase of scalar can trivially change its shape.
+  // A broadcast of scalar can trivially change its shape.
   if (instruction->opcode() == HloOpcode::kBroadcast &&
       ShapeUtil::IsScalar(instruction->operand(0)->shape())) {
     return true;

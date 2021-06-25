@@ -1,77 +1,105 @@
-# TensorFlow Lite 2019 Roadmap
+# TensorFlow Lite Roadmap
 
-**Updated: March 6th, 2019**
+**Updated: May, 2021**
 
-The following represents a high level overview of our 2019 plan. You should be
-conscious that this roadmap may change at anytime relative to a range of factors
-and the order below does not reflect any type of priority. As a matter of
-principle, we typically prioritize issues that the majority of our users are
-asking for and so this list fundamentally reflects that.
+The following represents a high level overview of our roadmap. You should be
+aware that this roadmap may change at any time and the order below does not
+reflect any type of priority.
 
 We break our roadmap into four key segments: usability, performance,
 optimization and portability. We strongly encourage you to comment on our
-roadmap and provide us feedback in the TF Lite discussion groups and forums.
+roadmap and provide us feedback in the
+[TensorFlow Lite discussion group](https://groups.google.com/a/tensorflow.org/g/tflite).
 
 ## Usability
 
-*   **More ops coverage**
-    *   Prioritize many more ops based on user feedback
-*   **Op versioning & signatures**
-    *   Op kernels will get version numbers
-    *   Op kernels will be identifiable by signature
-*   **New Convertor**
-    *   Implementing a new TensorFlow Lite convertor that will better handle
-        graph conversion (i.e. control flow, conditionals etc) and replace TOCO
-*   **Continue to improve TF Select Ops**
-    *   Support more types of conversion utilizing TF Selects such as hash
-        tables, strings etc.
-    *   Support smaller binary size when using select TF ops via op stripping
-*   **LSTM / RNN support**
-    *   Add full support of conversion for LSTMs and RNNs
-*   **Graph Visualization Tooling**
-    *   Provide enhanced graph visualization tooling
-*   **Pre-and-post processing support**
-    *   Add more support for pre-and-post processing of inference
-*   **Control Flow & Training on-device**
-    *   Add support for control flow related ops
-    *   Add support for training on-device
-*   **New APIs**
-    *   New C API as core for language bindings and most clients
-    *   Objective-C API for iOS
-    *   SWIFT API for iOS
-    *   Updated Java API for Android
-    *   C# Unity language bindings
-*   **Add more Models**
-    *   Add more models to the support section of the site
+*   **Expanded ops coverage**
+    *   Add targeted ops based on user feedback.
+    *   Add targeted op sets for specific domains and areas including Random
+        ops, base Keras layer ops, hash tables, select training ops.
+*   **More assistive tooling**
+    *   Provide TensorFlow graph annotations and compatibility tools to validate
+        TFLite and hardware accelerator compatibility during-training and
+        after-conversion.
+    *   Allow targeting and optimizing for specific accelerators during
+        conversion.
+*   **On-device training**
+    *   Support on-device training for personalization and transfer learning,
+        including a Colab demonstrating end-to-end usage.
+    *   Support variable/resource types (both for inference and training)
+    *   Support converting and executing graphs with multiple function (or
+        signature) entry-points.
+*   **Enhanced Android Studio integration**
+    *   Drag and drop TFLite models into Android Studio to generate model
+        interfaces.
+    *   Improve Android Studio profiling support, including memory profiling.
+*   **Model Maker**
+    *   Support newer tasks, including object detection, recommendation, and
+        audio classification, covering a wide collection of common usage.
+    *   Support more data sets to make transfer learning easier.
+*   **Task Library**
+    *   Support more model types (e.g. audio, NLP) with associated pre and post
+        processing capabilities.
+    *   Update more reference examples with Task APIs.
+    *   Support out-of-the-box acceleration for all tasks.
+*   **More SOTA models and examples**
+    *   Add more examples (e.g. audio, NLP, structure-data related) to
+        demonstrate model usage as well as new features and APIs, covering
+        different platforms.
+    *   Create shareable backbone models for on-device to reduce training and
+        deployment costs.
+*   **Seamless deployment across multiple platforms**
+    *   Run TensorFlow Lite models on the web.
+*   **Improved cross-platform support**
+    *   Extend and improve APIs for Java on Android, Swift on iOS, Python on
+        RPi.
+    *   Enhance CMake support (e.g., broader accelerator support).
+*   **Better frontend support**
+    *   Improve compatibility with various authoring frontends, including Keras,
+        tf.numpy.
 
 ## Performance
 
-*   **More hardware delegates**
-    *   Add support for more hardware delegates
-*   **Support NN API**
-    *   Continually support and improve support for NN API
-*   **Framework Extensibility**
-    *   Enable simplistic overwriting of CPU kernels with customized optimized
-        versions
-*   **GPU Delegate**
-    *   Continue to extend the total support ops for OpenGL and Metal ops
-    *   Open-source
-*   **Improve TFLite CPU performance**
-    *   Optimizations for float and quantized models
+*   **Better tooling**
+    *   Public dashboard for tracking performance gains with each release.
+    *   Tooling for better understanding graph compatibility with target
+        accelerators.
+*   **Improved CPU performance**
+    *   XNNPack enabled by default for faster floating point inference.
+    *   End-to-end half precision (float16) support with optimized kernels.
+*   **Updated NN API support**
+    *   Full support for newer Android version NN API features, ops, and types.
+*   **GPU optimizations**
+    *   Improved startup time with delegate serialization support.
+    *   Hardware buffer interop for zero-copy inference.
+    *   Wider availability of on device acceleration.
+    *   Better op coverage.
 
 ## Optimization
 
-*   **Model Optimization Toolkit**
-    *   Post training quantization + hybrid kernels
-    *   Post Training quantization + fixed-point kernels
-    *   Training with quantization
-*   **More support for more techniques**
-    *   RNN Support
-    *   Sparsity/Pruning
-    *   Lower bit-width support
+*   **Quantization**
+
+    *   Selective post-training quantization to exclude certain layers from
+        quantization.
+    *   Quantization debugger to inspect quantization error losses per each
+        layer.
+    *   Applying quantization-aware training on more model coverage e.g.
+        TensorFlow Model Garden.
+    *   Quality and performance improvements for post-training dynamic-range
+        quantization.
+    *   Tensor Compression API to allow compression algorithms such as SVD.
+
+*   **Pruning / sparsity**
+
+    *   Combine configurable training-time (pruning + quantization-aware
+        training) APIs.
+    *   Increase sparity application on TF Model Garden models.
+    *   Sparse model execution support in TensorFlow Lite.
 
 ## Portability
 
 *   **Microcontroller Support**
-    *   Add support for a range of 8-bit, 16-bit and 32-bit MCU architecture use
-        cases for Speech and Image Classification
+    *   Add support for a range of 32-bit MCU architecture use cases for speech
+        and image classification.
+    *   Audio Frontend: In-graph audio pre-processing and acceleration support
+    *   Sample code and models for vision and audio data.

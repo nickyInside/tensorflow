@@ -30,6 +30,7 @@ limitations under the License.
 #include "tensorflow/core/graph/node_builder.h"
 #include "tensorflow/core/graph/testlib.h"
 #include "tensorflow/core/kernels/ops_testutil.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test_benchmark.h"
 #include "tensorflow/core/platform/types.h"
 
@@ -38,7 +39,7 @@ namespace tensorflow {
 class ScopedAllocatorOpTest : public OpsTestBase {
  protected:
   void MakeOp(const TensorShape& shape,
-              const gtl::ArraySlice<TensorShape>& shapes, DataType dtype,
+              const gtl::ArraySlice<TensorShape> shapes, DataType dtype,
               const string& name, int32 id, int32 expected_call_count) {
     TF_EXPECT_OK(NodeDefBuilder("scoped_allocator_op", "_ScopedAllocator")
                      .Attr("T", dtype)
@@ -91,8 +92,8 @@ void PrepOp(DataType dtype, int32 id,
   ScopedAllocatorMgr::PopulateFields(id, fields_shapes, dtype, fields);
   // We don't simply allocate a tensor with shape as backing_tensor_shape,
   // because we need to account for padding in the fields.  We actually need a
-  // tensor of size at least (fields[-1].offset + fields[-1].bytes).
-  size_t num_bytes = fields->back().offset + fields->back().bytes;
+  // tensor of size at least (fields[-1].offset + fields[-1].bytes_allocated).
+  size_t num_bytes = fields->back().offset + fields->back().bytes_allocated;
   int32_t num_elements = num_bytes / DataTypeSize(dtype);
   CHECK_EQ(num_bytes % DataTypeSize(dtype), 0);
 

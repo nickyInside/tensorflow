@@ -18,6 +18,7 @@ limitations under the License.
 #include <memory>
 
 #include "tensorflow/compiler/xla/layout_util.h"
+#include "tensorflow/compiler/xla/service/gpu/backend_configs.pb.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/gpu/stream_executor_util.h"
 #include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
@@ -53,13 +54,53 @@ HeuristicLayoutAssignment(const HloInstruction* instr,
   constexpr auto kAllNCHW =
       std::make_tuple(DataLayout::kBatchDepthYX, FilterLayout::kOutputInputYX,
                       DataLayout::kBatchDepthYX);
+  // kBatchDepthYX4 has the same layout as kBatchDepthYX32; they're both VECT_C
+  // layouts as far as cudnn is concerned.
+  constexpr auto kAllNCHW_VECT_C =
+      std::make_tuple(DataLayout::kBatchDepthYX4, FilterLayout::kOutputInputYX4,
+                      DataLayout::kBatchDepthYX4);
   constexpr auto kAllNHWC =
       std::make_tuple(DataLayout::kBatchYXDepth, FilterLayout::kOutputYXInput,
                       DataLayout::kBatchYXDepth);
 
-  // If we're not Volta or not fp16, the decision is easy: Use NCHW.
-  if (!(instr->operand(0)->shape().element_type() == xla::PrimitiveType::F16 &&
-        IsVoltaOrLater(*stream_executor))) {
+  // Integer convolution must use NHWC or NCHW_VECT_C.
+  //
+  // TODO(jlebar): Do non-VECT_C int8 convs still require NHWC with new versions
+  // of cudnn?
+  const ConvolutionDimensionNumbers& dnums =
+      instr->convolution_dimension_numbers();
+  Shape input_shape = instr->operand(0)->shape();
+  PrimitiveType input_ty = instr->operand(0)->shape().element_type();
+  if (primitive_util::IsIntegralType(input_ty)) {
+    if (input_ty == S8 && dnums.input_spatial_dimensions_size() == 2 &&
+        input_shape.dimensions_size() == 5) {
+      VLOG(2) << "Using NCHW_VECT_C for int8 conv " << instr->ToString();
+      return kAllNCHW_VECT_C;
+    }
+    VLOG(2) << "Using NHWC for int8 conv " << instr->ToString();
+    return kAllNHWC;
+  }
+
+  const DebugOptions& debug_options =
+      instr->GetModule()->config().debug_options();
+
+  if (debug_options.xla_gpu_force_conv_nchw()) {
+    VLOG(2) << "Overriding layout to NCHW for " << instr->ToString();
+    return kAllNCHW;
+  }
+
+  if (debug_options.xla_gpu_force_conv_nhwc()) {
+    VLOG(2) << "Overriding layout to NHWC for " << instr->ToString();
+    return kAllNHWC;
+  }
+
+  // If we're not Volta or not fp16, or not conv2D, the decision is easy: Use
+  // NCHW.
+  if (input_ty != F16 ||
+      !stream_executor->GetDeviceDescription()
+           .cuda_compute_capability()
+           .IsAtLeast(se::CudaComputeCapability::VOLTA) ||
+      instr->shape().tuple_shapes(0).dimensions_size() != 4) {
     return kAllNCHW;
   }
 
@@ -71,7 +112,7 @@ HeuristicLayoutAssignment(const HloInstruction* instr,
   // We could have used a mixed layout combination, e.g. (NHWC, NCHW, NCHW),
   // which on paper gives good performance. However, there are two observations:
   // * a mixed layout combination is more cuDNN-bug prone, based on empirical
-  //   envidence.
+  //   evidence.
   // * we've also observed that for mixed layouts, cuDNN transposes data back
   //   and forth from a different layout combination. If we end up with
   //   transposes anyway, we prefer to have them in XLA, as they can be fused.
@@ -156,7 +197,7 @@ Status GpuLayoutAssignment::AddBackendConstraintsToDnnConvCustomCall(
   // instr->operand(2), if exists, is the bias buffer. There is no need to
   // assign layout to it, as it has only one dimension.
 
-  // instr->opernad(3), if exists, is the side input buffer.
+  // instr->operand(3), if exists, is the side input buffer.
   if (instr->operand_count() == 4) {
     if (kind != CudnnConvKind::kForwardActivation) {
       return InternalError(
@@ -184,15 +225,16 @@ Status GpuLayoutAssignment::AddBackendConstraints(
           Cast<HloCustomCallInstruction>(instruction), constraints));
     }
 
+    CHECK(!IsCublasGemm(*instruction))
+        << "Gemm rewriting should run after layout assignment";
+
     // For batched dot we require the default layout.
     // TODO(b/112111608): This is overly conservative, the only real restriction
     // is that batch dimensions must be major.
-    if (instruction->opcode() == HloOpcode::kDot &&
-        ImplementedAsGemm(*instruction) &&
+    if (IsMatrixMultiplication(*instruction) &&
         instruction->dot_dimension_numbers().lhs_batch_dimensions_size() > 0) {
       // Verify that the batch dims come before the row and col dims.
-      const DotDimensionNumbers& dim_nums =
-          instruction->dot_dimension_numbers();
+      DotDimensionNumbers dim_nums = instruction->dot_dimension_numbers();
       CHECK_EQ(dim_nums.lhs_batch_dimensions_size(),
                dim_nums.rhs_batch_dimensions_size());
       CHECK_EQ(dim_nums.lhs_batch_dimensions_size() + 2,
@@ -276,6 +318,29 @@ Status GpuLayoutAssignment::AddBackendConstraints(
           constraints->SetOperandLayout(op1_shape, instruction, 1));
       TF_RETURN_IF_ERROR(
           constraints->SetInstructionLayout(output_shape, instruction));
+    } else if (instruction->opcode() == HloOpcode::kAllReduceScatter) {
+      // XLA:GPU can only support all-reduce-scatter where the scatter dimension
+      // is the most major dimension in the layout.
+      auto ars = Cast<HloAllReduceScatterInstruction>(instruction);
+      TF_RETURN_IF_ERROR(constraints->SetInstructionLayout(
+          ShapeUtil::MoveDimToMajor(ars->shape(), ars->scatter_dimension()),
+          ars));
+    } else if (instruction->opcode() == HloOpcode::kAllGather) {
+      // XLA:GPU can only support all-gathers where the gather dimension is the
+      // most major dimension in the layout.
+      auto ag = Cast<HloAllGatherInstruction>(instruction);
+      TF_RETURN_IF_ERROR(constraints->SetInstructionLayout(
+          ShapeUtil::MoveDimToMajor(ag->shape(), ag->all_gather_dimension()),
+          ag));
+    } else if (instruction->opcode() == HloOpcode::kAllToAll &&
+               instruction->shape().IsArray()) {
+      // XLA:GPU can only support all-to-all with split dimensions where the
+      // split dimension is the most major dimension in the layout.
+      auto* all_to_all = Cast<HloAllToAllInstruction>(instruction);
+      TF_RETURN_IF_ERROR(constraints->SetInstructionLayout(
+          ShapeUtil::MoveDimToMajor(all_to_all->shape(),
+                                    *all_to_all->split_dimension()),
+          all_to_all));
     }
   }
   return Status::OK();

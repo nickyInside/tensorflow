@@ -21,22 +21,31 @@ from __future__ import print_function
 import os
 import shutil
 
+from tensorflow.core.framework import variable_pb2
 from tensorflow.python.client import session as session_lib
 from tensorflow.python.eager import backprop
 from tensorflow.python.eager import lift_to_graph
 from tensorflow.python.eager import test
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import function as framework_function
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import sparse_tensor
+from tensorflow.python.framework import tensor_shape
+from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import test_util
 from tensorflow.python.framework import versions
 from tensorflow.python.lib.io import file_io
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import init_ops
 from tensorflow.python.ops import lookup_ops
+from tensorflow.python.ops import partitioned_variables
 from tensorflow.python.ops import random_ops
 from tensorflow.python.ops import resource_variable_ops
+from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops import variables
+from tensorflow.python.ops.ragged import ragged_factory_ops
 from tensorflow.python.saved_model import builder_impl
 from tensorflow.python.saved_model import load
 from tensorflow.python.saved_model import save
@@ -44,6 +53,7 @@ from tensorflow.python.saved_model import signature_def_utils
 from tensorflow.python.saved_model import simple_save
 from tensorflow.python.saved_model import tag_constants
 from tensorflow.python.saved_model import utils_impl
+from tensorflow.python.training import saver
 
 
 class LoadTest(test.TestCase):
@@ -107,11 +117,43 @@ class LoadTest(test.TestCase):
         8.,
         self.evaluate(tape.gradient(output, imported.variables[0])))
 
+  @test_util.run_in_graph_and_eager_modes
   def test_ref_variable_import(self):
     saved = self._v1_single_metagraph_saved_model(use_resource=False)
     imported = load.load(saved)
     fn = imported.signatures["serving_default"]
-    self.assertEqual(6., fn(start=constant_op.constant(2.))["output"].numpy())
+    self.evaluate(lookup_ops.tables_initializer())
+    self.evaluate(ops.get_collection("saved_model_initializers"))
+    self.assertEqual(
+        6., self.evaluate(fn(start=constant_op.constant(2.))["output"]))
+
+  def _v1_output_shape_saved_model(self):
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      start = array_ops.placeholder(
+          shape=[None], dtype=dtypes.float32, name="start")
+      output = array_ops.identity(start, name="output")
+      output.set_shape([1])  # Ok to use [1] because shape is only informational
+      with session_lib.Session() as session:
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        builder = builder_impl.SavedModelBuilder(path)
+        builder.add_meta_graph_and_variables(
+            session,
+            tags=[tag_constants.SERVING],
+            signature_def_map={
+                "serving_default":
+                    signature_def_utils.build_signature_def(
+                        {"start": utils_impl.build_tensor_info(start)},
+                        {"output": utils_impl.build_tensor_info(output)})
+            })
+        builder.save()
+    return path
+
+  def test_restore_output_shapes(self):
+    saved = self._v1_output_shape_saved_model()
+    imported = load.load(saved)
+    fn = imported.signatures["serving_default"]
+    self.assertEqual(tensor_shape.TensorShape([1]), fn.outputs[0].shape)
 
   def _v1_multi_metagraph_saved_model(self):
     export_graph = ops.Graph()
@@ -143,7 +185,7 @@ class LoadTest(test.TestCase):
     return path
 
   def test_multi_meta_graph_loading(self):
-    with self.assertRaisesRegexp(ValueError, "2 MetaGraphs"):
+    with self.assertRaisesRegex(ValueError, "2 MetaGraphs"):
       load.load(self._v1_multi_metagraph_saved_model())
     first_imported = load.load(self._v1_multi_metagraph_saved_model(),
                                tags=["first"])
@@ -152,9 +194,9 @@ class LoadTest(test.TestCase):
                          first_start=constant_op.constant(2.))))
     second_imported = load.load(self._v1_multi_metagraph_saved_model(),
                                 tags=set(["second"]))
-    with self.assertRaisesRegexp(TypeError, "second_start"):
+    with self.assertRaisesRegex(TypeError, "second_start"):
       second_imported.signatures["second_key"](x=constant_op.constant(2.))
-    with self.assertRaisesRegexp(TypeError, "second_start"):
+    with self.assertRaisesRegex(TypeError, "second_start"):
       second_imported.signatures["second_key"](
           second_start=constant_op.constant(2.),
           x=constant_op.constant(2.))
@@ -162,7 +204,7 @@ class LoadTest(test.TestCase):
                      self.evaluate(second_imported.signatures["second_key"](
                          second_start=constant_op.constant(2.))))
 
-  def _v1_asset_saved_model(self):
+  def _v1_asset_saved_model(self, clear_shared_name):
     export_graph = ops.Graph()
     vocab_path = os.path.join(self.get_temp_dir(), "vocab.txt")
     with open(vocab_path, "w") as f:
@@ -179,6 +221,9 @@ class LoadTest(test.TestCase):
       start = array_ops.placeholder(
           shape=None, dtype=dtypes.string, name="in")
       output = table.lookup(start, name="out")
+      if clear_shared_name:
+        export_graph.get_operation_by_name("hash_table")._clear_attr(
+            "shared_name")
       with session_lib.Session() as session:
         session.run([table.initializer])
         path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
@@ -193,7 +238,7 @@ class LoadTest(test.TestCase):
 
   @test_util.run_in_graph_and_eager_modes
   def test_asset_loading(self):
-    first_path = self._v1_asset_saved_model()
+    first_path = self._v1_asset_saved_model(clear_shared_name=False)
     imported = load.load(first_path)
     self.evaluate(lookup_ops.tables_initializer())
     fn = imported.signatures["serving_default"]
@@ -218,6 +263,15 @@ class LoadTest(test.TestCase):
     third_import = load.load(third_path)
     self.evaluate(lookup_ops.tables_initializer())
     fn = third_import.signatures["serving_default"]
+    self.assertAllClose({"output": [2, 0]},
+                        fn(start=constant_op.constant(["gamma", "alpha"])))
+
+  @test_util.run_in_graph_and_eager_modes
+  def test_node_name_sharing(self):
+    fourth_path = self._v1_asset_saved_model(clear_shared_name=True)
+    fourth_import = load.load(fourth_path)
+    self.evaluate(lookup_ops.tables_initializer())
+    fn = fourth_import.signatures["serving_default"]
     self.assertAllClose({"output": [2, 0]},
                         fn(start=constant_op.constant(["gamma", "alpha"])))
 
@@ -373,7 +427,7 @@ class LoadTest(test.TestCase):
 
   def test_unfed_placeholder_exception(self):
     path = self._unfed_placeholder_signature()
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         lift_to_graph.UnliftableError,
         "signature needs an input for each placeholder.*\n\nUnable to lift"):
       load.load(path)
@@ -385,6 +439,263 @@ class LoadTest(test.TestCase):
     self.assertEqual(2., self.evaluate(fn(x=array_ops.ones([]))))
     root.graph.as_graph_element("x:0")
 
+  def _no_trainable_variable_attribute(self, trainable):
+    """A SavedModel where the VariableDef has no 'trainable' (it's false)."""
+
+    class _MissingFieldsVariable(resource_variable_ops.ResourceVariable):
+
+      def to_proto(self, export_scope=None):
+        full_proto = super(_MissingFieldsVariable, self).to_proto(export_scope)
+        return variable_pb2.VariableDef(
+            variable_name=full_proto.variable_name,
+            initial_value_name=full_proto.initial_value_name,
+            initializer_name=full_proto.snapshot_name,
+            save_slice_info_def=full_proto.save_slice_info_def,
+            is_resource=full_proto.is_resource)
+
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      v = _MissingFieldsVariable(3., trainable=trainable)
+      with session_lib.Session() as session:
+        session.run([v.initializer])
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        b = builder_impl.SavedModelBuilder(path)
+        b.add_meta_graph_and_variables(
+            session,
+            tags=[tag_constants.SERVING],
+            signature_def_map={})
+        b.save()
+
+    return path
+
+  def test_trainable_not_set_in_proto(self):
+    """If a VariableDef has no 'trainable', we fall back to collections."""
+    real_tf_version = versions.__version__
+    # Pretend to be exported from an older version of TensorFlow, so trainable
+    # will follow collections instead of checking VariableDefs.
+    versions.__version__ = "1.7.0"
+    path = self._no_trainable_variable_attribute(trainable=True)
+    root = load.load(path)
+    self.assertTrue(root.variables[0].trainable)
+    path = self._no_trainable_variable_attribute(trainable=False)
+    root = load.load(path)
+    self.assertFalse(root.variables[0].trainable)
+    versions.__version__ = real_tf_version
+
+  def _export_variable(self, **kwargs_for_variable):
+    """A 1.x SavedModel with a single variable."""
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      v = resource_variable_ops.ResourceVariable(3., **kwargs_for_variable)
+      with session_lib.Session() as session:
+        session.run([v.initializer])
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        b = builder_impl.SavedModelBuilder(path)
+        b.add_meta_graph_and_variables(
+            session,
+            tags=[tag_constants.SERVING],
+            signature_def_map={})
+        b.save()
+
+    return path
+
+  def test_trainable_in_proto(self):
+    """If a VariableDef has a trainable property, we do not use collections."""
+    path = self._export_variable(
+        trainable=True,
+        collections=[ops.GraphKeys.GLOBAL_VARIABLES])
+    root = load.load(path)
+    self.assertTrue(root.variables[0].trainable)
+    path = self._export_variable(
+        trainable=False,
+        collections=[ops.GraphKeys.GLOBAL_VARIABLES,
+                     ops.GraphKeys.TRAINABLE_VARIABLES])
+    root = load.load(path)
+    self.assertFalse(root.variables[0].trainable)
+
+  def _model_with_sparse_output(self):
+    """Generate a graph with a SparseTensor output and serialize in V1 format"""
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      in_placeholder = array_ops.placeholder(dtype=dtypes.int64, shape=[1])
+      out_sparse_tensor = sparse_tensor.SparseTensor(
+          indices=[[0]], values=in_placeholder, dense_shape=[1]) * 2
+      with session_lib.Session() as session:
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        simple_save.simple_save(
+            session,
+            path,
+            inputs={"start": in_placeholder},
+            outputs={"output": out_sparse_tensor})
+    return path
+
+  def test_load_sparse_outputs(self):
+    path = self._model_with_sparse_output()
+    imported = load.load(path)
+    imported_fn = imported.signatures["serving_default"]
+    forty_two = constant_op.constant([42], dtype=dtypes.int64)
+    self.assertEqual([84], imported_fn(forty_two)["output"].values.numpy())
+
+  def _model_with_sparse_input(self):
+    """Generate a graph with a SparseTensor input and serialize in V1 format."""
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      in_sparse_placeholder = array_ops.sparse_placeholder(
+          dtype=dtypes.int64, shape=[2, 2])
+      out_sparse_tensor = sparse_tensor.SparseTensor(
+          indices=in_sparse_placeholder.indices,
+          values=in_sparse_placeholder.values,
+          dense_shape=in_sparse_placeholder.dense_shape) * 2
+      with session_lib.Session() as session:
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        simple_save.simple_save(
+            session,
+            path,
+            inputs={"start": in_sparse_placeholder},
+            outputs={"output": out_sparse_tensor})
+    return path
+
+  def test_load_sparse_inputs(self):
+    path = self._model_with_sparse_input()
+    imported = load.load(path)
+    imported_fn = imported.signatures["serving_default"]
+    indices = constant_op.constant([[0, 0], [0, 1], [1, 1]], dtype=dtypes.int64)
+    values = constant_op.constant([42, 43, 44], dtype=dtypes.int64)
+    dense_shape = constant_op.constant([2, 2], dtype=dtypes.int64)
+    result = imported_fn(
+        start_indices=indices,
+        start_values=values,
+        start_dense_shape=dense_shape)
+    self.assertAllEqual([84, 86, 88], result["output"].values.numpy())
+
+  def _model_with_ragged_input(self):
+    """Generate a graph with a RaggedTensor input and serialize in V1 format."""
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      x = ragged_factory_ops.placeholder(dtypes.float32, 1, [])
+      y = x * 2
+      with session_lib.Session() as sess:
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        simple_save.simple_save(sess, path, inputs={"x": x}, outputs={"y": y})
+    return path
+
+  def test_load_ragged_inputs(self):
+    path = self._model_with_ragged_input()
+    imported = load.load(path)
+    imported_fn = imported.signatures["serving_default"]
+    x = ragged_factory_ops.constant([[10., 20.], [30.]])
+    result = imported_fn(x_component_0=x.values, x_component_1=x.row_splits)
+    self.assertAllEqual(result["y"], [[20., 40.], [60.]])
+
+  def _model_with_defun(self):
+    """Generate a graph with a Defun and serialize in V1 format."""
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      @framework_function.Defun(dtypes.int64)
+      def z(x):
+        return x + 1
+
+      @framework_function.Defun(dtypes.int64)
+      def g(x):
+        return z(x) + 1
+
+      @framework_function.Defun(dtypes.int64)
+      def f(x):
+        return g(x) + 1
+      in_placeholder = array_ops.placeholder(dtype=dtypes.int64, shape=[1])
+      out = f(in_placeholder)
+      with session_lib.Session() as session:
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        simple_save.simple_save(
+            session,
+            path,
+            inputs={"start": in_placeholder},
+            outputs={"output": out})
+    return path
+
+  def test_load_defun(self):
+    path = self._model_with_defun()
+    imported = load.load(path)
+    imported_fn = imported.signatures["serving_default"]
+    forty_two = constant_op.constant([42], dtype=dtypes.int64)
+    self.assertEqual([45], imported_fn(forty_two)["output"].numpy())
+
+  def test_load_and_restore_partitioned_variables(self):
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      partitioned_var = variable_scope.get_variable(
+          "a", shape=[6], initializer=init_ops.constant_initializer(13),
+          partitioner=partitioned_variables.fixed_size_partitioner(2),
+          use_resource=True)
+      x = array_ops.placeholder(shape=[], dtype=dtypes.float32)
+      y = x * partitioned_var
+      with session_lib.Session() as session:
+        session.run(variables.global_variables_initializer())
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        simple_save.simple_save(session, path,
+                                inputs={"x": x}, outputs={"y": y})
+
+        # Create a name-based checkpoint with different values.
+        session.run(partitioned_var.assign([[5, 4, 3], [2, 1, 0]]))
+        ckpt_path = os.path.join(self.get_temp_dir(), "restore_ckpt")
+        saver.Saver().save(session, ckpt_path)
+
+    imported = load.load(path)
+    self.assertAllClose(self.evaluate(imported.variables),
+                        [[13, 13, 13], [13, 13, 13]])
+
+    self.evaluate(imported.restore(ckpt_path))
+    self.assertAllClose(self.evaluate(imported.variables),
+                        [[5, 4, 3], [2, 1, 0]])
+    self.assertAllClose(
+        self.evaluate(
+            imported.signatures["serving_default"](constant_op.constant(2.))),
+        {"y": [10, 8, 6, 4, 2, 0]})
+
+  def test_structured_input_signature(self):
+    path = self._v1_single_metagraph_saved_model(False)
+    imported = load.load(path)
+    args, kwargs = (
+        imported.signatures["serving_default"].structured_input_signature)
+    self.assertEqual(args, ())
+    self.assertAllEqual(
+        kwargs, {"start": tensor_spec.TensorSpec(shape=None, name="start")})
+
+  def _v1_multi_input_saved_model(self):
+    export_graph = ops.Graph()
+    with export_graph.as_default():
+      input1 = array_ops.placeholder(
+          shape=[None], dtype=dtypes.float32, name="input1")
+      input2 = array_ops.placeholder(
+          shape=[None], dtype=dtypes.float32, name="input2")
+      v = resource_variable_ops.ResourceVariable(21.)
+      output = array_ops.identity(input1 * v + input2, name="output")
+      with session_lib.Session() as session:
+        session.run(v.initializer)
+        path = os.path.join(self.get_temp_dir(), "saved_model", str(ops.uid()))
+        builder = builder_impl.SavedModelBuilder(path)
+        builder.add_meta_graph_and_variables(
+            session,
+            tags=[tag_constants.SERVING],
+            signature_def_map={
+                "serving_default":
+                    signature_def_utils.build_signature_def(
+                        {
+                            "input1": utils_impl.build_tensor_info(input1),
+                            "input2": utils_impl.build_tensor_info(input2)
+                        }, {"output": utils_impl.build_tensor_info(output)})
+            })
+        builder.save()
+    return path
+
+  def test_v1_input_ordered(self):
+    path = self._v1_multi_input_saved_model()
+    imported = load.load(path)
+    self.assertEqual(imported.signatures["serving_default"].inputs[0].name,
+                     "input1:0")
+    self.assertEqual(imported.signatures["serving_default"].inputs[1].name,
+                     "input2:0")
+
+
 if __name__ == "__main__":
   test.main()
-

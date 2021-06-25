@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_KERNELS_RESHAPE_OP_H_
 
 #include <memory>
+
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -24,6 +25,7 @@ limitations under the License.
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/util/overflow.h"
 
 namespace tensorflow {
 
@@ -36,9 +38,13 @@ class ReshapeOp : public OpKernel {
     const Tensor& input = context->input(0);
     const Tensor& sizes = context->input(1);
     // Preliminary validation of sizes.
-    OP_REQUIRES(context, IsLegacyVector(sizes.shape()),
-                errors::InvalidArgument("sizes input must be 1-D, not ",
-                                        sizes.shape().DebugString()));
+    OP_REQUIRES(
+        context,
+        (TensorShapeUtils::IsVector(sizes.shape()) ||
+         // TODO(rmlarsen): Disallow legacy use of scalars to represent shape.
+         TensorShapeUtils::IsScalar(sizes.shape())),
+        errors::InvalidArgument("sizes input must be 1-D, not ",
+                                sizes.shape().DebugString()));
 
     // Compute the output shape.  Determine product of specified
     // dimensions, and find the index of the unspecified one.
@@ -131,6 +137,17 @@ class ReshapeOp : public OpKernel {
         shape->AddDim(size);
         *has_zero_dim = true;
       } else {
+        if (MultiplyWithoutOverflow(shape->num_elements(), size) < 0) {
+          string msg;
+          for (int ii = 0; ii < num_dims; ++ii) {
+            if (ii != 0) {
+              strings::StrAppend(&msg, ", ");
+            }
+            strings::StrAppend(&msg, Svec(ii));
+          }
+          return errors::InvalidArgument("Shape [", msg,
+                                         "] has too many elements");
+        }
         shape->AddDim(size);
         (*product) *= size;
       }

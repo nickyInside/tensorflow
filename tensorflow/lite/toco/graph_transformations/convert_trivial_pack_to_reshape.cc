@@ -59,7 +59,7 @@ namespace toco {
   reshape_op->outputs = pack_op->outputs;
 
   // Create shape param.
-  string shape_array_name =
+  std::string shape_array_name =
       AvailableArrayName(*model, pack_op->outputs[0] + "_shape");
   Array& shape_array = model->GetOrCreateArray(shape_array_name);
   const int shape_array_dims = 1 + input_array.shape().dimensions_count();
@@ -77,10 +77,8 @@ namespace toco {
   }
 
   // Replace the operator in the graph.
-  const auto reshape_it = model->operators.emplace(pack_it, reshape_op);
-  pack_it = reshape_it + 1;
-  CHECK_EQ(pack_it->get(), pack_op);
-  model->operators.erase(pack_it);
+  model->operators.emplace(pack_it, reshape_op);
+  DeleteOpAndArrays(model, pack_op);
 
   *modified = true;
   return ::tensorflow::Status::OK();

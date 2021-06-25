@@ -15,8 +15,6 @@ limitations under the License.
 
 #include "tensorflow/lite/minimal_logging.h"
 
-#include <string>
-
 #include <gtest/gtest.h>
 
 namespace tflite {
@@ -73,9 +71,16 @@ TEST(MinimalLogging, Debug) {
 #endif
 }
 
-}  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
+TEST(MinimalLogging, DebugOnce) {
+  testing::internal::CaptureStderr();
+  for (int i = 0; i < 10; ++i) {
+    TFLITE_LOG_ONCE(TFLITE_LOG_INFO, "Count: %d", i);
+  }
+#ifndef NDEBUG
+  EXPECT_EQ("INFO: Count: 0\n", testing::internal::GetCapturedStderr());
+#else
+  EXPECT_TRUE(testing::internal::GetCapturedStderr().empty());
+#endif
 }
+
+}  // namespace tflite

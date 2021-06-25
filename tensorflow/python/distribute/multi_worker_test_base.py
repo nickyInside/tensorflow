@@ -18,7 +18,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import collections
 import contextlib
 import copy
 import json
@@ -26,12 +25,14 @@ import os
 import subprocess
 import sys
 import threading
-import numpy as np
+import unittest
+
+import six
 
 _portpicker_import_error = None
 try:
   import portpicker  # pylint: disable=g-import-not-at-top
-except ImportError as _error:  # pylint: disable=invalid-name
+except (ImportError, ModuleNotFoundError) as _error:  # pylint: disable=invalid-name
   _portpicker_import_error = _error
   portpicker = None
 
@@ -40,15 +41,22 @@ from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.python.client import session
 from tensorflow.python.distribute import distribute_coordinator as dc
+from tensorflow.python.distribute import multi_process_runner
+from tensorflow.python.distribute.cluster_resolver import SimpleClusterResolver
+from tensorflow.python.distribute.cluster_resolver import TFConfigClusterResolver
 from tensorflow.python.eager import context
-from tensorflow.python.estimator import run_config
+from tensorflow.python.eager import remote
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import test_util
 from tensorflow.python.platform import test
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import coordinator
 from tensorflow.python.training import server_lib
+from tensorflow.python.util import deprecation
 from tensorflow.python.util import nest
+from tensorflow.python.util.compat import collections_abc
+from tensorflow.python.util.tf_export import tf_export
 
 
 original_run_std_server = dc._run_std_server  # pylint: disable=protected-access
@@ -65,7 +73,11 @@ def pick_unused_port():
   global ASSIGNED_PORTS
   with lock:
     while True:
-      port = portpicker.pick_unused_port()
+      try:
+        port = portpicker.pick_unused_port()
+      except portpicker.NoFreePortFoundError:
+        raise unittest.SkipTest('Flakes in portpicker library do not represent '
+                                'TensorFlow errors.')
       if port > 10000 and port not in ASSIGNED_PORTS:
         ASSIGNED_PORTS.add(port)
         logging.info('Using local port %r', port)
@@ -79,7 +91,10 @@ def _create_cluster(num_workers,
                     protocol='grpc',
                     worker_config=None,
                     ps_config=None,
-                    eval_config=None):
+                    eval_config=None,
+                    worker_name='worker',
+                    ps_name='ps',
+                    chief_name='chief'):
   """Creates and starts local servers and returns the cluster_spec dict."""
   if _portpicker_import_error:
     raise _portpicker_import_error  # pylint: disable=raising-bad-type
@@ -88,20 +103,20 @@ def _create_cluster(num_workers,
 
   cluster_dict = {}
   if num_workers > 0:
-    cluster_dict['worker'] = ['localhost:%s' % port for port in worker_ports]
+    cluster_dict[worker_name] = ['localhost:%s' % port for port in worker_ports]
   if num_ps > 0:
-    cluster_dict['ps'] = ['localhost:%s' % port for port in ps_ports]
+    cluster_dict[ps_name] = ['localhost:%s' % port for port in ps_ports]
   if has_eval:
     cluster_dict['evaluator'] = ['localhost:%s' % pick_unused_port()]
   if has_chief:
-    cluster_dict['chief'] = ['localhost:%s' % pick_unused_port()]
+    cluster_dict[chief_name] = ['localhost:%s' % pick_unused_port()]
 
   cs = server_lib.ClusterSpec(cluster_dict)
 
   for i in range(num_workers):
     server_lib.Server(
         cs,
-        job_name='worker',
+        job_name=worker_name,
         protocol=protocol,
         task_index=i,
         config=worker_config,
@@ -110,7 +125,7 @@ def _create_cluster(num_workers,
   for i in range(num_ps):
     server_lib.Server(
         cs,
-        job_name='ps',
+        job_name=ps_name,
         protocol=protocol,
         task_index=i,
         config=ps_config,
@@ -119,7 +134,7 @@ def _create_cluster(num_workers,
   if has_chief:
     server_lib.Server(
         cs,
-        job_name='chief',
+        job_name=chief_name,
         protocol=protocol,
         task_index=0,
         config=worker_config,
@@ -140,12 +155,18 @@ def _create_cluster(num_workers,
 def create_in_process_cluster(num_workers,
                               num_ps,
                               has_chief=False,
-                              has_eval=False):
+                              has_eval=False,
+                              rpc_layer='grpc'):
   """Create an in-process cluster that consists of only standard server."""
   # Leave some memory for cuda runtime.
   gpu_mem_frac = 0.7 / (num_workers + int(has_chief) + int(has_eval))
   worker_config = config_pb2.ConfigProto()
   worker_config.gpu_options.per_process_gpu_memory_fraction = gpu_mem_frac
+
+  # The cluster may hang if workers don't have enough inter_op threads. See
+  # b/172296720 for more details.
+  if worker_config.inter_op_parallelism_threads < num_workers + 1:
+    worker_config.inter_op_parallelism_threads = num_workers + 1
 
   # Enable collective ops which has no impact on non-collective ops.
   # TODO(yuefengz, tucker): removing this after we move the initialization of
@@ -172,22 +193,239 @@ def create_in_process_cluster(num_workers,
   # 2) there is something global in CUDA such that if we initialize CUDA in the
   # parent process, the child process cannot initialize it again and thus cannot
   # use GPUs (https://stackoverflow.com/questions/22950047).
-  return _create_cluster(
-      num_workers,
-      num_ps=num_ps,
+  cluster = None
+  try:
+    cluster = _create_cluster(
+        num_workers,
+        num_ps=num_ps,
+        has_chief=has_chief,
+        has_eval=has_eval,
+        worker_config=worker_config,
+        ps_config=ps_config,
+        eval_config=eval_config,
+        protocol=rpc_layer)
+  except errors.UnknownError as e:
+    if 'Could not start gRPC server' in e.message:
+      raise unittest.SkipTest('Cannot start std servers.')
+    else:
+      raise
+  return cluster
+
+
+class MultiProcessCluster(object):
+  """A cluster of TensorFlow servers in separate processes.
+
+  This class is not thread-safe.
+  """
+
+  def __init__(self,
+               cluster_resolver,
+               stream_output=False,
+               collective_leader=None):
+    self._cluster_resolver = cluster_resolver
+    self._cluster_spec = cluster_resolver.cluster_spec().as_dict()
+    self._rpc_layer = cluster_resolver.rpc_layer
+    self._stream_output = stream_output
+    self._start_events = {}
+    self._finish_events = {}
+    self._mpr_manager = multi_process_runner.manager()
+
+    def task_function(start_events, finish_events):
+      cluster_resolver = TFConfigClusterResolver()
+      cluster_spec = cluster_resolver.cluster_spec()
+      task_type = cluster_resolver.task_type
+      task_id = cluster_resolver.task_id
+      rpc_layer = cluster_resolver.rpc_layer
+
+      # TODO(yuefengz): support GPU clusters.
+      server_config = config_pb2.ConfigProto()
+      server_config.device_count['GPU'] = 0
+
+      if collective_leader:
+        server_config.experimental.collective_group_leader = collective_leader
+        server_config.experimental.collective_nccl = False
+
+        logging.info(
+            'Enabling collective ops with cluster_spec = %r, task_type = %r, '
+            'task_id = %r, rpc_layer = %r, collective_leader = %s',
+            cluster_spec, task_type, task_id, rpc_layer, collective_leader)
+      else:
+        logging.info(
+            'Starting server with cluster_spec = %r, task_type = %r, '
+            'task_id = %r, rpc_layer = %r', cluster_spec, task_type, task_id,
+            rpc_layer)
+
+      server_lib.Server(
+          cluster_spec,
+          job_name=task_type,
+          protocol=rpc_layer,
+          task_index=task_id,
+          config=server_config,
+          start=True)
+
+      start_event = start_events[task_type][task_id]
+      start_event.set()
+
+      finish_event = finish_events[task_type][task_id]
+      finish_event.wait()
+
+      os._exit(0)  # pylint: disable=protected-access
+
+    self._task_function = task_function
+    self._mpr = None
+
+  def start(self):
+    """Starts one TensorFlow server for each task in the cluster_resolver.
+
+    It will wait until all the servers are up before returns.
+    """
+    if self._mpr:
+      raise ValueError('The cluster has already been started.')
+    for task_type, task_addresses in self._cluster_spec.items():
+      self._start_events[task_type] = []
+      self._finish_events[task_type] = []
+      for _ in task_addresses:
+        self._start_events[task_type].append(self._mpr_manager.Event())
+        self._finish_events[task_type].append(self._mpr_manager.Event())
+
+    self._mpr = multi_process_runner.MultiProcessRunner(
+        self._task_function,
+        self._cluster_spec,
+        args=(self._start_events, self._finish_events),
+        rpc_layer=self._rpc_layer,
+        stream_output=self._stream_output,
+        return_output=False,
+        use_dill_for_args=False)
+    self._mpr.start()
+    for task_type, task_addresses in self._cluster_spec.items():
+      for i in range(len(task_addresses)):
+        self._start_events[task_type][i].wait()
+
+  def stop(self):
+    """Stops all the servers."""
+    for task_type, task_addresses in self._cluster_spec.items():
+      for i in range(len(task_addresses)):
+        self._finish_events[task_type][i].set()
+    try:
+      self._mpr.join()
+    except multi_process_runner.UnexpectedSubprocessExitError:
+      # TODO(yuefengz): investigate why processes exit with 255.
+      pass
+    self._mpr = None
+    self._start_events = {}
+    self._finish_events = {}
+
+  def kill_task(self, task_type, task_id):
+    """Kill a server given task_type and task_id.
+
+    Args:
+      task_type: the type of the task such as "worker".
+      task_id: the id the task such as 1.
+    """
+    assert self._mpr
+    if (not self._start_events[task_type][task_id].is_set() or
+        self._finish_events[task_type][task_id].is_set()):
+      raise ValueError("The task %s:%d doesn't exist." % (task_type, task_id))
+
+    self._finish_events[task_type][task_id].set()
+    self._mpr._processes[(task_type, task_id)].join()
+
+  def start_task(self, task_type, task_id):
+    """Starts a server given task_type and task_id.
+
+    Args:
+      task_type: the type of the task such as "worker".
+      task_id: the id the task such as 1.
+
+    Raises:
+      ValueError: if the server alreay exists.
+    """
+    assert self._mpr
+
+    if (not self._start_events[task_type][task_id].is_set() or
+        not self._finish_events[task_type][task_id].is_set()):
+      raise ValueError(
+          'The task %s:%d is still alive. You cannot start another one.' %
+          (task_type, task_id))
+    self._start_events[task_type][task_id] = self._mpr_manager.Event()
+    self._finish_events[task_type][task_id] = self._mpr_manager.Event()
+    self._mpr.start_single_process(task_type=task_type, task_id=task_id)
+    self._start_events[task_type][task_id].wait()
+
+  @property
+  def cluster_resolver(self):
+    return copy.deepcopy(self._cluster_resolver)
+
+
+def create_multi_process_cluster(num_workers,
+                                 num_ps,
+                                 has_chief=False,
+                                 has_eval=False,
+                                 rpc_layer='grpc',
+                                 stream_output=False,
+                                 collective_leader=None):
+  cluster_spec = create_cluster_spec(
       has_chief=has_chief,
-      has_eval=has_eval,
-      worker_config=worker_config,
-      ps_config=ps_config,
-      eval_config=eval_config,
-      protocol='grpc')
+      num_workers=num_workers,
+      num_ps=num_ps,
+      has_eval=has_eval)
+
+  cluster = MultiProcessCluster(
+      SimpleClusterResolver(
+          server_lib.ClusterSpec(cluster_spec), rpc_layer=rpc_layer),
+      stream_output=stream_output,
+      collective_leader=collective_leader)
+  cluster.start()
+  return cluster
 
 
+@tf_export(
+    '__internal__.distribute.multi_process_runner.create_cluster_spec', v1=[])
 def create_cluster_spec(has_chief=False,
                         num_workers=1,
                         num_ps=0,
                         has_eval=False):
-  """Create a cluster spec with tasks with unused local ports."""
+  """Create a cluster spec with tasks with unused local ports.
+
+  This utility finds available ports at localhost, and returns a dict that
+  represents the cluster spec that utilizes those ports, according to the
+  arguments. The dict representing the cluster spec contains task types, and
+  their instances' addresses. Note that this is usually only for testing purpose
+  using multiple processes in the local machine, and should not be used for real
+  multi-worker TensorFlow programs, where the addresses need to point to the
+  processes at separate machines.
+
+  This util is useful when creating the `cluster_spec` arg for
+  `tf.__internal__.distribute.multi_process_runner.run`.
+
+  Args:
+    has_chief: Whether the generated cluster spec should contain "chief" task
+      type.
+    num_workers: Number of workers to use in the cluster spec.
+    num_ps: Number of parameter servers to use in the cluster spec.
+    has_eval: Whether this cluster spec has evaluator.
+
+  Returns:
+    A dict that represents the cluster spec using localhost ports for the tasks.
+
+  Example:
+
+  ```python
+  cluster_spec =
+  tf.__internal__.distribute.multi_process_runner.create_cluster_spec(
+      has_chief=True, num_workers=2, num_ps=2)
+  # An example of cluster_spec is
+  # {'chief': ['localhost:23381'],
+  # 'worker': ['localhost:19197', 'localhost:22903'],
+  # 'ps': ['localhost:16912', 'localhost:21535']}
+
+  cluster_spec =
+  tf.__internal__.distribute.multi_process_runner.create_cluster_spec(
+      has_chief=False, num_workers=0, num_ps=0, has_eval=True)
+  # An example of cluster_spec is
+  # {'evaluator': ['localhost:23381']}
+  ```
+  """
   if _portpicker_import_error:
     raise _portpicker_import_error  # pylint: disable=raising-bad-type
 
@@ -207,13 +445,27 @@ def create_cluster_spec(has_chief=False,
   return cluster_spec
 
 
+@contextlib.contextmanager
+def skip_if_grpc_server_cant_be_started(test_obj):
+  try:
+    yield
+  except errors.UnknownError as e:
+    if 'Could not start gRPC server' in e.message:
+      reason = 'Cannot start std servers.'
+      test_obj.test_skipped_reason = reason
+      test_obj.skipTest(reason)
+    else:
+      raise
+
+
 class MultiWorkerTestBase(test.TestCase):
   """Base class for testing multi node strategy and dataset."""
 
   @classmethod
-  def setUpClass(cls):
+  def setUpClass(cls, num_workers=2, num_ps=1):  # pylint: disable=g-missing-super-call
     """Create a local cluster with 2 workers."""
-    cls._cluster_spec = create_in_process_cluster(num_workers=2, num_ps=0)
+    cls._cluster_spec = create_in_process_cluster(num_workers=num_workers,
+                                                  num_ps=num_ps)
     cls._default_target = 'grpc://' + cls._cluster_spec['worker'][0]
 
   def setUp(self):
@@ -221,8 +473,7 @@ class MultiWorkerTestBase(test.TestCase):
     # different session config or master target.
     self._thread_local = threading.local()
     self._thread_local.cached_session = None
-    self._result = 0
-    self._lock = threading.Lock()
+    self._coord = coordinator.Coordinator()
 
   @contextlib.contextmanager
   def session(self, graph=None, config=None, target=None):
@@ -292,15 +543,17 @@ class MultiWorkerTestBase(test.TestCase):
 
   def _run_client(self, client_fn, task_type, task_id, num_gpus, eager_mode,
                   *args, **kwargs):
+
+    def wrapped_client_fn():
+      with self._coord.stop_on_exception():
+        client_fn(task_type, task_id, num_gpus, *args, **kwargs)
+
     if eager_mode:
       with context.eager_mode():
-        result = client_fn(task_type, task_id, num_gpus, *args, **kwargs)
+        wrapped_client_fn()
     else:
       with context.graph_mode():
-        result = client_fn(task_type, task_id, num_gpus, *args, **kwargs)
-    if np.all(result):
-      with self._lock:
-        self._result += 1
+        wrapped_client_fn()
 
   def _run_between_graph_clients(self, client_fn, cluster_spec, num_gpus, *args,
                                  **kwargs):
@@ -308,14 +561,14 @@ class MultiWorkerTestBase(test.TestCase):
 
     Args:
       client_fn: a function that needs to accept `task_type`, `task_id`,
-        `num_gpus` and returns True if it succeeds.
+        `num_gpus`.
       cluster_spec: a dict specifying jobs in a cluster.
       num_gpus: number of GPUs per worker.
       *args: will be passed to `client_fn`.
       **kwargs: will be passed to `client_fn`.
     """
     threads = []
-    for task_type in [run_config.TaskType.CHIEF, run_config.TaskType.WORKER]:
+    for task_type in ['chief', 'worker']:
       for task_id in range(len(cluster_spec.get(task_type, []))):
         t = threading.Thread(
             target=self._run_client,
@@ -324,12 +577,39 @@ class MultiWorkerTestBase(test.TestCase):
             kwargs=kwargs)
         t.start()
         threads.append(t)
-    for t in threads:
-      t.join()
-    self.assertEqual(self._result, len(threads))
+    self._coord.join(threads)
 
 
-class MockOsEnv(collections.Mapping):
+class SingleWorkerTestBaseGraph(MultiWorkerTestBase):
+  """Base class for testing remote single worker strategy graph and dataset."""
+
+  @classmethod
+  def setUpClass(cls):
+    super(SingleWorkerTestBaseGraph, cls).setUpClass(num_workers=1)
+
+
+class SingleWorkerTestBaseEager(test.TestCase):
+  """Base class for testing remote single worker strategy eager and dataset."""
+
+  def setUp(self):
+    super(SingleWorkerTestBaseEager, self).setUp()
+    workers, _ = test_util.create_local_cluster(num_workers=1, num_ps=0)
+    remote.connect_to_remote_host(workers[0].target)
+
+  def cached_session(self):
+    return DummySession()
+
+
+class DummySession(object):
+
+  def __enter__(self):
+    return
+
+  def __exit__(self, exception_type, exception_value, traceback):
+    pass
+
+
+class MockOsEnv(collections_abc.Mapping):
   """A class that allows per-thread TF_CONFIG."""
 
   def __init__(self, *args):
@@ -381,7 +661,9 @@ class IndependentWorkerTestBase(test.TestCase):
   def _make_mock_run_std_server(self):
 
     def _mock_run_std_server(*args, **kwargs):
-      ret = original_run_std_server(*args, **kwargs)
+      """Returns the std server once all threads have started it."""
+      with skip_if_grpc_server_cant_be_started(self):
+        ret = original_run_std_server(*args, **kwargs)
       # Wait for all std servers to be brought up in order to reduce the chance
       # of remote sessions taking local ports that have been assigned to std
       # servers. Only call this barrier the first time this function is run for
@@ -428,7 +710,7 @@ class IndependentWorkerTestBase(test.TestCase):
     from `cluster_spec`, `task_type`, and `task_id`, and provide it to the new
     thread to be set as `TF_CONFIG` environment.
 
-    Arguments:
+    Args:
       task_fn: The function to run in the new thread.
       cluster_spec: The cluster spec.
       task_type: The task type.
@@ -475,13 +757,8 @@ class IndependentWorkerTestBase(test.TestCase):
     return threads
 
   def join_independent_workers(self, worker_threads):
-    try:
+    with skip_if_grpc_server_cant_be_started(self):
       self._coord.join(worker_threads)
-    except errors.UnknownError as e:
-      if 'Could not start gRPC server' in e.message:
-        self.skipTest('Cannot start std servers.')
-      else:
-        raise
 
 
 class MultiWorkerMultiProcessTest(test.TestCase):
@@ -499,6 +776,10 @@ class MultiWorkerMultiProcessTest(test.TestCase):
     return subprocess.Popen(
         cmd_args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
 
+  @deprecation.deprecated(
+      None, '`run_multiple_tasks_in_processes` is deprecated; any new test '
+      'requiring multiple processes should use `multi_process_runner` for '
+      'better support of log printing, streaming, and more functionality.')
   def run_multiple_tasks_in_processes(self, cmd_args, cluster_spec):
     """Run `cmd_args` in a process for each task in `cluster_spec`."""
     processes = {}
@@ -510,6 +791,10 @@ class MultiWorkerMultiProcessTest(test.TestCase):
         processes[task_type].append(p)
     return processes
 
+  @deprecation.deprecated(
+      None, '`join_independent_workers` is deprecated; any new test '
+      'requiring multiple processes should use `multi_process_runner` for '
+      'better support of log printing, streaming, and more functionality.')
   def join_independent_workers(self, worker_processes):
     return_codes = []
     for p in nest.flatten(worker_processes):
@@ -525,19 +810,45 @@ class MultiWorkerMultiProcessTest(test.TestCase):
     for return_code in return_codes:
       self.assertEqual(return_code, 0)
 
-  def stream_stderr(self, process):
-    # TODO(yuefengz): calling stream_stderr on a single process will probably
-    # make all processes hang if they have too much output e.g. adding
-    # --vmodule=execute=2 to cmd_args. But this method is useful for debugging
-    # purposes. We should figure out the hanging problem, probably by consuming
-    # outputs of all processes at the same time.
-    while True:
-      output = process.stderr.readline()
-      if not output and process.poll() is not None:
-        break
-      if output:
-        print(output.strip())
-        sys.stdout.flush()
+  @deprecation.deprecated(
+      None, '`stream_stderr` is deprecated; any new test '
+      'requiring multiple processes should use `multi_process_runner` for '
+      'better support of log printing, streaming, and more functionality.')
+  def stream_stderr(self, processes, print_only_first=False):
+    """Consume stderr of all processes and print to stdout.
+
+    To reduce the amount of logging, caller can set print_only_first to True.
+    In that case, this function only prints stderr from the first process of
+    each type.
+
+    Args:
+      processes: A dictionary from process type string -> list of processes.
+      print_only_first: If true, only print output from first process of each
+        type.
+    """
+
+    def _stream_stderr_single_process(process, type_string, index,
+                                      print_to_stdout):
+      """Consume a single process's stderr and optionally print to stdout."""
+      while True:
+        output = process.stderr.readline()
+        if not output and process.poll() is not None:
+          break
+        if output and print_to_stdout:
+          print('{}{} {}'.format(type_string, index, output.strip()))
+          sys.stdout.flush()
+
+    stream_threads = []
+    for process_type, process_list in six.iteritems(processes):
+      for i in range(len(process_list)):
+        print_to_stdout = (not print_only_first) or (i == 0)
+        thread = threading.Thread(
+            target=_stream_stderr_single_process,
+            args=(process_list[i], process_type, i, print_to_stdout))
+        thread.start()
+        stream_threads.append(thread)
+    for thread in stream_threads:
+      thread.join()
 
 
 def get_tf_config_task():

@@ -1,8 +1,9 @@
-package(default_visibility = [
-    "//visibility:public",
-])
-
-licenses(["notice"])  # Apache 2.0
+package(
+    default_visibility = [
+        "//visibility:public",
+    ],
+    licenses = ["notice"],
+)
 
 cc_library(
     name = "generator",
@@ -26,7 +27,7 @@ cc_test(
     srcs = ["generator_test.cc"],
     deps = [
         ":generator",
-        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -38,6 +39,6 @@ cc_test(
     ],
     deps = [
         ":generator",
-        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
     ],
 )

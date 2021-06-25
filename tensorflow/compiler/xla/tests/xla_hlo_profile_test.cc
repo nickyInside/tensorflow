@@ -158,11 +158,11 @@ void ExecuteAndFetchProfile(string* profile_output, LocalClient* client,
   ExecutableBuildOptions build_options;
   build_options.mutable_debug_options()->set_xla_hlo_profile(true);
   TF_ASSERT_OK_AND_ASSIGN(
-      std::unique_ptr<LocalExecutable> local_executable,
+      auto local_executables,
       client->Compile(computation, {&lhs_arg_shape, &rhs_arg_shape},
                       build_options));
 
-  Executable* executable = local_executable->executable();
+  Executable* executable = local_executables[0]->executable();
   HloExecutionProfile hlo_execution_profile(
       &executable->hlo_profile_printer_data(),
       &executable->hlo_profile_index_map());
@@ -181,13 +181,13 @@ void ExecuteAndFetchProfile(string* profile_output, LocalClient* client,
   TF_ASSERT_OK(stream_ptr->BlockHostUntilDone());
   (void)execution_result;
 
-  *profile_output =
-      hlo_execution_profile.ToString(executor->GetDeviceDescription());
+  *profile_output = hlo_execution_profile.ToString(
+      executor->GetDeviceDescription().clock_rate_ghz());
 
   XLA_VLOG_LINES(4, *profile_output);
 }
 
-XLA_TEST_F(HloProfileTest, ProfileSingleComputation) {
+XLA_TEST_F(HloProfileTest, DISABLED_ON_GPU(ProfileSingleComputation)) {
   const int64 m = 256, k = 256, n = 256;
   Shape lhs_shape = ShapeUtil::MakeShape(F32, {m, k});
   Shape rhs_shape = ShapeUtil::MakeShape(F32, {m, k});
@@ -265,7 +265,7 @@ XLA_TEST_F(HloProfileTest, ProfileSingleComputation) {
   EXPECT_TRUE(HasTrops(tanh_profile));
 }
 
-XLA_TEST_F(HloProfileTest, ProfileWhileComputation) {
+XLA_TEST_F(HloProfileTest, DISABLED_ON_GPU(ProfileWhileComputation)) {
   const int64 size = 256;
   Shape matrix_shape = ShapeUtil::MakeShape(F32, {size, size});
   Shape while_result_shape =
@@ -376,7 +376,8 @@ static std::pair<int, char**> AddXlaHloProfileFlag(int argc, char** argv) {
   // pass, otherwise a while loop is transformed and we could not match the
   // original name in the ProfileWhileComputation test.
   new_argv[argc + 1] = strdup(
-      "--xla_disable_hlo_passes=fusion,while-loop-invariant-code-motion");
+      "--xla_disable_hlo_passes=fusion,fusion_merger,multi_output_fusion,"
+      "while-loop-invariant-code-motion");
   return {argc + 2, new_argv};
 }
 

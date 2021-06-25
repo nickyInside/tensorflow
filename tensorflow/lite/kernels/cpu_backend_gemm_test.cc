@@ -15,19 +15,26 @@ limitations under the License.
 
 #include "tensorflow/lite/kernels/cpu_backend_gemm.h"
 
+#include <math.h>
+#include <stdint.h>
+#include <stdlib.h>
+
 #include <algorithm>
-#include <cstdarg>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <sstream>
 #include <string>
 #include <tuple>
 #include <type_traits>
+#include <vector>
 
 #include <gtest/gtest.h>
-#include "tensorflow/lite/experimental/ruy/ruy.h"
+#include "ruy/matrix.h"  // from @ruy
+#include "ruy/reference_mul.h"  // from @ruy
 #include "tensorflow/lite/kernels/cpu_backend_context.h"
 #include "tensorflow/lite/kernels/cpu_backend_gemm_params.h"
+#include "tensorflow/lite/kernels/cpu_backend_gemm_ruy.h"
 
 namespace tflite {
 
@@ -207,8 +214,8 @@ bool CheckErrorStats(const ErrorStats& error_stats, int accumulation_depth) {
     // compromise between something that works and something that's simple
     // enough code that doesn't feel too ad-hoc. As above in the float path,
     // abs_mean_diff is subject to a stricter requirement as it is a bias.
-    tolerated_relative_mean_abs_diff = std::sqrt(inverse_size);
-    tolerated_relative_abs_mean_diff = inverse_size;
+    tolerated_relative_mean_abs_diff = std::sqrt(inverse_size) * 0.5;
+    tolerated_relative_abs_mean_diff = inverse_size * 2.;
   }
 
   double tolerated_max_abs_diff =
@@ -290,7 +297,7 @@ void PerformGemmThenCompareResultsThenAgainWithClamping(
 // done so far. Until that is done, the best that we can do is to search for
 // a good exponent value by trial-and-error. This is expensive, as each try
 // requires computing a whole GEMM. This is thus probably a major contribution
-// to the overall latency of this tesat. To partially mitigate that,
+// to the overall latency of this test. To partially mitigate that,
 // we use a bisection to reduce the required number of tries.
 //
 // This function is recursive. The bisect_min and bisect_max arguments
@@ -336,15 +343,13 @@ int BisectReasonableMultiplierExponent(
 }
 
 template <typename LhsScalar, typename RhsScalar, typename AccumScalar,
-          typename DstScalar>
-void ReferenceGemm(const MatrixParams<LhsScalar>& lhs_params,
-                   const LhsScalar* lhs_data,
-                   const MatrixParams<RhsScalar>& rhs_params,
-                   const RhsScalar* rhs_data,
-                   const MatrixParams<DstScalar>& dst_params,
-                   DstScalar* dst_data,
-                   const GemmParams<AccumScalar, DstScalar>& params,
-                   CpuBackendContext* context) {
+          typename DstScalar, QuantizationFlavor quantization_flavor>
+void ReferenceGemm(
+    const MatrixParams<LhsScalar>& lhs_params, const LhsScalar* lhs_data,
+    const MatrixParams<RhsScalar>& rhs_params, const RhsScalar* rhs_data,
+    const MatrixParams<DstScalar>& dst_params, DstScalar* dst_data,
+    const GemmParams<AccumScalar, DstScalar, quantization_flavor>& params,
+    CpuBackendContext* context) {
   ruy::Matrix<LhsScalar> ruy_lhs;
   ruy::Matrix<RhsScalar> ruy_rhs;
   ruy::Matrix<DstScalar> ruy_dst;
@@ -352,11 +357,10 @@ void ReferenceGemm(const MatrixParams<LhsScalar>& lhs_params,
   cpu_backend_gemm::detail::MakeRuyMatrix(rhs_params, rhs_data, &ruy_rhs);
   cpu_backend_gemm::detail::MakeRuyMatrix(dst_params, dst_data, &ruy_dst);
 
-  ruy::BasicSpec<AccumScalar, DstScalar> ruy_spec;
-  cpu_backend_gemm::detail::MakeRuySpec(params, &ruy_spec);
+  ruy::MulParams<AccumScalar, DstScalar> ruy_mul_params;
+  cpu_backend_gemm::detail::MakeRuyMulParams(params, &ruy_mul_params);
 
-  ruy::Mul<ruy::Path::kReference>(ruy_lhs, ruy_rhs, ruy_spec,
-                                  context->ruy_context(), &ruy_dst);
+  ruy::ReferenceMul(ruy_lhs, ruy_rhs, ruy_mul_params, &ruy_dst);
 }
 
 template <typename LhsScalar, typename RhsScalar, typename AccumScalar,
@@ -365,8 +369,9 @@ void TestSomeGemm(int rows, int depth, int cols,
                   const std::vector<DstScalar>& golden) {
   CpuBackendContext cpu_backend_context;
   std::default_random_engine random_engine;
-  cpu_backend_context.set_max_num_threads(1 + (random_engine() % 8));
-
+  cpu_backend_context.SetMaxNumThreads(1 + (random_engine() % 8));
+  bool use_caching = static_cast<bool>(random_engine() % 2);
+  cpu_backend_context.SetUseCaching(use_caching);
   const bool use_golden = !golden.empty();
 
   std::vector<LhsScalar> lhs_data;
@@ -384,8 +389,13 @@ void TestSomeGemm(int rows, int depth, int cols,
   }
   MakeDeterministicPseudoRandomVector(rows * cols, &dst_data);
 
+  auto random_order = [&]() {
+    return random_engine() % 2 ? cpu_backend_gemm::Order::kRowMajor
+                               : cpu_backend_gemm::Order::kColMajor;
+  };
   MatrixParams<LhsScalar> lhs_params;
-  lhs_params.order = cpu_backend_gemm::Order::kRowMajor;
+  lhs_params.order =
+      use_golden ? cpu_backend_gemm::Order::kRowMajor : random_order();
   lhs_params.rows = rows;
   lhs_params.cols = depth;
   if (!std::is_floating_point<LhsScalar>::value) {
@@ -396,7 +406,8 @@ void TestSomeGemm(int rows, int depth, int cols,
   }
 
   MatrixParams<RhsScalar> rhs_params;
-  rhs_params.order = cpu_backend_gemm::Order::kColMajor;
+  rhs_params.order =
+      use_golden ? cpu_backend_gemm::Order::kColMajor : random_order();
   rhs_params.rows = depth;
   rhs_params.cols = cols;
   if (!std::is_floating_point<RhsScalar>::value) {
@@ -407,7 +418,8 @@ void TestSomeGemm(int rows, int depth, int cols,
   }
 
   MatrixParams<DstScalar> dst_params;
-  dst_params.order = cpu_backend_gemm::Order::kColMajor;
+  dst_params.order =
+      use_golden ? cpu_backend_gemm::Order::kColMajor : random_order();
   dst_params.rows = rows;
   dst_params.cols = cols;
   if (!std::is_floating_point<DstScalar>::value) {
@@ -418,16 +430,17 @@ void TestSomeGemm(int rows, int depth, int cols,
   }
 
   GemmParams<AccumScalar, DstScalar> params;
-  if (use_golden || !std::is_floating_point<AccumScalar>::value ||
-      (random_engine() % 2)) {
+  if (use_golden || (random_engine() % 2)) {
     // cpu_backend_gemm supports bias=null only in the float path. Test that
     // in 50% of float testcases.
     params.bias = bias_data.data();
   }
+  static constexpr std::int32_t kMultiplierFixedpointMin = 1234567890;
+  static constexpr std::int32_t kMultiplierFixedpointMax = 1987654321;
   if (!std::is_floating_point<AccumScalar>::value) {
     // some large int32 value. Not being a multiple of a large
     // power of two helps testing rounding behavior.
-    params.multiplier_fixedpoint = 1234567890;
+    params.multiplier_fixedpoint = kMultiplierFixedpointMin;
     // Now find a suitable value for multiplier_exponent.
     // It needs to be low enough for a substantial amount of dst values
     // to avoid getting clamped.
@@ -456,13 +469,20 @@ void TestSomeGemm(int rows, int depth, int cols,
       lhs_params, lhs_data, rhs_params, rhs_data, dst_params, &dst_data, params,
       expected, &cpu_backend_context);
 
-  if (!std::is_floating_point<AccumScalar>::value) {
-    // Try with per-channel quantized multipliers. Just a naive check
-    // duplicating the same multiplier --- would already catch most bugs.
-    std::vector<AccumScalar> multiplier_fixedpoint_perchannel(
-        rows, params.multiplier_fixedpoint);
-    std::vector<int> multiplier_exponent_perchannel(rows,
-                                                    params.multiplier_exponent);
+  if (!use_golden && !std::is_floating_point<AccumScalar>::value) {
+    // Try with per-channel quantized multipliers.
+    std::vector<AccumScalar> multiplier_fixedpoint_perchannel(rows);
+    std::vector<int> multiplier_exponent_perchannel(rows);
+    for (int i = 0; i < rows; i++) {
+      multiplier_fixedpoint_perchannel[i] =
+          kMultiplierFixedpointMin +
+          (random_engine() %
+           (kMultiplierFixedpointMax + 1 - kMultiplierFixedpointMin));
+      const int exponent_min = params.multiplier_exponent - 2;
+      const int exponent_max = params.multiplier_exponent + 2;
+      multiplier_exponent_perchannel[i] =
+          exponent_min + (random_engine() % (exponent_max + 1 - exponent_min));
+    }
     static constexpr QuantizationFlavor perchannel_flavor =
         std::is_floating_point<AccumScalar>::value
             ? QuantizationFlavor::kFloatingPoint
@@ -475,10 +495,79 @@ void TestSomeGemm(int rows, int depth, int cols,
         multiplier_fixedpoint_perchannel.data();
     params_perchannel.multiplier_exponent_perchannel =
         multiplier_exponent_perchannel.data();
+    ReferenceGemm(lhs_params, lhs_data.data(), rhs_params, rhs_data.data(),
+                  dst_params, expected.data(), params_perchannel,
+                  &cpu_backend_context);
     PerformGemmThenCompareResultsThenAgainWithClamping(
         lhs_params, lhs_data, rhs_params, rhs_data, dst_params, &dst_data,
         params_perchannel, expected, &cpu_backend_context);
   }
+}
+
+template <typename LhsScalar, typename RhsScalar, typename AccumScalar,
+          typename DstScalar>
+void TestMaybeValidGemm(int lhs_rows, int lhs_cols, int rhs_rows, int rhs_cols,
+                        int dst_rows, int dst_cols) {
+  CpuBackendContext cpu_backend_context;
+  std::default_random_engine random_engine;
+  cpu_backend_context.SetMaxNumThreads(1 + (random_engine() % 8));
+  bool use_caching = static_cast<bool>(random_engine() % 2);
+  cpu_backend_context.SetUseCaching(use_caching);
+
+  std::vector<LhsScalar> lhs_data;
+  std::vector<RhsScalar> rhs_data;
+  std::vector<AccumScalar> bias_data;
+  std::vector<DstScalar> dst_data;
+  MakeDeterministicPseudoRandomVector(lhs_rows * lhs_cols, &lhs_data);
+  MakeDeterministicPseudoRandomVector(rhs_rows * rhs_cols, &rhs_data);
+  MakeDeterministicPseudoRandomVector(dst_rows, &bias_data);
+  MakeDeterministicPseudoRandomVector(dst_rows * dst_cols, &dst_data);
+
+  MatrixParams<LhsScalar> lhs_params;
+  lhs_params.order = cpu_backend_gemm::Order::kRowMajor;
+  lhs_params.rows = lhs_rows;
+  lhs_params.cols = lhs_cols;
+  if (!std::is_floating_point<LhsScalar>::value) {
+    lhs_params.zero_point = 1;
+  }
+
+  MatrixParams<RhsScalar> rhs_params;
+  rhs_params.order = cpu_backend_gemm::Order::kColMajor;
+  rhs_params.rows = rhs_rows;
+  rhs_params.cols = rhs_cols;
+  if (!std::is_floating_point<RhsScalar>::value) {
+    rhs_params.zero_point = 1;
+  }
+
+  MatrixParams<DstScalar> dst_params;
+  dst_params.order = cpu_backend_gemm::Order::kColMajor;
+  dst_params.rows = dst_rows;
+  dst_params.cols = dst_cols;
+  if (!std::is_floating_point<DstScalar>::value) {
+    dst_params.zero_point = 1;
+  }
+
+  GemmParams<AccumScalar, DstScalar> params;
+  params.bias = bias_data.data();
+  static constexpr std::int32_t kMultiplierFixedpointMin = 1234567890;
+  if (!std::is_floating_point<AccumScalar>::value) {
+    // some large int32 value. Not being a multiple of a large
+    // power of two helps testing rounding behavior.
+    params.multiplier_fixedpoint = kMultiplierFixedpointMin;
+    // Now find a suitable value for multiplier_exponent.
+    // It needs to be low enough for a substantial amount of dst values
+    // to avoid getting clamped.
+    int bisect_min = -8 * static_cast<int>(sizeof(AccumScalar));
+    // We don't increase test coverage by using positive multipliers,
+    // and using very large positive multipliers may at the moment
+    // result in overflow in some paths.
+    int bisect_max = 0;
+    params.multiplier_exponent = BisectReasonableMultiplierExponent(
+        bisect_min, bisect_max, lhs_params, lhs_data, rhs_params, rhs_data,
+        dst_params, &dst_data, params, &cpu_backend_context);
+  }
+  Gemm(lhs_params, lhs_data.data(), rhs_params, rhs_data.data(), dst_params,
+       dst_data.data(), params, &cpu_backend_context);
 }
 
 TEST(CpuBackendGemmSimpleTestAgainstGolden, Float) {
@@ -494,6 +583,18 @@ TEST(CpuBackendGemmSimpleTestAgainstGolden, Uint8) {
 TEST(CpuBackendGemmSimpleTestAgainstGolden, Int8) {
   TestSomeGemm<std::int8_t, std::int8_t, std::int32_t, std::int8_t>(
       2, 6, 3, {13, 32, 31, 81, 50, 127});
+}
+
+TEST(CpuBackendGemmInvalidGemmTest, Float) {
+  // A standard Gemm operation.
+  TestMaybeValidGemm<float, float, float, float>(2, 3, 3, 4, 2, 4);
+  // An invalid Gemm that will abort in debug mode.
+#if !defined(TARGET_IPHONE_SIMULATOR) && !defined(TARGET_OS_IPHONE)
+  ASSERT_DEBUG_DEATH(
+      (TestMaybeValidGemm<float, float, float, float>(2, 3, 3, 0, 2, 4)), "");
+  ASSERT_DEBUG_DEATH(
+      (TestMaybeValidGemm<float, float, float, float>(2, 3, 9, 4, 2, 4)), "");
+#endif
 }
 
 TEST(CpuBackendGemmSimpleTestAgainstGolden, Int8Int16) {
@@ -594,7 +695,7 @@ TYPED_TEST(CpuBackendGemmTest, Rectangular) {
 
 TYPED_TEST(CpuBackendGemmTest, HighlyRectangular) {
   std::vector<std::tuple<int, int, int>> shapes;
-  for (int size = 1; size <= 10000; size *= 10) {
+  for (int size = 1; size <= 1000; size *= 10) {
     shapes.push_back(std::make_tuple(size, 10, 10));
     shapes.push_back(std::make_tuple(10, size, 10));
     shapes.push_back(std::make_tuple(10, 10, size));
@@ -621,8 +722,3 @@ TYPED_TEST(CpuBackendGemmTest, OuterProduct) {
 }  // namespace
 
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

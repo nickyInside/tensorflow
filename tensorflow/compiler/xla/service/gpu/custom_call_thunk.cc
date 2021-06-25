@@ -16,65 +16,56 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/gpu/custom_call_thunk.h"
 
 #include "absl/strings/str_format.h"
-#include "tensorflow/stream_executor/cuda/cuda_stream.h"
+#include "tensorflow/compiler/xla/service/buffer_assignment.h"
+#include "tensorflow/compiler/xla/util.h"
+#include "tensorflow/core/platform/errors.h"
+
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #include "tensorflow/stream_executor/gpu/gpu_stream.h"
+#endif
 
 namespace xla {
 namespace gpu {
 
-CustomCallThunk::CustomCallThunk(
-    void* call_target,
-    std::vector<ShapeTree<BufferAllocation::Slice>> operand_slices,
-    ShapeTree<BufferAllocation::Slice> result_slices, std::string opaque,
-    const HloInstruction* instr)
-    : Thunk(Thunk::kCustomCall, instr),
+CustomCallThunk::CustomCallThunk(ThunkInfo thunk_info, void* call_target,
+                                 std::vector<OptionalSlice> operands,
+                                 std::vector<OptionalSlice> results,
+                                 const std::string& opaque)
+    : Thunk(Thunk::kCustomCall, thunk_info),
       call_target_(call_target),
-      operand_slices_(std::move(operand_slices)),
-      result_slices_(std::move(result_slices)),
-      opaque_(std::move(opaque)) {
-  CHECK_EQ(instr->operand_count(), operand_slices_.size());
-  for (int64 i = 0; i < instr->operand_count(); ++i) {
-    const auto& s1 = operand_slices_[i].shape();
-    const auto& s2 = instr->operand(i)->shape();
-    CHECK(ShapeUtil::Equal(s1, s2)) << absl::StreamFormat(
-        "Shape mismatch between instr->operand(%d) and "
-        "operand_slices[%d].shape(): %s vs %s",
-        i, i, s1.ToString(), s2.ToString());
-  }
-  CHECK(ShapeUtil::Equal(instr->shape(), result_slices.shape()))
-      << absl::StreamFormat(
-             "Shape mismatch between instr->shape() and result_slices.shape(): "
-             "%s vs %s.",
-             instr->shape().ToString(), result_slices.shape().ToString());
-}
+      operands_(std::move(operands)),
+      results_(std::move(results)),
+      opaque_(opaque) {}
 
-Status CustomCallThunk::ExecuteOnStream(
-    const BufferAllocations& buffer_allocations, se::Stream* stream,
-    HloExecutionProfiler* profiler) {
+Status CustomCallThunk::ExecuteOnStream(const ExecuteParams& params) {
   // gpu_stream is CUstream or e.g. the equivalent type in ROCm.
-  auto gpu_stream = se::gpu::AsGpuStreamValue(stream);
-  auto typed_call_target =
-      reinterpret_cast<void (*)(decltype(gpu_stream), void** /*buffers*/,
-                                const char* /*opaque*/, size_t /*opaque_len*/)>(
-          call_target_);
-
   std::vector<void*> buffers;
-  auto append_buffers = [&](const ShapeTree<BufferAllocation::Slice>& slices) {
-    slices.ForEachElement([&](const ShapeIndex& /*index*/,
-                              const BufferAllocation::Slice& slice) {
-      if (slice.allocation() == nullptr) {
+  buffers.reserve(operands_.size() + results_.size());
+  for (const std::vector<OptionalSlice>& slices : {operands_, results_}) {
+    for (const OptionalSlice& slice : slices) {
+      if (slice) {
+        if (!slice->allocation())
+          return InternalError("custom call input missing buffer allocation");
+        buffers.push_back(
+            params.buffer_allocations->GetDeviceAddress(*slice).opaque());
+      } else {
         buffers.push_back(nullptr);
       }
-      buffers.push_back(buffer_allocations.GetDeviceAddress(slice).opaque());
-    });
-  };
-  for (const auto& slices : operand_slices_) {
-    append_buffers(slices);
+    }
   }
-  append_buffers(result_slices_);
 
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  auto gpu_stream = se::gpu::AsGpuStreamValue(params.stream);
+  using call_type = void (*)(decltype(gpu_stream), void** /*buffers*/,
+                             const char* /*opaque*/, size_t /*opaque_len*/);
+  auto typed_call_target = reinterpret_cast<call_type>(call_target_);
   typed_call_target(gpu_stream, buffers.data(), opaque_.data(), opaque_.size());
   return Status::OK();
+#else   //  GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+  return Unavailable(
+      "Custom calls on GPU are not supported in this configuration. Please "
+      "build with --config=cuda or --config=rocm");
+#endif  //   GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 }
 
 }  // namespace gpu

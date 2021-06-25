@@ -20,7 +20,7 @@ limitations under the License.
 
 using tensorflow::int64;
 
-#ifdef INTEL_MKL
+#ifdef ENABLE_MKL
 #include <omp.h>
 #include "mkldnn.hpp"
 #include "tensorflow/compiler/xla/service/cpu/runtime_conv2d.h"
@@ -144,10 +144,12 @@ void MKLConvImpl(const EigenDevice& device, ScalarType* out, ScalarType* lhs,
   if (need_output_conversion) {
     net.push_back(reorder(conv1_dst_memory, user_dst_memory));
   }
-  stream(stream::kind::eager).submit(net).wait();
+#ifndef ENABLE_MKLDNN_V1
+  stream(stream::kind::eager_nostore).submit(net).wait();
+#endif
 }
 }  // namespace
-#endif  // INTEL_MKL
+#endif  // ENABLE_MKL
 
 TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_MKLConvF32(
     const void* run_options_ptr, float* out, float* lhs, float* rhs,
@@ -157,7 +159,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_MKLConvF32(
     int64 row_stride, int64 col_stride, int64 padding_top, int64 padding_bottom,
     int64 padding_left, int64 padding_right, int64 lhs_row_dilation,
     int64 lhs_col_dilation, int64 rhs_row_dilation, int64 rhs_col_dilation) {
-#ifdef INTEL_MKL
+#ifdef ENABLE_MKL
   // Since MKL_DNN cannot handle transposed convolution, this is handled by
   // Eigen.
   if (lhs_row_dilation > 1 || lhs_col_dilation > 1) {
@@ -177,7 +179,7 @@ TF_ATTRIBUTE_NO_SANITIZE_MEMORY void __xla_cpu_runtime_MKLConvF32(
   }
 #else
   std::cerr << "Attempt to call MKL Conv2D runtime library without defining "
-               "INTEL_MKL. Add --config=mkl to build with MKL.";
+               "ENABLE_MKL. Add --config=mkl to build with MKL.";
   exit(1);
-#endif  // INTEL_MKL
+#endif  // ENABLE_MKL
 }

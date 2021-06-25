@@ -86,8 +86,54 @@ TEST(AllocatorAttributesTest, IsEqualOrLessRestrictiveThan) {
   EXPECT_FALSE(a.IsEqualOrLessRestrictiveThan(b));
 }
 
+TEST(AllocatorAttributesTest, Merge) {
+  AllocatorAttributes a, b;
+
+  // Merging nic_compatible=True and nic_compatible=False results in
+  // nic_compatible=True.
+  EXPECT_EQ(a.value, 0);
+  EXPECT_EQ(b.value, 0);
+  EXPECT_FALSE(a.nic_compatible());
+  EXPECT_FALSE(b.nic_compatible());
+  b.set_nic_compatible(true);
+  a.Merge(b);
+  EXPECT_TRUE(a.nic_compatible());
+  EXPECT_TRUE(b.nic_compatible());
+
+  // a.Merge(b) does not change b.
+  EXPECT_EQ(a.scope_id, 0);
+  EXPECT_EQ(b.scope_id, 0);
+  a.scope_id = 1;
+  a.Merge(b);
+  EXPECT_EQ(a.scope_id, 1);
+  EXPECT_EQ(b.scope_id, 0);
+
+  // If a.scope_id=1 and b.scope_id=0, then b.Merge(a) results in b.scope_id=1.
+  a.scope_id = 1;
+  b.scope_id = 0;
+  b.Merge(a);
+  EXPECT_EQ(a.scope_id, 1);
+  EXPECT_EQ(b.scope_id, 1);
+
+  // If a.scope_id and b.scope_id are same, then merge leaves them unchanged.
+  a.scope_id = 2;
+  b.scope_id = 2;
+  a.Merge(b);
+  EXPECT_EQ(a.scope_id, 2);
+  EXPECT_EQ(b.scope_id, 2);
+}
+
+TEST(AllocatorAttributesDeathTest, MergeDifferentScopeIds) {
+  AllocatorAttributes a, b;
+  // If a.scope_id and b.scope_id are both positive but different, then
+  // a.Merge(b) should cause a CHECK failure.
+  a.scope_id = 3;
+  b.scope_id = 4;
+  EXPECT_DEATH({ a.Merge(b); }, "");
+}
+
 TEST(CPUAllocatorTest, Simple) {
-  EnableCPUAllocatorStats(true);
+  EnableCPUAllocatorStats();
   Allocator* a = cpu_allocator();
   std::vector<void*> ptrs;
   for (int s = 1; s < 1024; s++) {
@@ -114,9 +160,9 @@ TEST(CPUAllocatorTest, Simple) {
 
   CheckStats(a, 1025, 0, 1048576 * sizeof(double) + 1024 * sizeof(float),
              1048576 * sizeof(double));
-  a->ClearStats();
+  CHECK(a->ClearStats());
   CheckStats(a, 0, 0, 0, 0);
-  EnableCPUAllocatorStats(false);
+  DisableCPUAllocatorStats();
 }
 
 // Define a struct that we will use to observe behavior in the unit tests
@@ -175,19 +221,21 @@ TEST(CustomAllocatorAttributes, TestSetterAndGetter) {
   EXPECT_FALSE(HasDeviceAllocatorAttribute(AllocatorAttributes()));
 }
 
-static void BM_Allocation(int iters, int arg) {
+static void BM_Allocation(::testing::benchmark::State& state) {
+  const int arg = state.range(0);
+
   Allocator* a = cpu_allocator();
   // Exercise a few different allocation sizes
   std::vector<int> sizes = {256, 4096, 16384, 524288, 512, 1048576};
   int size_index = 0;
 
-  if (arg) EnableCPUAllocatorStats(true);
-  while (--iters > 0) {
+  if (arg) EnableCPUAllocatorStats();
+  for (auto s : state) {
     int bytes = sizes[size_index++ % sizes.size()];
     void* p = a->AllocateRaw(1, bytes);
     a->DeallocateRaw(p);
   }
-  if (arg) EnableCPUAllocatorStats(false);
+  if (arg) DisableCPUAllocatorStats();
 }
 BENCHMARK(BM_Allocation)->Arg(0)->Arg(1);
 

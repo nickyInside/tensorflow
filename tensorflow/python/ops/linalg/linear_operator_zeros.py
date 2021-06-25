@@ -40,6 +40,7 @@ __all__ = [
 
 
 @tf_export("linalg.LinearOperatorZeros")
+@linear_operator.make_composite_tensor
 class LinearOperatorZeros(linear_operator.LinearOperator):
   """`LinearOperator` acting like a [batch] zero matrix.
 
@@ -176,6 +177,19 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
       ValueError:  If any of the following is not `True`:
         `{is_self_adjoint, is_non_singular, is_positive_definite}`.
     """
+    parameters = dict(
+        num_rows=num_rows,
+        num_columns=num_columns,
+        batch_shape=batch_shape,
+        dtype=dtype,
+        is_non_singular=is_non_singular,
+        is_self_adjoint=is_self_adjoint,
+        is_positive_definite=is_positive_definite,
+        is_square=is_square,
+        assert_proper_shapes=assert_proper_shapes,
+        name=name
+    )
+
     dtype = dtype or dtypes.float32
     self._assert_proper_shapes = assert_proper_shapes
 
@@ -194,7 +208,12 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
           is_self_adjoint=is_self_adjoint,
           is_positive_definite=is_positive_definite,
           is_square=is_square,
+          parameters=parameters,
           name=name)
+
+      linear_operator_util.assert_not_ref_type(num_rows, "num_rows")
+      linear_operator_util.assert_not_ref_type(num_columns, "num_columns")
+      linear_operator_util.assert_not_ref_type(batch_shape, "batch_shape")
 
       self._num_rows = linear_operator_util.shape_tensor(
           num_rows, name="num_rows")
@@ -273,10 +292,10 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
     #   Also, the final dimension of 'x' can have any shape.
     #   Therefore, the final two dimensions of special_shape are 1's.
     special_shape = self.batch_shape.concatenate([1, 1])
-    bshape = array_ops.broadcast_static_shape(x.get_shape(), special_shape)
+    bshape = array_ops.broadcast_static_shape(x.shape, special_shape)
     if special_shape.is_fully_defined():
       # bshape.is_fully_defined iff special_shape.is_fully_defined.
-      if bshape == x.get_shape():
+      if bshape == x.shape:
         return x
       # Use the built in broadcasting of addition.
       zeros = array_ops.zeros(shape=special_shape, dtype=self.dtype)
@@ -450,3 +469,15 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
            [self._min_matrix_dim_tensor()]], axis=0)
 
     return array_ops.zeros(shape=d_shape, dtype=self.dtype)
+
+  def _eigvals(self):
+    return self._zeros_diag()
+
+  @property
+  def _composite_tensor_prefer_static_fields(self):
+    return ("num_rows", "num_columns", "batch_shape")
+
+  @property
+  def _composite_tensor_fields(self):
+    return ("num_rows", "num_columns", "batch_shape", "dtype",
+            "assert_proper_shapes")

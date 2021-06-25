@@ -13,7 +13,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#define _USE_MATH_DEFINES
 #include <cmath>
 
 #include "tensorflow/cc/ops/array_ops_internal.h"
@@ -384,6 +383,7 @@ Status AddGrad(const Scope& scope, const Operation& op,
   return BinaryGradCommon(scope, op, grad_outputs, gx_1, gx_2);
 }
 REGISTER_GRADIENT_OP("Add", AddGrad);
+REGISTER_GRADIENT_OP("AddV2", AddGrad);
 
 Status SubGrad(const Scope& scope, const Operation& op,
                const std::vector<Output>& grad_inputs,
@@ -767,6 +767,40 @@ Status ErfGrad(const Scope& scope, const Operation& op,
 }
 REGISTER_GRADIENT_OP("Erf", ErfGrad);
 
+Status ErfinvGrad(const Scope& scope, const Operation& op,
+                  const std::vector<Output>& grad_inputs,
+                  std::vector<Output>* grad_outputs) {
+  auto grad = grad_inputs[0];
+  auto root_pi_over_two =
+      Cast(scope, Const(scope, std::sqrt(M_PI) / 2), grad.type());
+  Scope grad_scope = scope.WithControlDependencies(grad);
+  auto x = ConjugateHelper(grad_scope, op.input(0));
+  // grad * sqrt(pi) / 2 * exp(erfinv(x) ** 2)
+  auto dx = Mul(grad_scope, Mul(grad_scope, grad, root_pi_over_two),
+                Exp(grad_scope, Square(grad_scope, op.output(0))));
+  grad_outputs->push_back(dx);
+  return grad_scope.status();
+}
+REGISTER_GRADIENT_OP("Erfinv", ErfinvGrad);
+
+Status NdtriGrad(const Scope& scope, const Operation& op,
+                 const std::vector<Output>& grad_inputs,
+                 std::vector<Output>* grad_outputs) {
+  auto grad = grad_inputs[0];
+  auto root_two_pi =
+      Cast(scope, Const(scope, std::sqrt(2 * M_PI)), grad.type());
+  auto two = Cast(scope, Const(scope, 2), grad.type());
+  Scope grad_scope = scope.WithControlDependencies(grad);
+  auto x = ConjugateHelper(grad_scope, op.input(0));
+  // grad * sqrt(2 * pi) * exp(ndtri(x) ** 2 / 2)
+  auto dx = Mul(
+      grad_scope, Mul(grad_scope, grad, root_two_pi),
+      Exp(grad_scope, Div(grad_scope, Square(grad_scope, op.output(0)), two)));
+  grad_outputs->push_back(dx);
+  return grad_scope.status();
+}
+REGISTER_GRADIENT_OP("Ndtri", NdtriGrad);
+
 Status LgammaGrad(const Scope& scope, const Operation& op,
                   const std::vector<Output>& grad_inputs,
                   std::vector<Output>* grad_outputs) {
@@ -1118,6 +1152,59 @@ Status BatchMatMulGrad(const Scope& scope, const Operation& op,
                           grad_outputs);
 }
 REGISTER_GRADIENT_OP("BatchMatMul", BatchMatMulGrad);
+
+Status CumsumGrad(const Scope& scope, const Operation& op,
+                  const std::vector<Output>& grad_inputs,
+                  std::vector<Output>* grad_outputs) {
+  if (op.num_inputs() != 2) {
+    return errors::InvalidArgument("Cumsum requires 2 arguments");
+  }
+  if (grad_inputs.size() != 1) {
+    return errors::InvalidArgument("Cumsum grad requires 1 grad input");
+  }
+
+  Cumsum::Attrs attrs;
+  TF_RETURN_IF_ERROR(
+      GetNodeAttr(op.node()->attrs(), "exclusive", &attrs.exclusive_));
+  bool reverse;
+  TF_RETURN_IF_ERROR(GetNodeAttr(op.node()->attrs(), "reverse", &reverse));
+  attrs.reverse_ = !reverse;
+
+  auto axis = op.input(1);
+  auto sum = Cumsum(scope, grad_inputs[0], axis, attrs);
+  grad_outputs->push_back(sum.out);
+  grad_outputs->push_back(NoGradient());
+  return scope.status();
+}
+REGISTER_GRADIENT_OP("Cumsum", CumsumGrad);
+
+bool IsFloatingPointDtype(DataType dtype) {
+  static constexpr DataType valid_dtypes[] = {
+      DT_FLOAT, DT_HALF, DT_DOUBLE, DT_BFLOAT16, DT_COMPLEX64, DT_COMPLEX128};
+  return std::find(std::begin(valid_dtypes), std::end(valid_dtypes), dtype) !=
+         std::end(valid_dtypes);
+}
+
+Status CastGrad(const Scope& scope, const Operation& op,
+                const std::vector<Output>& grad_inputs,
+                std::vector<Output>* grad_outputs) {
+  if (op.num_inputs() != 1) {
+    return errors::InvalidArgument("Cast requires 2 arguments");
+  }
+  if (grad_inputs.size() != 1) {
+    return errors::InvalidArgument("Cast grad requires 1 grad input");
+  }
+
+  auto src_type = op.input_type(0);
+  auto dst_type = grad_inputs[0].type();
+  if (IsFloatingPointDtype(src_type) && IsFloatingPointDtype(dst_type)) {
+    grad_outputs->push_back(Cast(scope, grad_inputs[0], src_type));
+  } else {
+    grad_outputs->push_back(NoGradient());
+  }
+  return scope.status();
+}
+REGISTER_GRADIENT_OP("Cast", CastGrad);
 
 }  // anonymous namespace
 }  // namespace ops

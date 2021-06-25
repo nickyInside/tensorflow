@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include <stdint.h>
+
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -21,16 +22,17 @@ limitations under the License.
 #include <vector>
 
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
-#include "unicode/appendable.h"  // TF:icu
-#include "unicode/schriter.h"  // TF:icu
-#include "unicode/uchar.h"  // TF:icu
-#include "unicode/ucnv.h"  // TF:icu
-#include "unicode/ucnv_err.h"  // TF:icu
-#include "unicode/umachine.h"  // TF:icu
-#include "unicode/uniset.h"  // TF:icu
-#include "unicode/unistr.h"  // TF:icu
-#include "unicode/uset.h"  // TF:icu
-#include "unicode/utypes.h"  // TF:icu
+#include "unicode/appendable.h"  // from @icu
+#include "unicode/schriter.h"  // from @icu
+#include "unicode/uchar.h"  // from @icu
+#include "unicode/ucnv.h"  // from @icu
+#include "unicode/ucnv_err.h"  // from @icu
+#include "unicode/umachine.h"  // from @icu
+#include "unicode/uniset.h"  // from @icu
+#include "unicode/unistr.h"  // from @icu
+#include "unicode/uset.h"  // from @icu
+#include "unicode/utf.h"  // from @icu
+#include "unicode/utypes.h"  // from @icu
 #include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op.h"
@@ -52,7 +54,7 @@ namespace tensorflow {
 namespace {
 
 void Encode(const UnicodeEncoding encoding, const icu::UnicodeString& in,
-            string* out) {
+            tstring* out) {
   if (encoding == UnicodeEncoding::UTF8) {
     out->clear();
     in.toUTF8String(*out);
@@ -295,10 +297,10 @@ class UnicodeTranscodeOp : public OpKernel {
     } else {
       OP_REQUIRES_OK(ctx, ctx->allocate_output("output", input_tensor->shape(),
                                                &output_tensor));
-      output_tensor->flat<string>() = input_tensor->flat<string>();
+      output_tensor->flat<tstring>() = input_tensor->flat<tstring>();
     }
 
-    auto output_flat = output_tensor->flat<string>();
+    auto output_flat = output_tensor->flat<tstring>();
     bool found_any_format_error = false;
     for (size_t i = 0; i < output_flat.size(); ++i) {
       Transcode(&(output_flat(i)), input_encoder->converter_,
@@ -330,7 +332,7 @@ class UnicodeTranscodeOp : public OpKernel {
   // Transcode the string from input encoding to the output_encoding_. If
   // non-valid characters are encountered, use the subst_/elide_replacement_
   // config to handle them.
-  void Transcode(string* s, UConverter* input_encoder,
+  void Transcode(tstring* s, UConverter* input_encoder,
                  bool* found_any_format_error) {
     icu::UnicodeString source;
     IterateUnicodeString(
@@ -404,7 +406,7 @@ class UnicodeDecodeBaseOp : public OpKernel {
     OP_REQUIRES_OK(ctx, ctx->input("input", &input_tensor));
 
     // Go through all the strings in `input`.
-    const auto& input_vec = input_tensor->flat<string>();
+    const auto& input_vec = input_tensor->flat<tstring>();
 
     std::unique_ptr<WrappedConverter> input_encoder =
         absl::make_unique<WrappedConverter>();
@@ -531,6 +533,17 @@ class UnicodeEncodeOp : public OpKernel {
     const Tensor& input_splits = context->input(1);
     const auto input_splits_flat = input_splits.flat<SPLITS_TYPE>();
 
+    // Operation will treat first argument in input_splits as if it were zero
+    // regardless of its actual value since splits should begin with zero and
+    // end with the length of the input values vector.
+    OP_REQUIRES(
+        context, input_splits_flat(0) == 0,
+        errors::InvalidArgument("First value in input_splits must be zero."));
+    OP_REQUIRES(context,
+                input_splits_flat(input_splits_flat.size() - 1) ==
+                    input_tensor_flat.size(),
+                errors::InvalidArgument("Last value in input_splits must be "
+                                        "equal to length of input_tensor."));
     // Since we limit to a 2-D input (flat_values of rank 1 and a single splits
     // tensor), our output dimension will be 1 with it's size equal to the
     // number of splits (outer dimension or ragged tensor).
@@ -538,7 +551,7 @@ class UnicodeEncodeOp : public OpKernel {
     Tensor* output_tensor;
     OP_REQUIRES_OK(context, context->allocate_output("output", output_shape,
                                                      &output_tensor));
-    auto output_tensor_flat = output_tensor->flat<string>();
+    auto output_tensor_flat = output_tensor->flat<tstring>();
 
     // Use a single index over the flattened input values tensor.
     int idx = 0;
@@ -546,13 +559,21 @@ class UnicodeEncodeOp : public OpKernel {
     for (int i = 1; i < input_splits_flat.size(); ++i) {
       icu::UnicodeString unicode_string;
       icu::UnicodeStringAppendable appendable_unicode_string(unicode_string);
+      OP_REQUIRES(
+          context, input_splits_flat(i - 1) <= input_splits_flat(i),
+          errors::InvalidArgument(
+              "Values in input_splits must be equal or in ascending order."));
+      OP_REQUIRES(
+          context, input_splits_flat(i) <= input_tensor_flat.size(),
+          errors::InvalidArgument("Values in input_splits must be less than or "
+                                  "equal to input_tensor length."));
       for (; idx < input_splits_flat(i); ++idx) {
         int32 code_point = input_tensor_flat(idx);
         // Check for invalid code point
-        if (code_point > UCHAR_MAX_VALUE || code_point < UCHAR_MIN_VALUE) {
+        if (!U_IS_UNICODE_CHAR(code_point)) {
           if (error_options_.error_on_malformatting) {
             context->CtxFailure(errors::InvalidArgument(
-                "Code point value out of valid Unicode range."));
+                "Code point is out of range for Unicode, or a noncharacter."));
             return;
           } else if (!error_options_.elide_replacement) {
             code_point = error_options_.subst;
@@ -561,9 +582,9 @@ class UnicodeEncodeOp : public OpKernel {
         appendable_unicode_string.appendCodePoint(code_point);
       }
       // Encode our string and save in the output.
-      string result;
+      tstring result;
       Encode(encoding_, unicode_string, &result);
-      output_tensor_flat(i - 1) = result;
+      output_tensor_flat(i - 1) = std::move(result);
     }
   }
 

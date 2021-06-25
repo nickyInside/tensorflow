@@ -56,24 +56,41 @@ REGISTER_KERNEL_BUILDER(Name("QueueIsClosed").Device(DEVICE_CPU),
 REGISTER_KERNEL_BUILDER(Name("QueueIsClosedV2").Device(DEVICE_CPU),
                         QueueIsClosedOp);
 
+REGISTER_KERNEL_BUILDER(
+    Name("QueueEnqueueV2").Device(DEVICE_DEFAULT).HostMemory("handle"),
+    EnqueueOp);
+REGISTER_KERNEL_BUILDER(
+    Name("QueueDequeueV2").Device(DEVICE_DEFAULT).HostMemory("handle"),
+    DequeueOp);
+REGISTER_KERNEL_BUILDER(
+    Name("QueueCloseV2").Device(DEVICE_DEFAULT).HostMemory("handle"),
+    QueueCloseOp);
+REGISTER_KERNEL_BUILDER(Name("QueueSizeV2")
+                            .Device(DEVICE_DEFAULT)
+                            .HostMemory("size")
+                            .HostMemory("handle"),
+                        QueueSizeOp);
+REGISTER_KERNEL_BUILDER(
+    Name("QueueIsClosedV2").Device(DEVICE_DEFAULT).HostMemory("handle"),
+    QueueIsClosedOp);
+
 class FakeQueueOp : public OpKernel {
  public:
   explicit FakeQueueOp(OpKernelConstruction* context) : OpKernel(context) {
-    OP_REQUIRES_OK(context,
-                   context->allocate_persistent(DT_STRING, TensorShape({2}),
-                                                &handle_, nullptr));
+    OP_REQUIRES_OK(
+        context, context->allocate_temp(DT_STRING, TensorShape({2}), &tensor_));
   }
 
   void Compute(OpKernelContext* context) override {
     const ResourceHandle& ref = context->input(0).flat<ResourceHandle>()(0);
-    handle_.AccessTensor(context)->flat<string>()(0) = ref.container();
-    handle_.AccessTensor(context)->flat<string>()(1) = ref.name();
-    context->set_output_ref(0, &mu_, handle_.AccessTensor(context));
+    tensor_.flat<tstring>()(0) = ref.container();
+    tensor_.flat<tstring>()(1) = ref.name();
+    context->set_output_ref(0, &mu_, &tensor_);
   }
 
  private:
   mutex mu_;
-  PersistentTensor handle_;
+  Tensor tensor_;
 };
 
 REGISTER_KERNEL_BUILDER(Name("FakeQueue").Device(DEVICE_CPU), FakeQueueOp);

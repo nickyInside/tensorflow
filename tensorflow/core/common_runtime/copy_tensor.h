@@ -55,19 +55,23 @@ class CopyTensor {
    public:
     Registration(DeviceType sender_device_type, DeviceType receiver_device_type,
                  CopyFunction copy_function) {
-      TF_QCHECK_OK(
-          Register(sender_device_type, receiver_device_type, copy_function));
+      TF_QCHECK_OK(Register(sender_device_type, receiver_device_type,
+                            copy_function, /*is_pluggable_device=*/false));
     }
   };
 
- private:
   // Register a function for copying between two specific DeviceTypes.
   // Note: This should only be called via the constructor of
-  // CopyTensor::Registration.
+  // CopyTensor::Registration or from PluggableDevice implementation.
   static Status Register(DeviceType sender_device_type,
                          DeviceType receiver_device_type,
-                         CopyFunction copy_function);
+                         CopyFunction copy_function, bool is_pluggable_device);
 };
+
+void CopyDeviceToHost(const Tensor* input, Allocator* cpu_allocator,
+                      Allocator* out_allocator, StringPiece edge_name,
+                      Device* src, Tensor* output,
+                      DeviceContext* send_dev_context, StatusCallback done);
 
 }  // namespace tensorflow
 

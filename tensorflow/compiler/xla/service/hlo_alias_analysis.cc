@@ -185,7 +185,7 @@ class BufferValueMap {
     };
 
     // If the value shows up in a root instruction, alias it with parameter
-    // intruction.
+    // instruction.
     for (const HloPosition& pos : value.positions()) {
       if (pos.instruction == module_->entry_computation()->root_instruction()) {
         ShapeIndex output_index = pos.index;
@@ -252,7 +252,8 @@ class BufferValueMap {
           if (callsite.instruction()->opcode() == HloOpcode::kWhile &&
               callsite.instruction()->while_body() == computation) {
             // Call graph must have been flattened.
-            CHECK_EQ(call_graph_node.caller_callsites().size(), 1);
+            CHECK_EQ(call_graph_node.caller_callsites().size(), 1)
+                << "Call graph must have been flattened.";
 
             const HloValue& while_value = dataflow_.GetUniqueValueAt(
                 callsite.instruction(), position.index);
@@ -307,6 +308,39 @@ class BufferValueMap {
     }
   }
 
+  void ComputeInPlaceOperationAliasedBuffers(
+      const HloValue& value, std::vector<BufferNumber>* aliased_buffers) {
+    VLOG(3) << "Compute aliases for in-place operations (e.g. "
+               "kDynamicUpdateSlice and kScatter)";
+    for (const HloPosition& position : value.positions()) {
+      HloInstruction* instruction = position.instruction;
+      for (const auto& operand_and_output_index :
+           HloDataflowAnalysis::GetInPlaceInputOutputPairs(instruction)) {
+        if (position.index == operand_and_output_index.second) {
+          const HloUse& operand = operand_and_output_index.first;
+          const HloValue& operand_value = dataflow_.GetUniqueValueAt(
+              instruction->operand(operand.operand_number),
+              operand.operand_index);
+          VLOG(3) << " operand value " << operand_value.ToShortString()
+                  << " aliases.";
+          aliased_buffers->push_back(GetBufferForValue(operand_value));
+        }
+      }
+    }
+
+    for (const HloUse& use : value.uses()) {
+      for (const auto& operand_and_output_index :
+           HloDataflowAnalysis::GetInPlaceInputOutputPairs(use.instruction)) {
+        if (use == operand_and_output_index.first) {
+          const HloValue& use_value = dataflow_.GetUniqueValueAt(
+              use.instruction, operand_and_output_index.second);
+          VLOG(3) << " use value " << use_value.ToShortString() << " aliases.";
+          aliased_buffers->push_back(GetBufferForValue(use_value));
+        }
+      }
+    }
+  }
+
   // Compute and return a vector of buffers that the given value must be
   // contained in due to HLO aliasing rules.
   std::vector<BufferNumber> ComputeAliasedBuffers(const HloValue& value) {
@@ -317,6 +351,7 @@ class BufferValueMap {
     ComputeInputOutputAliasedBuffers(value, &aliased_buffers);
     ComputeWhileAliasedBuffers(value, &aliased_buffers);
     ComputeConditionalAliasedBuffers(value, &aliased_buffers);
+    ComputeInPlaceOperationAliasedBuffers(value, &aliased_buffers);
     // Uniquify aliased buffers.
     absl::c_sort(aliased_buffers);
     aliased_buffers.erase(
@@ -403,7 +438,7 @@ bool HloAliasAnalysis::InstructionBuffersAreDistinct(
       }
     } else {
       // It's possible for multiple values at this index to have the same
-      // HloBuffer. This does not result in non-distictness. To account for
+      // HloBuffer. This does not result in non-distinctness. To account for
       // this case, add all of the buffers at this index after checking
       // whether each buffer exists at an earlier index. This is a corner
       // case, however, as the number of values at an index is almost always
@@ -489,8 +524,7 @@ string HloAliasAnalysis::ToString() const {
 /* static */
 StatusOr<std::unique_ptr<HloAliasAnalysis>> HloAliasAnalysis::Run(
     const HloModule* module,
-    const HloDataflowAnalysis::FusionCanShareBufferFunction&
-        fusion_can_share_buffer) {
+    const HloDataflowAnalysis::CanShareBuffer& can_share_buffer) {
   VLOG(2) << "HloAliasAnalysis::Run on module " << module->name();
   XLA_VLOG_LINES(2, module->ToString());
 
@@ -498,7 +532,7 @@ StatusOr<std::unique_ptr<HloAliasAnalysis>> HloAliasAnalysis::Run(
   TF_ASSIGN_OR_RETURN(alias_analysis->dataflow_analysis_,
                       HloDataflowAnalysis::Run(*module, /*ssa_form=*/true,
                                                /*bitcast_defines_value=*/false,
-                                               fusion_can_share_buffer));
+                                               can_share_buffer));
 
   BufferValueMap buffer_map(module, alias_analysis->dataflow_analysis());
   buffer_map.MergeAliasedBuffers();

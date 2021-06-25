@@ -2,75 +2,105 @@
 # Java Native Interface (JNI) library intended for implementing the
 # TensorFlow Lite Java API using the TensorFlow Lite CC library.
 
-package(default_visibility = ["//visibility:public"])
-
 load("//tensorflow/lite:build_def.bzl", "tflite_copts")
+load("//tensorflow/lite/core/shims:cc_library_with_tflite.bzl", "alias_with_tflite", "cc_library_with_tflite")
 
-licenses(["notice"])  # Apache 2.0
+package(
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],  # Apache 2.0
+)
 
-cc_library(
+alias_with_tflite(
     name = "native_framework_only",
+    actual = ":native_experimental_framework_only",
+)
+
+# Native code needed for TF Lite Java API, including experimental APIs;
+# but only the framework code, no ops.
+cc_library_with_tflite(
+    name = "native_experimental_framework_only",
+    hdrs = ["jni_utils.h"],
+    tflite_deps = [
+        ":native_stable_framework_only",
+        "//tensorflow/lite/core/shims:framework_experimental",
+    ],
+    deps = [
+        "//tensorflow/lite/java/jni",
+    ],
+)
+
+# Native code needed for TF Lite Java API, excluding experimental APIs;
+# but only the framework code, no ops.
+cc_library_with_tflite(
+    name = "native_stable_framework_only",
     srcs = [
-        "exception_jni.cc",
+        "default/jni_utils.cc",
+        "jni_utils.cc",
         "nativeinterpreterwrapper_jni.cc",
         "tensor_jni.cc",
         "tensorflow_lite_jni.cc",
     ],
-    hdrs = [
-        "exception_jni.h",
-        "nativeinterpreterwrapper_jni.h",
-        "tensor_jni.h",
-        "tensorflow_lite_jni.h",
-    ],
+    hdrs = ["jni_utils.h"],
     copts = tflite_copts(),
     linkopts = [
         "-lm",
         "-ldl",
     ],
+    tflite_deps = [
+        "//tensorflow/lite/core/shims:common",
+        "//tensorflow/lite/core/shims:framework_stable",
+        "//tensorflow/lite/core/shims:jni_initialization",
+    ],
     deps = [
-        "//tensorflow/lite:framework",
+        "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite:op_resolver",
         "//tensorflow/lite:schema_fbs_version",
         "//tensorflow/lite:string_util",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite:util",
+        "//tensorflow/lite/delegates/xnnpack:xnnpack_delegate_hdrs_only",
         "//tensorflow/lite/java/jni",
     ],
     alwayslink = 1,
 )
 
-cc_library(
-    name = "init_tensorflow",
-    srcs = [
-        "init_tensorflow_jni.cc",
-    ],
-    hdrs = [
-        "init_tensorflow_jni.h",
-    ],
-    copts = tflite_copts(),
-    deps = [
-        "//tensorflow/lite/java/jni",
-        "//tensorflow/lite/testing:init_tensorflow",
-    ],
-    alwayslink = 1,
-)
-
-# This includes all ops. If you want a smaller binary, you should copy and
-# modify builtin_ops_jni.cc.  You should then link your binary against both
-# ":native_framework_only" and your own version of ":native_builtin_ops".
-cc_library(
+alias_with_tflite(
     name = "native",
-    srcs = [
-        "builtin_ops_jni.cc",
+    actual = ":native_experimental",
+)
+
+# Native code and ops needed for the TF Lite Java API, including experimental
+# features. This includes all ops. If you want a smaller binary, you should use
+# tflite_custom_cc_library or tflite_custom_android_library rules.
+cc_library_with_tflite(
+    name = "native_experimental",
+    tflite_deps = [
+        ":native_stable",
+        "//tensorflow/lite/core/shims:framework_experimental",
     ],
+)
+
+# Native code and ops needed for the TF Lite Java API, excluding experimental
+# features. This includes all ops. If you want a smaller binary, you should use
+# tflite_custom_cc_library or tflite_custom_android_library rules.
+cc_library_with_tflite(
+    name = "native_stable",
     copts = tflite_copts(),
-    deps = [
+    tflite_deps = [
         ":native_framework_only",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite/core/shims:builtin_ops",
+        "//tensorflow/lite/core/shims:framework_stable",
+    ],
+    deps = [
+        "//tensorflow/lite:create_op_resolver_with_builtin_ops",
+        "//tensorflow/lite/core/api",
+        "//tensorflow/lite/kernels:deprecated_backends",
     ],
     alwayslink = 1,
 )
 
 exports_files(
     [
+        "exported_symbols.lds",
         "version_script.lds",
     ],
 )

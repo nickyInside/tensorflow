@@ -14,12 +14,14 @@ limitations under the License.
 ==============================================================================*/
 // Unit test for TFLite Micro Frontend op.
 
+#include "tensorflow/lite/experimental/microfrontend/audio_microfrontend.h"
+
 #include <memory>
 #include <vector>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include "flatbuffers/flexbuffers.h"  // TF:flatbuffers
+#include "flatbuffers/flexbuffers.h"  // from @flatbuffers
 #include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/kernels/test_util.h"
 #include "tensorflow/lite/model.h"
@@ -27,9 +29,6 @@ limitations under the License.
 namespace tflite {
 namespace ops {
 namespace custom {
-
-TfLiteRegistration* Register_AUDIO_MICROFRONTEND();
-
 namespace {
 
 using ::testing::ElementsAreArray;
@@ -198,9 +197,3 @@ TEST_F(TwoConsecutive36InputsMicroFrontendTest, MicroFrontendBlackBoxTest) {
 }  // namespace custom
 }  // namespace ops
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::tflite::LogToStderr();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

@@ -18,6 +18,8 @@ limitations under the License.
 #include <stdint.h>
 #include <stdio.h>
 
+#include <string>
+
 typedef struct AHardwareBuffer AHardwareBuffer;
 
 // NN api types based on NNAPI header file
@@ -39,7 +41,13 @@ enum {
   ANEURALNETWORKS_TENSOR_FLOAT32 = 3,
   ANEURALNETWORKS_TENSOR_INT32 = 4,
   ANEURALNETWORKS_TENSOR_QUANT8_ASYMM = 5,
+  ANEURALNETWORKS_BOOL = 6,
+  ANEURALNETWORKS_TENSOR_QUANT16_SYMM = 7,
+  ANEURALNETWORKS_TENSOR_FLOAT16 = 8,
+  ANEURALNETWORKS_TENSOR_BOOL8 = 9,
+  ANEURALNETWORKS_TENSOR_QUANT8_SYMM_PER_CHANNEL = 11,
   ANEURALNETWORKS_TENSOR_QUANT8_SYMM = 13,
+  ANEURALNETWORKS_TENSOR_QUANT8_ASYMM_SIGNED = 14,
 };
 
 /**
@@ -87,12 +95,56 @@ enum {
   ANEURALNETWORKS_SUB = 36,
   ANEURALNETWORKS_TRANSPOSE = 37,
   ANEURALNETWORKS_ABS = 38,
+  ANEURALNETWORKS_ARGMAX = 39,
+  ANEURALNETWORKS_ARGMIN = 40,
+  ANEURALNETWORKS_BIDIRECTIONAL_SEQUENCE_LSTM = 42,
+  ANEURALNETWORKS_CAST = 45,
+  ANEURALNETWORKS_EQUAL = 48,
   ANEURALNETWORKS_EXP = 49,
+  ANEURALNETWORKS_EXPAND_DIMS = 50,
+  ANEURALNETWORKS_GATHER = 51,
+  ANEURALNETWORKS_GREATER = 53,
+  ANEURALNETWORKS_GREATER_EQUAL = 54,
+  ANEURALNETWORKS_LESS = 58,
+  ANEURALNETWORKS_LESS_EQUAL = 59,
   ANEURALNETWORKS_LOG = 60,
+  ANEURALNETWORKS_LOGICAL_AND = 61,
+  ANEURALNETWORKS_LOGICAL_NOT = 62,
+  ANEURALNETWORKS_LOGICAL_OR = 63,
+  ANEURALNETWORKS_LOG_SOFTMAX = 64,
+  ANEURALNETWORKS_MAXIMUM = 65,
+  ANEURALNETWORKS_MINIMUM = 66,
+  ANEURALNETWORKS_NEG = 67,
+  ANEURALNETWORKS_NOT_EQUAL = 68,
+  ANEURALNETWORKS_PAD_V2 = 69,
+  ANEURALNETWORKS_POW = 70,
   ANEURALNETWORKS_PRELU = 71,
+  ANEURALNETWORKS_QUANTIZE = 72,
+  ANEURALNETWORKS_QUANTIZED_16BIT_LSTM = 73,
+  ANEURALNETWORKS_REDUCE_ANY = 76,
+  ANEURALNETWORKS_REDUCE_MAX = 77,
+  ANEURALNETWORKS_REDUCE_MIN = 78,
+  ANEURALNETWORKS_REDUCE_PROD = 79,
+  ANEURALNETWORKS_REDUCE_SUM = 80,
   ANEURALNETWORKS_RSQRT = 83,
+  ANEURALNETWORKS_SELECT = 84,
   ANEURALNETWORKS_SIN = 85,
+  ANEURALNETWORKS_SLICE = 86,
+  ANEURALNETWORKS_SPLIT = 87,
   ANEURALNETWORKS_SQRT = 88,
+  ANEURALNETWORKS_TILE = 89,
+  ANEURALNETWORKS_TOPK_V2 = 90,
+  ANEURALNETWORKS_TRANSPOSE_CONV = 91,
+  ANEURALNETWORKS_UNIDIRECTIONAL_SEQUENCE_LSTM = 92,
+  ANEURALNETWORKS_UNIDIRECTIONAL_SEQUENCE_RNN = 93,
+  ANEURALNETWORKS_RESIZE_NEAREST_NEIGHBOR = 94,
+  ANEURALNETWORKS_QUANTIZED_LSTM = 95,
+  ANEURALNETWORKS_IF = 96,
+  ANEURALNETWORKS_WHILE = 97,
+  ANEURALNETWORKS_ELU = 98,
+  ANEURALNETWORKS_HARD_SWISH = 99,
+  ANEURALNETWORKS_FILL = 100,
+  ANEURALNETWORKS_RANK = 101,
 };
 
 /**
@@ -118,6 +170,7 @@ enum {
 /**
  * Result codes.
  */
+// LINT.IfChange
 enum {
   ANEURALNETWORKS_NO_ERROR = 0,
   ANEURALNETWORKS_OUT_OF_MEMORY = 1,
@@ -129,7 +182,13 @@ enum {
   ANEURALNETWORKS_UNMAPPABLE = 7,
   ANEURALNETWORKS_OUTPUT_INSUFFICIENT_SIZE = 8,
   ANEURALNETWORKS_UNAVAILABLE_DEVICE = 9,
+  ANEURALNETWORKS_MISSED_DEADLINE_TRANSIENT = 10,
+  ANEURALNETWORKS_MISSED_DEADLINE_PERSISTENT = 11,
+  ANEURALNETWORKS_RESOURCE_EXHAUSTED_TRANSIENT = 12,
+  ANEURALNETWORKS_RESOURCE_EXHAUSTED_PERSISTENT = 13,
+  ANEURALNETWORKS_DEAD_OBJECT = 14,
 };
+// LINT.ThenChange(//tensorflow/lite/delegates/nnapi/nnapi_delegate.cc:NnApiErrorDescription)
 
 /**
  * Implicit padding algorithms.
@@ -157,6 +216,91 @@ enum {
   /** Dedicated accelerator for Machine Learning workloads. */
   ANEURALNETWORKS_DEVICE_ACCELERATOR = 4,
 };
+
+/**
+ * Relative execution priority.
+ *
+ * Available since API level 30.
+ */
+enum {
+  ANEURALNETWORKS_PRIORITY_LOW = 90,
+  ANEURALNETWORKS_PRIORITY_MEDIUM = 100,
+  ANEURALNETWORKS_PRIORITY_HIGH = 110,
+  ANEURALNETWORKS_PRIORITY_DEFAULT = ANEURALNETWORKS_PRIORITY_MEDIUM,
+};
+
+/**
+ * NNAPI feature levels.
+ *
+ * Each update of the NNAPI specification yields a new NNAPI feature level enum
+ * value. NNAPI feature level corrseponds to an NNAPI specification version that
+ * a driver and/or the NNAPI runtime can implement.
+ */
+enum {
+  /** NNAPI specification available in Android O-MR1, Android NNAPI feature
+     level 1 */
+  ANEURALNETWORKS_FEATURE_LEVEL_1 = 27,
+  /** NNAPI specification available in Android P, Android NNAPI feature level 2
+   */
+  ANEURALNETWORKS_FEATURE_LEVEL_2 = 28,
+  /** NNAPI specification available in Android Q, Android NNAPI feature level 3
+   */
+  ANEURALNETWORKS_FEATURE_LEVEL_3 = 29,
+  /** NNAPI specification available in Android R, Android NNAPI feature level 4
+   */
+  ANEURALNETWORKS_FEATURE_LEVEL_4 = 30,
+  /**
+   * NNAPI specification available in Android S, Android NNAPI feature level 5.
+   * After Android S, the NNAPI specification can be updated between Android
+   * API releases.
+   */
+  ANEURALNETWORKS_FEATURE_LEVEL_5 = 31,
+};
+
+/**
+ * ANeuralNetworksMemoryDesc is an opaque type that represents a memory
+ * descriptor.
+ *
+ * A memory descriptor describes the properties of a memory object, and is used
+ * by
+ * {@link ANeuralNetworksMemory_createFromDesc}.
+ *
+ * To use:
+ *   - Create a new memory descriptor by calling
+ *     {@link ANeuralNetworksMemoryDesc_create}.
+ *   - Specify all of the intended input and output roles by calling
+ *     {@link ANeuralNetworksMemoryDesc_addInputRole} and
+ *     {@link ANeuralNetworksMemoryDesc_addOutputRole}.
+ *   - Optionally, specify the memory dimensions by calling
+ *     {@link ANeuralNetworksMemoryDesc_setDimensions}.
+ *   - Complete the memory descriptor with {@link
+ * ANeuralNetworksMemoryDesc_finish}.
+ *   - Use the memory descriptor as many times as needed with
+ *     {@link ANeuralNetworksMemory_createFromDesc}.
+ *   - Destroy the memory descriptor with {@link
+ * ANeuralNetworksMemoryDesc_free}.
+ *
+ * A memory descriptor is completed by calling {@link
+ * ANeuralNetworksMemoryDesc_finish}. A memory descriptor is destroyed by
+ * calling {@link ANeuralNetworksMemoryDesc_free}.
+ *
+ * A memory descriptor must not be modified once
+ * {@link ANeuralNetworksMemoryDesc_finish}
+ * has been called on it.
+ *
+ * It is the application's responsibility to make sure that only
+ * one thread modifies a memory descriptor at a given time. It is however
+ * safe for more than one thread to use the memory descriptor once
+ * {@link ANeuralNetworksMemoryDesc_finish} has returned.
+ *
+ * It is also the application's responsibility to ensure that there are no other
+ * uses of the memory descriptor after calling {@link
+ * ANeuralNetworksMemoryDesc_free}. It is however safe to continue using a
+ * {@link ANeuralNetworksMemory} object created from the memory descriptor.
+ *
+ * Available since API level 30.
+ */
+typedef struct ANeuralNetworksMemoryDesc ANeuralNetworksMemoryDesc;
 
 /**
  * ANeuralNetworksMemory is an opaque type that represents memory.
@@ -471,8 +615,20 @@ typedef int (*ANeuralNetworksCompilation_setCaching_fn)(
     ANeuralNetworksCompilation* compilation, const char* cacheDir,
     const uint8_t* token);
 
+typedef int (*ANeuralNetworksCompilation_setTimeout_fn)(
+    ANeuralNetworksCompilation* compilation, uint64_t duration);
+
+typedef int (*ANeuralNetworksCompilation_setPriority_fn)(
+    ANeuralNetworksCompilation* compilation, int priority);
+
 typedef int (*ANeuralNetworksExecution_compute_fn)(
     ANeuralNetworksExecution* execution);
+
+typedef int (*ANeuralNetworksExecution_setTimeout_fn)(
+    ANeuralNetworksExecution* execution, uint64_t duration);
+
+typedef int (*ANeuralNetworksExecution_setLoopTimeout_fn)(
+    ANeuralNetworksExecution* execution, uint64_t duration);
 
 typedef int (*ANeuralNetworksExecution_getOutputOperandRank_fn)(
     ANeuralNetworksExecution* execution, int32_t index, uint32_t* rank);
@@ -501,10 +657,92 @@ typedef enum {
   // such as that of the runtime itself and the IPC needed for the runtime to
   // communicate with the driver.
   ANEURALNETWORKS_DURATION_IN_DRIVER = 1,
+  // Execution time on hardware, after all dependencies have been signaled.
+  // If no dependencies specified (for example, if the execution was scheduled
+  // other
+  // than with {@link ANeuralNetworksExecution_startComputeWithDependencies}),
+  // the
+  // reported time will be the same as ANEURALNETWORKS_DURATION_ON_HARDWARE.
+  // Available since API level 30.
+  ANEURALNETWORKS_FENCED_DURATION_ON_HARDWARE = 2,
+  // Execution time in driver, after all dependencies have been signaled.
+  // Excludes
+  // overhead such as that of the runtime itself and the IPC needed for the
+  // runtime
+  // to communicate with the driver.
+  // If no dependencies specified (for example, if the execution was scheduled
+  // other
+  // than with {@link ANeuralNetworksExecution_startComputeWithDependencies}),
+  // the
+  // reported time will be the same as ANEURALNETWORKS_DURATION_IN_DRIVER.
+  // Available since API level 30.
+  ANEURALNETWORKS_FENCED_DURATION_IN_DRIVER = 3,
 } DurationCode;
 
 typedef int (*ANeuralNetworksExecution_getDuration_fn)(
     const ANeuralNetworksExecution* execution, int32_t durationCode,
     uint64_t* duration);
 
+typedef int (*ANeuralNetworksDevice_getExtensionSupport_fn)(
+    const ANeuralNetworksDevice* device, const char* extensionName,
+    bool* isExtensionSupported);
+
+typedef int (*ANeuralNetworksModel_getExtensionOperandType_fn)(
+    ANeuralNetworksModel* model, const char* extensionName,
+    uint16_t operandCodeWithinExtension, int32_t* type);
+
+typedef int (*ANeuralNetworksModel_getExtensionOperationType_fn)(
+    ANeuralNetworksModel* model, const char* extensionName,
+    uint16_t operationCodeWithinExtension, ANeuralNetworksOperationType* type);
+
+typedef int (*ANeuralNetworksModel_setOperandExtensionData_fn)(
+    ANeuralNetworksModel* model, int32_t index, const void* data,
+    size_t length);
+
+typedef int (*ANeuralNetworksMemoryDesc_create_fn)(
+    ANeuralNetworksMemoryDesc** desc);
+
+typedef void (*ANeuralNetworksMemoryDesc_free_fn)(
+    ANeuralNetworksMemoryDesc* desc);
+
+typedef int (*ANeuralNetworksMemoryDesc_addInputRole_fn)(
+    ANeuralNetworksMemoryDesc* desc,
+    const ANeuralNetworksCompilation* compilation, uint32_t index,
+    float frequency);
+
+typedef int (*ANeuralNetworksMemoryDesc_addOutputRole_fn)(
+    ANeuralNetworksMemoryDesc* desc,
+    const ANeuralNetworksCompilation* compilation, uint32_t index,
+    float frequency);
+
+typedef int (*ANeuralNetworksMemoryDesc_setDimensions_fn)(
+    ANeuralNetworksMemoryDesc* desc, uint32_t rank, const uint32_t* dimensions);
+
+typedef int (*ANeuralNetworksMemoryDesc_finish_fn)(
+    ANeuralNetworksMemoryDesc* desc);
+
+typedef int (*ANeuralNetworksMemory_createFromDesc_fn)(
+    const ANeuralNetworksMemoryDesc* desc, ANeuralNetworksMemory** memory);
+
+typedef int (*ANeuralNetworksMemory_copy_fn)(const ANeuralNetworksMemory* src,
+                                             const ANeuralNetworksMemory* dst);
+
+typedef int (*ANeuralNetworksEvent_createFromSyncFenceFd_fn)(
+    int sync_fence_fd, ANeuralNetworksEvent** event);
+
+typedef int (*ANeuralNetworksEvent_getSyncFenceFd_fn)(
+    const ANeuralNetworksEvent* event, int* sync_fence_fd);
+
+typedef int (*ANeuralNetworksExecution_startComputeWithDependencies_fn)(
+    ANeuralNetworksExecution* execution,
+    const ANeuralNetworksEvent* const* dependencies, uint32_t num_dependencies,
+    uint64_t duration, ANeuralNetworksEvent** event);
+
+typedef int (*ANeuralNetworksExecution_enableInputAndOutputPadding_fn)(
+    ANeuralNetworksExecution* execution, bool enable);
+
+typedef int (*ANeuralNetworksExecution_setReusable_fn)(
+    ANeuralNetworksExecution* execution, bool reusable);
+
+typedef int64_t (*ANeuralNetworks_getRuntimeFeatureLevel_fn)();
 #endif  // TENSORFLOW_LITE_NNAPI_NEURALNETWORKSTYPES_H_

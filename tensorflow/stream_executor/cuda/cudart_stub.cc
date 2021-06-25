@@ -16,7 +16,7 @@ limitations under the License.
 // This file wraps cuda runtime calls with dso loader so that we don't need to
 // have explicit linking to libcuda.
 
-#include "cuda/include/cuda_runtime_api.h"
+#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "tensorflow/stream_executor/lib/env.h"
 #include "tensorflow/stream_executor/platform/dso_loader.h"
 
@@ -25,7 +25,11 @@ void* GetDsoHandle() {
   static auto handle = []() -> void* {
     auto handle_or =
         stream_executor::internal::DsoLoader::GetCudaRuntimeDsoHandle();
-    if (!handle_or.ok()) return nullptr;
+    if (!handle_or.ok()) {
+      LOG(INFO) << "Ignore above cudart dlerror if you do not have a GPU set "
+                   "up on your machine.";
+      return nullptr;
+    }
     return handle_or.ValueOrDie();
   }();
   return handle;
@@ -47,12 +51,18 @@ cudaError_t GetSymbolNotFoundError() {
 #define __CUDA_DEPRECATED
 
 // A bunch of new symbols were introduced in version 10
-#if CUDART_VERSION <= 9020
+#if CUDART_VERSION < 10000
 #include "tensorflow/stream_executor/cuda/cuda_runtime_9_0.inc"
 #elif CUDART_VERSION < 10010
 #include "tensorflow/stream_executor/cuda/cuda_runtime_10_0.inc"
-#else
+#elif CUDART_VERSION < 10020
 #include "tensorflow/stream_executor/cuda/cuda_runtime_10_1.inc"
+#elif CUDART_VERSION < 11000
+#include "tensorflow/stream_executor/cuda/cuda_runtime_10_2.inc"
+#elif CUDART_VERSION < 11020
+#include "tensorflow/stream_executor/cuda/cuda_runtime_11_0.inc"
+#else
+#include "tensorflow/stream_executor/cuda/cuda_runtime_11_2.inc"
 #endif
 #undef __dv
 #undef __CUDA_DEPRECATED
@@ -119,6 +129,13 @@ extern __host__ __device__ unsigned CUDARTAPI __cudaPushCallConfiguration(
   static auto func_ptr = LoadSymbol<FuncPtr>("__cudaPushCallConfiguration");
   if (!func_ptr) return 0;
   return func_ptr(gridDim, blockDim, sharedMem, stream);
+}
+
+extern char CUDARTAPI __cudaInitModule(void **fatCubinHandle) {
+  using FuncPtr = char(CUDARTAPI *)(void **fatCubinHandle);
+  static auto func_ptr = LoadSymbol<FuncPtr>("__cudaInitModule");
+  if (!func_ptr) return 0;
+  return func_ptr(fatCubinHandle);
 }
 
 #if CUDART_VERSION >= 10010

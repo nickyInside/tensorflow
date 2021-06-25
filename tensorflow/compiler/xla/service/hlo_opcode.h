@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <iosfwd>
 #include <string>
+
 #include "absl/types/optional.h"
 #include "tensorflow/compiler/xla/comparison_util.h"
 #include "tensorflow/compiler/xla/statusor.h"
@@ -34,11 +35,6 @@ namespace xla {
 //
 // Each entry has the format:
 // (enum_name, opcode_name, arity)
-// or
-// (enum_name, opcode_name, arity, p1 | p2 | ...)
-//
-// with p1, p2, ... are members of HloOpcodeProperty. They are combined
-// using bitwise-or.
 //
 // Note: Do not use ':' in opcode names. It is used as a special character
 // in these places:
@@ -47,103 +43,117 @@ namespace xla {
 // - In fully qualified names (HloInstruction::FullyQualifiedName()), to
 //   separate the qualifiers (name of the computation and potentially the
 //   fusion instruction) from the name
-#define HLO_OPCODE_LIST(V)                                             \
-  V(kAbs, "abs", 1)                                                    \
-  V(kAdd, "add", 2)                                                    \
-  V(kAddDependency, "add-dependency", 2)                               \
-  V(kAfterAll, "after-all", kHloOpcodeIsVariadic)                      \
-  V(kAllReduce, "all-reduce", kHloOpcodeIsVariadic)                    \
-  V(kAllToAll, "all-to-all", kHloOpcodeIsVariadic)                     \
-  V(kAtan2, "atan2", 2)                                                \
-  V(kBatchNormGrad, "batch-norm-grad", 5)                              \
-  V(kBatchNormInference, "batch-norm-inference", 5)                    \
-  V(kBatchNormTraining, "batch-norm-training", 3)                      \
-  V(kBitcast, "bitcast", 1)                                            \
-  V(kBitcastConvert, "bitcast-convert", 1)                             \
-  V(kBroadcast, "broadcast", 1)                                        \
-  V(kCall, "call", kHloOpcodeIsVariadic)                               \
-  V(kCeil, "ceil", 1)                                                  \
-  V(kCholesky, "cholesky", 1)                                          \
-  V(kClamp, "clamp", 3)                                                \
-  V(kCollectivePermute, "collective-permute", 1)                       \
-  V(kClz, "count-leading-zeros", 1)                                    \
-  V(kCompare, "compare", 2)                                            \
-  V(kComplex, "complex", 2)                                            \
-  V(kConcatenate, "concatenate", kHloOpcodeIsVariadic)                 \
-  V(kConditional, "conditional", kHloOpcodeIsVariadic)                 \
-  V(kConstant, "constant", 0)                                          \
-  V(kConvert, "convert", 1)                                            \
-  V(kConvolution, "convolution", 2)                                    \
-  V(kCopy, "copy", 1)                                                  \
-  V(kCos, "cosine", 1)                                                 \
-  V(kCustomCall, "custom-call", kHloOpcodeIsVariadic)                  \
-  V(kDivide, "divide", 2)                                              \
-  V(kDomain, "domain", 1)                                              \
-  V(kDot, "dot", 2)                                                    \
-  V(kDynamicSlice, "dynamic-slice", kHloOpcodeIsVariadic)              \
-  V(kDynamicUpdateSlice, "dynamic-update-slice", kHloOpcodeIsVariadic) \
-  V(kExp, "exponential", 1)                                            \
-  V(kExpm1, "exponential-minus-one", 1)                                \
-  V(kFft, "fft", 1)                                                    \
-  V(kFloor, "floor", 1)                                                \
-  V(kFusion, "fusion", kHloOpcodeIsVariadic)                           \
-  V(kGather, "gather", 2)                                              \
-  V(kGetDimensionSize, "get-dimension-size", 1)                        \
-  V(kGetTupleElement, "get-tuple-element", 1)                          \
-  V(kImag, "imag", 1)                                                  \
-  V(kInfeed, "infeed", 1)                                              \
-  V(kIota, "iota", 0)                                                  \
-  V(kIsFinite, "is-finite", 1)                                         \
-  V(kLog, "log", 1)                                                    \
-  V(kLog1p, "log-plus-one", 1)                                         \
-  V(kAnd, "and", 2)                                                    \
-  V(kNot, "not", 1)                                                    \
-  V(kOr, "or", 2)                                                      \
-  V(kXor, "xor", 2)                                                    \
-  V(kMap, "map", kHloOpcodeIsVariadic)                                 \
-  V(kMaximum, "maximum", 2)                                            \
-  V(kMinimum, "minimum", 2)                                            \
-  V(kMultiply, "multiply", 2)                                          \
-  V(kNegate, "negate", 1)                                              \
-  V(kOutfeed, "outfeed", 2)                                            \
-  V(kPad, "pad", 2)                                                    \
-  V(kParameter, "parameter", 0)                                        \
-  V(kPartitionId, "partition-id", 0)                                   \
-  V(kPopulationCount, "popcnt", 1)                                     \
-  V(kPower, "power", 2)                                                \
-  V(kReal, "real", 1)                                                  \
-  V(kRecv, "recv", 1)                                                  \
-  V(kRecvDone, "recv-done", 1)                                         \
-  V(kReduce, "reduce", kHloOpcodeIsVariadic)                           \
-  V(kReducePrecision, "reduce-precision", 1)                           \
-  V(kReduceWindow, "reduce-window", 2)                                 \
-  V(kRemainder, "remainder", 2)                                        \
-  V(kReplicaId, "replica-id", 0)                                       \
-  V(kReshape, "reshape", 1)                                            \
-  V(kReverse, "reverse", 1)                                            \
-  V(kRng, "rng", kHloOpcodeIsVariadic)                                 \
-  V(kRoundNearestAfz, "round-nearest-afz", 1)                          \
-  V(kRsqrt, "rsqrt", 1)                                                \
-  V(kScatter, "scatter", 3)                                            \
-  V(kSelect, "select", 3)                                              \
-  V(kSelectAndScatter, "select-and-scatter", 3)                        \
-  V(kSend, "send", 2)                                                  \
-  V(kSendDone, "send-done", 1)                                         \
-  V(kShiftLeft, "shift-left", 2)                                       \
-  V(kShiftRightArithmetic, "shift-right-arithmetic", 2)                \
-  V(kShiftRightLogical, "shift-right-logical", 2)                      \
-  V(kSign, "sign", 1)                                                  \
-  V(kSin, "sine", 1)                                                   \
-  V(kSlice, "slice", 1)                                                \
-  V(kSort, "sort", kHloOpcodeIsVariadic)                               \
-  V(kSqrt, "sqrt", 1)                                                  \
-  V(kSubtract, "subtract", 2)                                          \
-  V(kTanh, "tanh", 1)                                                  \
-  V(kTrace, "trace", 1)                                                \
-  V(kTranspose, "transpose", 1)                                        \
-  V(kTriangularSolve, "triangular-solve", 2)                           \
-  V(kTuple, "tuple", kHloOpcodeIsVariadic)                             \
-  V(kTupleSelect, "tuple-select", 3)                                   \
+#define HLO_OPCODE_LIST(V)                                                     \
+  V(kAbs, "abs", 1)                                                            \
+  V(kAdd, "add", 2)                                                            \
+  V(kAddDependency, "add-dependency", 2)                                       \
+  V(kAfterAll, "after-all", kHloOpcodeIsVariadic)                              \
+  V(kAllGather, "all-gather", kHloOpcodeIsVariadic)                            \
+  V(kAllReduce, "all-reduce", kHloOpcodeIsVariadic)                            \
+  V(kAllReduceScatter, "all-reduce-scatter", kHloOpcodeIsVariadic)             \
+  V(kAllReduceStart, "all-reduce-start", kHloOpcodeIsVariadic)                 \
+  V(kAllReduceDone, "all-reduce-done", 1)                                      \
+  V(kAllToAll, "all-to-all", kHloOpcodeIsVariadic)                             \
+  V(kAtan2, "atan2", 2)                                                        \
+  V(kBatchNormGrad, "batch-norm-grad", 5)                                      \
+  V(kBatchNormInference, "batch-norm-inference", 5)                            \
+  V(kBatchNormTraining, "batch-norm-training", 3)                              \
+  V(kBitcast, "bitcast", 1)                                                    \
+  V(kBitcastConvert, "bitcast-convert", 1)                                     \
+  V(kBroadcast, "broadcast", 1)                                                \
+  V(kCall, "call", kHloOpcodeIsVariadic)                                       \
+  V(kCeil, "ceil", 1)                                                          \
+  V(kCholesky, "cholesky", 1)                                                  \
+  V(kClamp, "clamp", 3)                                                        \
+  V(kCollectivePermute, "collective-permute", kHloOpcodeIsVariadic)            \
+  V(kCollectivePermuteStart, "collective-permute-start", kHloOpcodeIsVariadic) \
+  V(kCollectivePermuteDone, "collective-permute-done", 1)                      \
+  V(kClz, "count-leading-zeros", 1)                                            \
+  V(kCompare, "compare", 2)                                                    \
+  V(kComplex, "complex", 2)                                                    \
+  V(kConcatenate, "concatenate", kHloOpcodeIsVariadic)                         \
+  V(kConditional, "conditional", kHloOpcodeIsVariadic)                         \
+  V(kConstant, "constant", 0)                                                  \
+  V(kConvert, "convert", 1)                                                    \
+  V(kConvolution, "convolution", 2)                                            \
+  V(kCopy, "copy", 1)                                                          \
+  V(kCopyDone, "copy-done", 1)                                                 \
+  V(kCopyStart, "copy-start", 1)                                               \
+  V(kCos, "cosine", 1)                                                         \
+  V(kCustomCall, "custom-call", kHloOpcodeIsVariadic)                          \
+  V(kDivide, "divide", 2)                                                      \
+  V(kDomain, "domain", 1)                                                      \
+  V(kDot, "dot", 2)                                                            \
+  V(kDynamicSlice, "dynamic-slice", kHloOpcodeIsVariadic)                      \
+  V(kDynamicUpdateSlice, "dynamic-update-slice", kHloOpcodeIsVariadic)         \
+  V(kExp, "exponential", 1)                                                    \
+  V(kExpm1, "exponential-minus-one", 1)                                        \
+  V(kFft, "fft", 1)                                                            \
+  V(kFloor, "floor", 1)                                                        \
+  V(kFusion, "fusion", kHloOpcodeIsVariadic)                                   \
+  V(kGather, "gather", 2)                                                      \
+  V(kGetDimensionSize, "get-dimension-size", 1)                                \
+  V(kSetDimensionSize, "set-dimension-size", 2)                                \
+  V(kGetTupleElement, "get-tuple-element", 1)                                  \
+  V(kImag, "imag", 1)                                                          \
+  V(kInfeed, "infeed", 1)                                                      \
+  V(kIota, "iota", 0)                                                          \
+  V(kIsFinite, "is-finite", 1)                                                 \
+  V(kLog, "log", 1)                                                            \
+  V(kLog1p, "log-plus-one", 1)                                                 \
+  V(kLogistic, "logistic", 1)                                                  \
+  V(kAnd, "and", 2)                                                            \
+  V(kNot, "not", 1)                                                            \
+  V(kOr, "or", 2)                                                              \
+  V(kXor, "xor", 2)                                                            \
+  V(kMap, "map", kHloOpcodeIsVariadic)                                         \
+  V(kMaximum, "maximum", 2)                                                    \
+  V(kMinimum, "minimum", 2)                                                    \
+  V(kMultiply, "multiply", 2)                                                  \
+  V(kNegate, "negate", 1)                                                      \
+  V(kOutfeed, "outfeed", 2)                                                    \
+  V(kPad, "pad", 2)                                                            \
+  V(kParameter, "parameter", 0)                                                \
+  V(kPartitionId, "partition-id", 0)                                           \
+  V(kPopulationCount, "popcnt", 1)                                             \
+  V(kPower, "power", 2)                                                        \
+  V(kReal, "real", 1)                                                          \
+  V(kRecv, "recv", 1)                                                          \
+  V(kRecvDone, "recv-done", 1)                                                 \
+  V(kReduce, "reduce", kHloOpcodeIsVariadic)                                   \
+  V(kReducePrecision, "reduce-precision", 1)                                   \
+  V(kReduceWindow, "reduce-window", kHloOpcodeIsVariadic)                      \
+  V(kRemainder, "remainder", 2)                                                \
+  V(kReplicaId, "replica-id", 0)                                               \
+  V(kReshape, "reshape", 1)                                                    \
+  V(kDynamicReshape, "dynamic-reshape", kHloOpcodeIsVariadic)                  \
+  V(kReverse, "reverse", 1)                                                    \
+  V(kRng, "rng", kHloOpcodeIsVariadic)                                         \
+  V(kRngGetAndUpdateState, "rng-get-and-update-state", 0)                      \
+  V(kRngBitGenerator, "rng-bit-generator", 1)                                  \
+  V(kRoundNearestAfz, "round-nearest-afz", 1)                                  \
+  V(kRsqrt, "rsqrt", 1)                                                        \
+  V(kScatter, "scatter", 3)                                                    \
+  V(kSelect, "select", 3)                                                      \
+  V(kSelectAndScatter, "select-and-scatter", 3)                                \
+  V(kSend, "send", 2)                                                          \
+  V(kSendDone, "send-done", 1)                                                 \
+  V(kShiftLeft, "shift-left", 2)                                               \
+  V(kShiftRightArithmetic, "shift-right-arithmetic", 2)                        \
+  V(kShiftRightLogical, "shift-right-logical", 2)                              \
+  V(kSign, "sign", 1)                                                          \
+  V(kSin, "sine", 1)                                                           \
+  V(kSlice, "slice", 1)                                                        \
+  V(kSort, "sort", kHloOpcodeIsVariadic)                                       \
+  V(kSqrt, "sqrt", 1)                                                          \
+  V(kCbrt, "cbrt", 1)                                                          \
+  V(kSubtract, "subtract", 2)                                                  \
+  V(kTanh, "tanh", 1)                                                          \
+  V(kTrace, "trace", 1)                                                        \
+  V(kTranspose, "transpose", 1)                                                \
+  V(kTriangularSolve, "triangular-solve", 2)                                   \
+  V(kTuple, "tuple", kHloOpcodeIsVariadic)                                     \
+  V(kTupleSelect, "tuple-select", 3)                                           \
   V(kWhile, "while", 1)
 
 enum class HloOpcode {
@@ -155,13 +165,6 @@ enum class HloOpcode {
 // Arity value that denotes that an operator is variadic.
 enum {
   kHloOpcodeIsVariadic = -1,
-};
-
-// List of properties associated with opcodes.
-// Properties are defined as increasing powers of two, so that we can use
-// bitwise-or to combine properties, and bitwise-and to test for them.
-enum HloOpcodeProperty {
-  kHloOpcodeIsComparison = 1 << 0,
 };
 
 // Returns a string representation of the opcode.

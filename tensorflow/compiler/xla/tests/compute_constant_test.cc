@@ -69,7 +69,7 @@ class ComputeConstantTest : public ::testing::Test {
     LOG(FATAL) << "invalid client_type value";
   }
 
-  StatusOr<Literal> ComputeConstantLiteral(Client* client, const XlaOp& operand,
+  StatusOr<Literal> ComputeConstantLiteral(Client* client, const XlaOp operand,
                                            XlaBuilder* builder,
                                            Layout* output_layout = nullptr) {
     TF_ASSIGN_OR_RETURN(auto subgraph, builder->BuildConstantSubGraph(operand));
@@ -79,14 +79,14 @@ class ComputeConstantTest : public ::testing::Test {
   }
 
   template <class Scalar>
-  StatusOr<Scalar> ComputeConstantScalar(Client* client, const XlaOp& operand,
+  StatusOr<Scalar> ComputeConstantScalar(Client* client, const XlaOp operand,
                                          XlaBuilder* builder) {
     TF_ASSIGN_OR_RETURN(auto literal, ComputeConstantLiteral(client, operand,
                                                              builder, nullptr));
     return literal.Get<Scalar>({});
   }
 
-  bool IsConstant(const XlaOp& operand, XlaBuilder* builder) {
+  bool IsConstant(const XlaOp operand, XlaBuilder* builder) {
     StatusOr<bool> result = builder->IsConstant(operand);
     EXPECT_TRUE(result.ok()) << result.status();
     return result.ok() ? result.ValueOrDie() : false;
@@ -160,7 +160,7 @@ TEST_F(ComputeConstantTest, GetDimensionSize) {
     auto get_dimension_size = GetDimensionSize(add, 0);
     EXPECT_TRUE(IsConstant(get_dimension_size, &b));
 
-    TF_ASSERT_OK_AND_ASSIGN(auto value, ComputeConstantScalar<uint32>(
+    TF_ASSERT_OK_AND_ASSIGN(auto value, ComputeConstantScalar<int32>(
                                             client, get_dimension_size, &b));
     EXPECT_EQ(value, 1);
   }
@@ -178,7 +178,7 @@ TEST_F(ComputeConstantTest, MultipleGetDimensionSize) {
     EXPECT_TRUE(IsConstant(add_2, &b));
 
     TF_ASSERT_OK_AND_ASSIGN(auto value,
-                            ComputeConstantScalar<uint32>(client, add_2, &b));
+                            ComputeConstantScalar<int32>(client, add_2, &b));
     EXPECT_EQ(value, 2);
   }
 }

@@ -24,13 +24,15 @@ extern "C" {
 #endif  // __cplusplus
 
 // The enum for builtin operators.
-// Note: CUSTOM and DELEGATE are 2 special ops which are not real built-in ops.
+// Note: CUSTOM, DELEGATE, and PLACEHOLDER_FOR_GREATER_OP_CODES are 3 special
+// ops which are not real built-in ops.
 typedef enum {
   kTfLiteBuiltinAdd = 0,
   kTfLiteBuiltinAveragePool2d = 1,
   kTfLiteBuiltinConcatenation = 2,
   kTfLiteBuiltinConv2d = 3,
   kTfLiteBuiltinDepthwiseConv2d = 4,
+  kTfLiteBuiltinDepthToSpace = 5,
   kTfLiteBuiltinDequantize = 6,
   kTfLiteBuiltinEmbeddingLookup = 7,
   kTfLiteBuiltinFloor = 8,
@@ -142,6 +144,34 @@ typedef enum {
   kTfLiteBuiltinQuantize = 114,
   kTfLiteBuiltinMatrixSetDiag = 115,
   kTfLiteBuiltinRound = 116,
+  kTfLiteBuiltinHardSwish = 117,
+  kTfLiteBuiltinIf = 118,
+  kTfLiteBuiltinWhile = 119,
+  kTfLiteBuiltinNonMaxSuppressionV4 = 120,
+  kTfLiteBuiltinNonMaxSuppressionV5 = 121,
+  kTfLiteBuiltinScatterNd = 122,
+  kTfLiteBuiltinSelectV2 = 123,
+  kTfLiteBuiltinDensify = 124,
+  kTfLiteBuiltinSegmentSum = 125,
+  kTfLiteBuiltinBatchMatmul = 126,
+  kTfLiteBuiltinPlaceholderForGreaterOpCodes = 127,
+  kTfLiteBuiltinCumsum = 128,
+  kTfLiteBuiltinCallOnce = 129,
+  kTfLiteBuiltinBroadcastTo = 130,
+  kTfLiteBuiltinRfft2d = 131,
+  kTfLiteBuiltinConv3d = 132,
+  kTfLiteBuiltinImag = 133,
+  kTfLiteBuiltinReal = 134,
+  kTfLiteBuiltinComplexAbs = 135,
+  kTfLiteBuiltinHashtable = 136,
+  kTfLiteBuiltinHashtableFind = 137,
+  kTfLiteBuiltinHashtableImport = 138,
+  kTfLiteBuiltinHashtableSize = 139,
+  kTfLiteBuiltinReduceAll = 140,
+  kTfLiteBuiltinConv3dTranspose = 141,
+  kTfLiteBuiltinVarHandle = 142,
+  kTfLiteBuiltinReadVariable = 143,
+  kTfLiteBuiltinAssignVariable = 144,
 } TfLiteBuiltinOperator;
 
 #ifdef __cplusplus

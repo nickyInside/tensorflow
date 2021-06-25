@@ -1,6 +1,7 @@
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])  # Apache 2.0
+package(
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],
+)
 
 exports_files(["LICENSE.txt"])
 

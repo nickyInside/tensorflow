@@ -27,10 +27,6 @@ namespace tensorflow {
   return xla_tensor;
 }
 
-/*static*/ bool XlaTensor::RefCountIsOne(const Tensor& tensor) {
-  return tensor.RefCountIsOne();
-}
-
 /*static*/ se::DeviceMemoryBase XlaTensor::DeviceMemoryFromTensor(
     const Tensor& tensor) {
   const XlaTensor* xla_tensor = FromTensor(&tensor);
@@ -61,9 +57,10 @@ Status XlaTensor::AllocateShapedBuffer(DataType dtype,
         client->backend().transfer_manager()->GetByteSizeRequirement(subshape);
     TF_ASSIGN_OR_RETURN(se::OwningDeviceMemory buffer,
                         client->backend().memory_allocator()->Allocate(
-                            device_ordinal, size, /*retry_on_failure=*/false));
+                            device_ordinal, size, /*retry_on_failure=*/false,
+                            subshape.layout().memory_space()));
     // Move our buffer into shaped_buffer, which takes ownership of it.
-    index_to_buffer.second = buffer.Forget();
+    index_to_buffer.second = buffer.Release();
   }
 
   VLOG(4) << shaped_buffer.ToString();

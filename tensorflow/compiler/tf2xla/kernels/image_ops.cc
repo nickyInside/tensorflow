@@ -337,8 +337,8 @@ struct WhileCondFn {
   explicit WhileCondFn(int64 num_boxes, int64 output_size)
       : num_boxes(num_boxes), output_size(output_size) {}
 
-  xla::StatusOr<xla::XlaOp> operator()(absl::Span<const xla::XlaOp> values,
-                                       xla::XlaBuilder* cond_builder) const {
+  StatusOr<xla::XlaOp> operator()(absl::Span<const xla::XlaOp> values,
+                                  xla::XlaBuilder* cond_builder) const {
     xla::XlaOp row_idx = values[0];
     xla::XlaOp row_in_bounds =
         xla::Lt(row_idx, xla::ConstantR0<int32>(cond_builder, num_boxes));
@@ -358,7 +358,7 @@ struct SuppressBodyFn {
 
   explicit SuppressBodyFn(int64 num_boxes) : num_boxes(num_boxes) {}
 
-  xla::StatusOr<std::vector<xla::XlaOp>> operator()(
+  StatusOr<std::vector<xla::XlaOp>> operator()(
       absl::Span<const xla::XlaOp> values, xla::XlaBuilder* builder) const {
     auto row_idx = values[0];
     auto num_outputs_so_far = values[1];
@@ -423,7 +423,7 @@ class NonMaxSuppressionOp : public XlaOpKernel {
         errors::InvalidArgument("scores size must equal number of boxes",
                                 scores_shape.DebugString()));
     OP_REQUIRES(context, pad_to_max_output_size_,
-                errors::InvalidArgument(
+                errors::Unimplemented(
                     "XLA compilation requires pad_to_max_output_size == True"));
     OP_REQUIRES(context, num_boxes <= kint32max,
                 errors::InvalidArgument("XLA compilation requires number of "

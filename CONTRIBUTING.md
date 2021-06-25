@@ -2,14 +2,16 @@
 
 ## Pull Request Checklist
 
-Before sending your pull requests, make sure you followed this list.
+Before sending your pull requests, make sure you do the following:
 
-- Read [contributing guidelines](CONTRIBUTING.md).
-- Read [Code of Conduct](CODE_OF_CONDUCT.md).
-- Ensure you have signed the [Contributor License Agreement (CLA)](https://cla.developers.google.com/).
-- Check if my changes are consistent with the [guidelines](https://github.com/tensorflow/tensorflow/blob/master/CONTRIBUTING.md#general-guidelines-and-philosophy-for-contribution).
-- Changes are consistent with the [Coding Style](https://github.com/tensorflow/tensorflow/blob/master/CONTRIBUTING.md#c-coding-style).
-- Run [Unit Tests](https://github.com/tensorflow/tensorflow/blob/master/CONTRIBUTING.md#running-unit-tests).
+-   Read the [contributing guidelines](CONTRIBUTING.md).
+-   Read the [Code of Conduct](CODE_OF_CONDUCT.md).
+-   Ensure you have signed the
+    [Contributor License Agreement (CLA)](https://cla.developers.google.com/).
+-   Check if your changes are consistent with the
+    [guidelines](#general-guidelines-and-philosophy-for-contribution).
+-   Changes are consistent with the [Coding Style](#c-coding-style).
+-   Run the [unit tests](#running-unit-tests).
 
 ## How to become a contributor and submit your own code
 
@@ -29,7 +31,8 @@ Follow either of the two links above to access the appropriate CLA and instructi
 ### Contributing code
 
 If you have improvements to TensorFlow, send us your pull requests! For those
-just getting started, Github has a [howto](https://help.github.com/articles/using-pull-requests/).
+just getting started, Github has a
+[how to](https://help.github.com/articles/using-pull-requests/).
 
 TensorFlow team members will be assigned to review your pull requests. Once the
 pull requests are approved and pass continuous integration checks, a TensorFlow
@@ -38,7 +41,13 @@ working on getting your pull request submitted to our internal repository. After
 the change has been submitted internally, your pull request will be merged
 automatically on GitHub.
 
-If you want to contribute but you're not sure where to start, take a look at the
+If you want to contribute, start working through the TensorFlow codebase,
+navigate to the
+[Github "issues" tab](https://github.com/tensorflow/tensorflow/issues) and start
+looking through interesting issues. If you are not sure of where to start, then
+start by trying one of the smaller/easier issues here i.e.
+[issues with the "good first issue" label](https://github.com/tensorflow/tensorflow/labels/good%20first%20issue)
+and then take a look at the
 [issues with the "contributions welcome" label](https://github.com/tensorflow/tensorflow/labels/stat%3Acontributions%20welcome).
 These are issues that we believe are particularly well suited for outside
 contributions, often because we probably won't get to them right now. If you
@@ -65,18 +74,26 @@ TensorFlow coding style.
     [tensorflow/core](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/core)
     and
     [tensorflow/python](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/python).
-    TensorFlow has reached version 1 and hence cannot make
+    TensorFlow has passed version 1.0 and hence cannot make
     non-backward-compatible API changes without a major release. Reviewers of
-    your pull request will comment on any API compatibility issues.
+    your pull request will comment on any API compatibility issues
+    [following API review practices](https://github.com/tensorflow/community/blob/master/governance/api-reviews.md).
 *   When you contribute a new feature to TensorFlow, the maintenance burden is
-    (by default) transferred to the TensorFlow team. This means that benefit of
-    the contribution must be compared against the cost of maintaining the
+    (by default) transferred to the TensorFlow team. This means that the benefit
+    of the contribution must be compared against the cost of maintaining the
     feature.
 *   Full new features (e.g., a new op implementing a cutting-edge algorithm)
     typically will live in
     [tensorflow/addons](https://github.com/tensorflow/addons) to get some
-    airtime before decision is made regarding whether they are to be migrated to
-    the core.
+    airtime before a decision is made regarding whether they are to be migrated
+    to the core.
+*   As every PR requires several CPU/GPU hours of CI testing, we discourage
+    submitting PRs to fix one typo, one warning,etc. We recommend fixing the
+    same issue at the file level at least (e.g.: fix all typos in a file, fix
+    all compiler warning in a file, etc.)
+*   Tests should follow the
+    [testing best practices](https://www.tensorflow.org/community/contribute/tests)
+    guide.
 
 #### License
 
@@ -117,19 +134,16 @@ diff <my_cc_file> /tmp/my_cc_file.cc
 Changes to TensorFlow Python code should conform to
 [Google Python Style Guide](https://github.com/google/styleguide/blob/gh-pages/pyguide.md)
 
-Use `pylint` to check your Python changes. To install `pylint` and
-retrieve TensorFlow's custom style definition:
+Use `pylint` to check your Python changes. To install `pylint` and check a file
+with `pylint` against TensorFlow's custom style definition:
 
 ```bash
 pip install pylint
-wget -O /tmp/pylintrc https://raw.githubusercontent.com/tensorflow/tensorflow/master/tensorflow/tools/ci_build/pylintrc
+pylint --rcfile=tensorflow/tools/ci_build/pylintrc myfile.py
 ```
 
-To check a file with `pylint`:
-
-```bash
-pylint --rcfile=/tmp/pylintrc myfile.py
-```
+Note `pylint --rcfile=tensorflow/tools/ci_build/pylintrc` should run from the
+top level tensorflow directory.
 
 #### Coding style for other languages
 
@@ -157,16 +171,16 @@ There are two ways to run TensorFlow unit tests.
 1.  Using tools and libraries installed directly on your system.
 
     Refer to the
-    [CPU-only developer Dockerfile](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/tools/docker/Dockerfile.devel)
+    [CPU-only developer Dockerfile](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/tools/dockerfiles/dockerfiles/devel-cpu.Dockerfile)
     and
-    [GPU developer Dockerfile](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/tools/docker/Dockerfile.devel-gpu)
+    [GPU developer Dockerfile](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/tools/dockerfiles/dockerfiles/devel-gpu.Dockerfile)
     for the required packages. Alternatively, use the said
     [Docker images](https://hub.docker.com/r/tensorflow/tensorflow/tags/), e.g.,
-    `tensorflow/tensorflow:nightly-devel` and
-    `tensorflow/tensorflow:nightly-devel-gpu` for development to avoid
-    installing the packages directly on your system (in which case remember to
-    change directory from `/root` to `/tensorflow` once you get into the running
-    container so `bazel` can find the `tensorflow` workspace).
+    `tensorflow/tensorflow:devel` and `tensorflow/tensorflow:devel-gpu` for
+    development to avoid installing the packages directly on your system (in
+    which case remember to change directory from `/root` to `/tensorflow` once
+    you get into the running container so `bazel` can find the `tensorflow`
+    workspace).
 
     Once you have the packages installed, you can run a specific unit test in
     bazel by doing as follows:
@@ -186,6 +200,12 @@ There are two ways to run TensorFlow unit tests.
     bazel test ${flags} //tensorflow/python/...
     ```
 
+    For a single component e.g. softmax op:
+
+    ```bash
+    bazel test ${flags} tensorflow/python/kernel_tests:softmax_op_test
+    ```
+
 2.  Using [Docker](https://www.docker.com) and TensorFlow's CI scripts.
 
     ```bash
@@ -196,3 +216,66 @@ There are two ways to run TensorFlow unit tests.
     See
     [TensorFlow Builds](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/tools/ci_build)
     for details.
+
+#### Running doctest for testable docstring
+
+There are two ways to test the code in the docstring locally:
+
+1.  If you are only changing the docstring of a class/function/method, then you
+    can test it by passing that file's path to
+    [tf_doctest.py](https://www.tensorflow.org/code/tensorflow/tools/docs/tf_doctest.py).
+    For example:
+
+    ```bash
+    python tf_doctest.py --file=<file_path>
+    ```
+
+    This will run it using your installed version of TensorFlow. To be sure
+    you're running the same code that you're testing:
+
+    *   Use an up to date [tf-nightly](https://pypi.org/project/tf-nightly/)
+        `pip install -U tf-nightly`
+    *   Rebase your pull request onto a recent pull from
+        [TensorFlow's](https://github.com/tensorflow/tensorflow) master branch.
+
+2.  If you are changing the code and the docstring of a class/function/method,
+    then you will need to
+    [build TensorFlow from source](https://www.tensorflow.org/install/source).
+    Once you are setup to build from source, you can run the tests:
+
+    ```bash
+    bazel run //tensorflow/tools/docs:tf_doctest
+    ```
+
+    or
+
+    ```bash
+    bazel run //tensorflow/tools/docs:tf_doctest -- --module=ops.array_ops
+    ```
+
+    The `--module` is relative to `tensorflow.python`.
+
+#### Debug builds
+
+When [building Tensorflow](https://www.tensorflow.org/install/source), passing
+`--config=dbg` to Bazel will build with debugging information and without
+optimizations, allowing you to use GDB or other debuggers to debug C++ code. For
+example, you can build the pip package with debugging information by running:
+
+```bash
+bazel build --config=dbg //tensorflow/tools/pip_package:build_pip_package
+```
+
+TensorFlow kernels and TensorFlow's dependencies are still not built with
+debugging information with `--config=dbg`, as issues occur on Linux if
+there is too much debug info (see [this GitHub
+issue](https://github.com/tensorflow/tensorflow/issues/48919) for context). If
+you want to debug a kernel, you can compile specific files with `-g` using the
+`--per_file_copt` bazel option. For example, if you want to debug the Identity
+op, which are in files starting with `identity_op`, you can run
+
+```bash
+bazel build --config=dbg --per_file_copt=+tensorflow/core/kernels/identity_op.*@-g //tensorflow/tools/pip_package:build_pip_package
+```
+
+Note that the `--config=dbg` option is not officially supported.

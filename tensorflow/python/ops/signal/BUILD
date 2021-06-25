@@ -1,8 +1,7 @@
-package(default_visibility = ["//tensorflow:internal"])
-
-licenses(["notice"])  # Apache 2.0
-
-exports_files(["LICENSE"])
+package(
+    default_visibility = ["//tensorflow:internal"],
+    licenses = ["notice"],
+)
 
 py_library(
     name = "signal",
@@ -18,7 +17,7 @@ py_library(
         "util_ops.py",
         "window_ops.py",
     ],
-    srcs_version = "PY2AND3",
+    srcs_version = "PY3",
     deps = [
         "//tensorflow/python:array_ops",
         "//tensorflow/python:constant_op",

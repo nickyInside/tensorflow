@@ -32,14 +32,16 @@ REGISTER_OP("AllToAll")
     .Attr("split_count: int")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle input = c->input(0);
-      int64 rank;
-      if (c->RankKnown(input)) {
-        rank = c->Rank(input);
-      } else {
-        return errors::InvalidArgument("input's rank is unknown.");
+      if (!c->RankKnown(input)) {
+        c->set_output(0, c->UnknownShape());
+        return Status::OK();
       }
+
+      int64 rank = c->Rank(input);
       int concat_dimension;
       int split_dimension;
+      int split_count;
+      TF_RETURN_IF_ERROR(c->GetAttr("split_count", &split_count));
 
       TF_RETURN_IF_ERROR(c->GetAttr("concat_dimension", &concat_dimension));
 
@@ -58,14 +60,13 @@ REGISTER_OP("AllToAll")
       dims.resize(rank);
 
       for (int32 i = 0; i < rank; ++i) {
-        int64 in_idx = i;
+        dims[i] = c->Dim(input, i);
         if (i == concat_dimension) {
-          in_idx = split_dimension;
-        } else if (i == split_dimension) {
-          in_idx = concat_dimension;
+          dims[i] = c->MakeDim(c->Value(dims[i]) * split_count);
         }
-
-        dims[i] = c->Dim(input, in_idx);
+        if (i == split_dimension) {
+          dims[i] = c->MakeDim(c->Value(dims[i]) / split_count);
+        }
       }
 
       c->set_output(0, c->MakeShape(dims));
@@ -76,7 +77,7 @@ REGISTER_OP("CrossReplicaSum")
     .Input("input: T")
     .Input("group_assignment: int32")
     .Output("output: T")
-    .Attr("T: {bfloat16, float, int32, uint32}")
+    .Attr("T: {half, bfloat16, float, int32, uint32}")
     .SetShapeFn(shape_inference::UnchangedShape);
 
 REGISTER_OP("CollectivePermute")

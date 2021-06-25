@@ -18,6 +18,7 @@ from __future__ import division
 from __future__ import print_function
 
 import time
+
 import numpy as np
 
 from tensorflow.python.client import session
@@ -44,6 +45,30 @@ def _maybe_name(obj):
     return obj.name
   else:
     return "<no name for %s>" % type(obj)
+
+
+def _restore_checkpoint_and_maybe_run_saved_model_initializers(
+    sess, saver, path):
+  """Restores checkpoint values and SavedModel initializers if found."""
+  # NOTE: All references to SavedModel refer to SavedModels loaded from the
+  # load_v2 API (which does not require the `sess` argument).
+
+  # If the graph contains resources loaded from a SavedModel, they are not
+  # restored when calling `saver.restore`. Thus, the SavedModel initializer must
+  # be called with `saver.restore` to properly initialize the model.
+
+  # The SavedModel init is stored in the "saved_model_initializers" collection.
+  # This collection is part of the MetaGraph's default_init_op, so it is already
+  # called by MonitoredSession as long as the saver doesn't restore any
+  # checkpoints from the working dir.
+  saved_model_init_ops = ops.get_collection("saved_model_initializers")
+  if saved_model_init_ops:
+    sess.run(saved_model_init_ops)
+
+  # The saver must be called *after* the SavedModel init, because the SavedModel
+  # init will restore the variables from the SavedModel variables directory.
+  # Initializing/restoring twice is not ideal but there's no other way to do it.
+  saver.restore(sess, path)
 
 
 @tf_export(v1=["train.SessionManager"])
@@ -97,7 +122,8 @@ class SessionManager(object):
                ready_for_local_init_op=None,
                graph=None,
                recovery_wait_secs=30,
-               local_init_run_options=None):
+               local_init_run_options=None,
+               local_init_feed_dict=None):
     """Creates a SessionManager.
 
     The `local_init_op` is an `Operation` that is run always after a new session
@@ -131,6 +157,8 @@ class SessionManager(object):
       recovery_wait_secs: Seconds between checks for the model to be ready.
       local_init_run_options: RunOptions to be passed to session.run when
         executing the local_init_op.
+      local_init_feed_dict: Optional session feed dictionary to use when running
+        the local_init_op.
 
     Raises:
       ValueError: If ready_for_local_init_op is not None but local_init_op is
@@ -146,6 +174,7 @@ class SessionManager(object):
     self._recovery_wait_secs = recovery_wait_secs
     self._target = None
     self._local_init_run_options = local_init_run_options
+    self._local_init_feed_dict = local_init_feed_dict
     if ready_for_local_init_op is not None and local_init_op is None:
       raise ValueError("If you pass a ready_for_local_init_op "
                        "you must also pass a local_init_op "
@@ -201,7 +230,8 @@ class SessionManager(object):
       return sess, False
 
     if checkpoint_filename_with_path:
-      saver.restore(sess, checkpoint_filename_with_path)
+      _restore_checkpoint_and_maybe_run_saved_model_initializers(
+          sess, saver, checkpoint_filename_with_path)
       return sess, True
 
     # Waits up until max_wait_secs for checkpoint to become available.
@@ -217,7 +247,8 @@ class SessionManager(object):
         return sess, False
 
     # Loads the checkpoint.
-    saver.restore(sess, ckpt.model_checkpoint_path)
+    _restore_checkpoint_and_maybe_run_saved_model_initializers(
+        sess, saver, ckpt.model_checkpoint_path)
     saver.recover_last_checkpoints(ckpt.all_model_checkpoint_paths)
     return sess, True
 
@@ -498,7 +529,8 @@ class SessionManager(object):
       is_ready_for_local_init, msg = self._model_ready_for_local_init(sess)
       if is_ready_for_local_init:
         logging.info("Running local_init_op.")
-        sess.run(self._local_init_op, options=self._local_init_run_options)
+        sess.run(self._local_init_op, feed_dict=self._local_init_feed_dict,
+                 options=self._local_init_run_options)
         logging.info("Done running local_init_op.")
         return True, None
       else:
@@ -546,6 +578,8 @@ def _ready(op, sess, msg):
 
 
 class _CountDownTimer(object):
+
+  __slots__ = ["_start_time_secs", "_duration_secs"]
 
   def __init__(self, duration_secs):
     self._start_time_secs = time.time()

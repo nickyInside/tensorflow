@@ -12,15 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Layers that operate regularization via the addition of noise.
-"""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+"""Layers that operate regularization via the addition of noise."""
 
 import numpy as np
 
-from tensorflow.python.keras import backend as K
+from tensorflow.python.keras import backend
 from tensorflow.python.keras.engine.base_layer import Layer
 from tensorflow.python.keras.utils import tf_utils
 from tensorflow.python.ops import array_ops
@@ -39,7 +35,7 @@ class GaussianNoise(Layer):
 
   As it is a regularization layer, it is only active at training time.
 
-  Arguments:
+  Args:
     stddev: Float, standard deviation of the noise distribution.
 
   Call arguments:
@@ -64,10 +60,13 @@ class GaussianNoise(Layer):
   def call(self, inputs, training=None):
 
     def noised():
-      return inputs + K.random_normal(
-          shape=array_ops.shape(inputs), mean=0., stddev=self.stddev)
+      return inputs + backend.random_normal(
+          shape=array_ops.shape(inputs),
+          mean=0.,
+          stddev=self.stddev,
+          dtype=inputs.dtype)
 
-    return K.in_train_phase(noised, inputs, training=training)
+    return backend.in_train_phase(noised, inputs, training=training)
 
   def get_config(self):
     config = {'stddev': self.stddev}
@@ -85,7 +84,7 @@ class GaussianDropout(Layer):
 
   As it is a regularization layer, it is only active at training time.
 
-  Arguments:
+  Args:
     rate: Float, drop probability (as with `Dropout`).
       The multiplicative noise will have
       standard deviation `sqrt(rate / (1 - rate))`.
@@ -114,10 +113,13 @@ class GaussianDropout(Layer):
 
       def noised():
         stddev = np.sqrt(self.rate / (1.0 - self.rate))
-        return inputs * K.random_normal(
-            shape=array_ops.shape(inputs), mean=1.0, stddev=stddev)
+        return inputs * backend.random_normal(
+            shape=array_ops.shape(inputs),
+            mean=1.0,
+            stddev=stddev,
+            dtype=inputs.dtype)
 
-      return K.in_train_phase(noised, inputs, training=training)
+      return backend.in_train_phase(noised, inputs, training=training)
     return inputs
 
   def get_config(self):
@@ -140,7 +142,7 @@ class AlphaDropout(Layer):
   Alpha Dropout fits well to Scaled Exponential Linear Units
   by randomly setting activations to the negative saturation value.
 
-  Arguments:
+  Args:
     rate: float, drop probability (as with `Dropout`).
       The multiplicative noise will have
       standard deviation `sqrt(rate / (1 - rate))`.
@@ -180,8 +182,8 @@ class AlphaDropout(Layer):
         alpha_p = -alpha * scale
 
         kept_idx = math_ops.greater_equal(
-            K.random_uniform(noise_shape, seed=seed), rate)
-        kept_idx = math_ops.cast(kept_idx, K.floatx())
+            backend.random_uniform(noise_shape, seed=seed), rate)
+        kept_idx = math_ops.cast(kept_idx, inputs.dtype)
 
         # Get affine transformation params
         a = ((1 - rate) * (1 + rate * alpha_p**2))**-0.5
@@ -193,7 +195,7 @@ class AlphaDropout(Layer):
         # Do affine transformation
         return a * x + b
 
-      return K.in_train_phase(dropped_inputs, inputs, training=training)
+      return backend.in_train_phase(dropped_inputs, inputs, training=training)
     return inputs
 
   def get_config(self):

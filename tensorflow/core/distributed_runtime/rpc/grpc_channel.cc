@@ -15,12 +15,15 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/rpc/grpc_channel.h"
 
+#include <cstdlib>
 #include <limits>
 #include <map>
 #include <unordered_map>
 
 #include "grpcpp/create_channel.h"
-
+#include "absl/strings/escaping.h"
+#include "absl/strings/str_split.h"
+#include "tensorflow/core/distributed_runtime/rpc/grpc_channel_common.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
@@ -44,21 +47,65 @@ string MakeAddress(const string& job, int task) {
 
 // Allows the host to be a raw IP (either v4 or v6).
 Status ValidateHostPortPair(const string& host_port) {
+  string bns_prefix = "/bns/";
+  if (host_port.substr(0, bns_prefix.length()) == bns_prefix) {
+    return Status::OK();
+  }
   uint32 port;
   auto colon_index = host_port.find_last_of(':');
   if (!strings::safe_strtou32(host_port.substr(colon_index + 1), &port) ||
-      host_port.substr(0, colon_index).find("/") != string::npos) {
+      host_port.substr(0, colon_index).find('/') != string::npos) {
     return errors::InvalidArgument("Could not interpret \"", host_port,
                                    "\" as a host-port pair.");
   }
   return Status::OK();
 }
 
+::grpc::ChannelArguments* CreateDefaultChannelArguments() {
+  ::grpc::ChannelArguments* args = new ::grpc::ChannelArguments();
+  const char* env = std::getenv("TF_GRPC_DEFAULT_OPTIONS");
+  if (env != nullptr) {
+    for (auto& grpc_option : absl::StrSplit(env, ',')) {
+      std::vector<string> name_value = absl::StrSplit(grpc_option, '=');
+      if (name_value.size() != 2) {
+        LOG(ERROR) << "Invalid GRPC options format: " << grpc_option;
+        continue;
+      }
+      VLOG(3) << "Setting GRPC default for '" << name_value[0] << "' to '"
+              << name_value[1] << "'";
+      if (name_value[1].size() >= 2 && name_value[1][0] == '"') {
+        string ue_value = name_value[1].substr(1, name_value[1].size() - 2);
+        string value;
+        string error;
+        if (!absl::CUnescape(ue_value, &value, &error)) {
+          LOG(ERROR) << "Failed to parse escaped string for " << grpc_option
+                     << ": " << error;
+        } else {
+          args->SetString(name_value[0], value);
+        }
+      } else {
+        int64 value;
+        if (strings::safe_strto64(name_value[1], &value)) {
+          args->SetInt(name_value[0], value);
+        } else {
+          LOG(ERROR) << "Invalid integer value: " << grpc_option;
+        }
+      }
+    }
+  }
+  return args;
+}
+
+const ::grpc::ChannelArguments* GetDefaultChannelArguments() {
+  static const ::grpc::ChannelArguments* args = CreateDefaultChannelArguments();
+  return args;
+}
+
 }  // namespace
 
 ::grpc::ChannelArguments GetChannelArguments(const RPCOptions* rpc_options) {
   // TODO(mrry): Implement secure channels.
-  ::grpc::ChannelArguments args;
+  ::grpc::ChannelArguments args = *GetDefaultChannelArguments();
   args.SetInt(GRPC_ARG_MAX_MESSAGE_LENGTH, std::numeric_limits<int32>::max());
   // NOTE(mrry): Some versions of gRPC use a 20-second minimum backoff
   // on connection failure, which makes our tests time out.
@@ -81,6 +128,10 @@ Status ValidateHostPortPair(const string& host_port) {
     } else if (!rpc_options->compression_algorithm().empty()) {
       LOG(ERROR) << "Invalid compression algorithm: "
                  << rpc_options->compression_algorithm();
+    }
+    if (rpc_options->disable_session_connection_sharing()) {
+      VLOG(5) << "Disabling TCP connection sharing";
+      args.SetInt(GRPC_ARG_USE_LOCAL_SUBCHANNEL_POOL, true);
     }
   }
   return args;
@@ -137,47 +188,15 @@ Status GrpcChannelSpec::AddHostPortsJob(
 namespace {
 
 // GrpcChannelCache that caches results to FindWorkerChannel() calls.
-class CachingGrpcChannelCache : public GrpcChannelCache {
- public:
-  CachingGrpcChannelCache() {}
-
-  ~CachingGrpcChannelCache() override {}
-
-  SharedGrpcChannelPtr FindWorkerChannel(const string& target) override {
-    SharedGrpcChannelPtr ch = nullptr;
-    {
-      mutex_lock l(mu_);  // could use reader lock
-      ch = gtl::FindPtrOrNull(channels_, target);
-      if (ch) {
-        return ch;
-      }
-    }
-    ch = FindChannelOnce(target);
-    if (ch) {
-      mutex_lock l(mu_);
-      channels_.insert({target, ch});
-    }
-    return ch;
-  }
-
- protected:
-  // Find the ClientChannel for "target".  Only called when no channel was
-  // found in the channels_ cache for "target".  A non nullptr result will be
-  // cached in channels_.
-  virtual SharedGrpcChannelPtr FindChannelOnce(const string& target) = 0;
-
- private:
-  // TODO(zhifengc): Eviction when the map becomes too big.
-  mutex mu_;
-  std::unordered_map<string, SharedGrpcChannelPtr> channels_ GUARDED_BY(mu_);
-};
+using CachingGrpcChannelCache = GenericCachingChannelCache<GrpcChannelCache>;
 
 // A ChannelCache that is the union of multiple ChannelCaches.
 // Takes ownership of the caches passed to the constructor.
 class MultiGrpcChannelCache : public CachingGrpcChannelCache {
  public:
-  explicit MultiGrpcChannelCache(const std::vector<GrpcChannelCache*>& caches)
-      : CachingGrpcChannelCache(), caches_(caches) {}
+  explicit MultiGrpcChannelCache(const std::vector<GrpcChannelCache*>& caches,
+                                 int num_channels_per_target)
+      : CachingGrpcChannelCache(num_channels_per_target), caches_(caches) {}
 
   ~MultiGrpcChannelCache() override {
     for (GrpcChannelCache* cache : caches_) {
@@ -236,15 +255,18 @@ class MultiGrpcChannelCache : public CachingGrpcChannelCache {
   mutex mu_;
   // Cache of channels keyed by the target they are handling.
   // The same GrpcChannelCache can appear multiple times in the cache.
-  std::unordered_map<string, GrpcChannelCache*> target_caches_ GUARDED_BY(mu_);
+  std::unordered_map<string, GrpcChannelCache*> target_caches_
+      TF_GUARDED_BY(mu_);
 };
 
 class SparseGrpcChannelCache : public CachingGrpcChannelCache {
  public:
   SparseGrpcChannelCache(const string& job_id,
                          const std::map<int, string>& host_ports,
-                         ChannelCreationFunction channel_func)
-      : job_id_(job_id),
+                         ChannelCreationFunction channel_func,
+                         int num_channels_per_target)
+      : CachingGrpcChannelCache(num_channels_per_target),
+        job_id_(job_id),
         host_ports_(host_ports),
         channel_func_(std::move(channel_func)) {
     LOG(INFO) << "Initialize GrpcChannelCache for job " << ToString();
@@ -295,7 +317,11 @@ class SparseGrpcChannelCache : public CachingGrpcChannelCache {
     if (host_port.empty()) {
       return nullptr;
     }
-    return channel_func_(host_port);
+    auto chan_ptr = channel_func_(host_port);
+    VLOG(5) << "Channel created for: job: " << job_id_
+            << " host_port: " << host_port << " target : " << target
+            << " Ptr: " << chan_ptr.get();
+    return chan_ptr;
   }
 
  private:
@@ -306,7 +332,7 @@ class SparseGrpcChannelCache : public CachingGrpcChannelCache {
       task_strings.emplace_back(
           strings::StrCat(id_host_port.first, " -> ", id_host_port.second));
     }
-    return strings::StrCat(job_id_, " -> {", str_util::Join(task_strings, ", "),
+    return strings::StrCat(job_id_, " -> {", absl::StrJoin(task_strings, ", "),
                            "}");
   }
 
@@ -319,7 +345,8 @@ class SparseGrpcChannelCache : public CachingGrpcChannelCache {
 }  // namespace
 
 GrpcChannelCache* NewGrpcChannelCache(const GrpcChannelSpec& spec,
-                                      ChannelCreationFunction channel_func) {
+                                      ChannelCreationFunction channel_func,
+                                      const RPCOptions& options) {
   const int num_jobs = spec.host_ports_jobs().size();
   if (!num_jobs) {
     LOG(ERROR) << "Empty channel spec.";
@@ -328,10 +355,14 @@ GrpcChannelCache* NewGrpcChannelCache(const GrpcChannelSpec& spec,
   std::vector<GrpcChannelCache*> caches;
   caches.reserve(num_jobs);
   for (auto& job : spec.host_ports_jobs()) {
+    VLOG(2) << "Creating Grpc Channel Cache for: " << job.job_id;
     caches.push_back(
-        new SparseGrpcChannelCache(job.job_id, job.host_ports, channel_func));
+        new SparseGrpcChannelCache(job.job_id, job.host_ports, channel_func,
+                                   options.num_channels_per_target()));
   }
-  return caches.size() == 1 ? caches[0] : new MultiGrpcChannelCache(caches);
+  return caches.size() == 1 ? caches[0]
+                            : new MultiGrpcChannelCache(
+                                  caches, options.num_channels_per_target());
 }
 
 }  // end namespace tensorflow

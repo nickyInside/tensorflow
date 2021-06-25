@@ -66,23 +66,14 @@ class LLVMCompiler : public Compiler {
   //       std::unique_ptr<HloModule> module,
   //       se::StreamExecutor* stream_exec,
   //       se::DeviceMemoryAllocator* device_allocator)
+  using Compiler::Compile;
   using Compiler::RunBackend;
   using Compiler::RunHloPasses;
-
-  Status RunHloPassesOnModuleGroup(
-      HloModuleGroup* module_group,
-      absl::Span<se::StreamExecutor* const> executors,
-      se::DeviceMemoryAllocator* device_allocator) override;
-
-  StatusOr<std::vector<std::unique_ptr<Executable>>> RunBackendOnModuleGroup(
-      std::unique_ptr<HloModuleGroup> module_group,
-      std::vector<std::vector<se::StreamExecutor*>> stream_exec,
-      se::DeviceMemoryAllocator* device_allocator) override;
 
   StatusOr<std::vector<std::unique_ptr<Executable>>> Compile(
       std::unique_ptr<HloModuleGroup> module_group,
       std::vector<std::vector<se::StreamExecutor*>> stream_execs,
-      se::DeviceMemoryAllocator* device_allocator) override;
+      const CompileOptions& options) override;
 
  protected:
   ModuleHook user_pre_optimization_hook_;

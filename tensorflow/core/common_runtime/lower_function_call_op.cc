@@ -16,28 +16,18 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/lower_function_call_op.h"
 
 #include "absl/algorithm/container.h"
-#include "tensorflow/core/common_runtime/function.h"
-#include "tensorflow/core/common_runtime/lower_functional_ops.h"
+#include "tensorflow/core/common_runtime/function_def_utils.h"
+#include "tensorflow/core/common_runtime/inline_function_utils.h"
+#include "tensorflow/core/common_runtime/lower_function_call_inline_policy.h"
+#include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/graph/graph_node_util.h"
+#include "tensorflow/core/platform/errors.h"
 
 namespace tensorflow {
-namespace {
 
 using KeepCallerNode = InlineFunctionBodyOptions::KeepCallerNode;
 using OutputControlSrc = InlineFunctionBodyOptions::OutputControlSource;
-
-constexpr const char* const kLowerAsMultiDeviceFunctionAttr =
-    LowerFunctionalOpsPass::kLowerAsMultiDeviceFunctionAttr;
-
-bool LowerAsMultiDeviceFunction(const Node* n) {
-  if (n->IsPartitionedCall()) return true;
-
-  bool match;
-  Status s = GetNodeAttr(n->attrs(), kLowerAsMultiDeviceFunctionAttr, &match);
-  return s.ok() && match;
-}
-
-}  // namespace
 
 Status RewriteFunctionCallNode(Node* n, Graph* g,
                                const FunctionLibraryDefinition& flib_def,
@@ -53,21 +43,25 @@ Status RewriteFunctionCallNode(Node* n, Graph* g,
                                         ? KeepCallerNode::kFetchable
                                         : KeepCallerNode::kTargetable;
 
-  if (LowerAsMultiDeviceFunction(n)) {
+  FunctionCallInlinePolicy policy = GetFunctionCallInlinePolicy(n);
+  if (policy == FunctionCallInlinePolicy::kMultiDevicePlacer) {
     // Multi-device function calls (PartitionedCall or StatefulPartitionedCall
     // ops) can execute on multiple devices and accept DT_RESOURCE inputs that
     // belong to different devices. This type of functions was added in
     // Tensorflow 2.0 Eager mode, and it has control outputs to represent
     // side-effects that must always execute (see `control_ret` in FunctionDef).
-    inline_options.override_device = false;
-    inline_options.initialize_empty_device = true;
     inline_options.output_control_src = OutputControlSrc::kControlOutputs;
-  } else {
+    inline_options.inlined_function_body_placer =
+        InlinedFunctionBodyPlacer::MultiDevice();
+  } else if (policy == FunctionCallInlinePolicy::kSingleDevicePlacer) {
     // Native function call (node.type_string() is the function name). These
     // functions are always executed on a single-device, which is the device of
     // the function call node.
-    inline_options.override_device = true;
     inline_options.output_control_src = OutputControlSrc::kDataOutputs;
+    inline_options.inlined_function_body_placer =
+        InlinedFunctionBodyPlacer::SingleDevice();
+  } else {
+    return errors::InvalidArgument("Unsupported function inlining policy");
   }
 
   const FunctionDef* fdef;
@@ -94,7 +88,7 @@ Status RewriteFunctionCallNode(Node* n, Graph* g,
       ValidateInlining(n, fbody.get(), inline_options);
   if (can_inline_function_call.ok()) {
     TF_RETURN_IF_ERROR(
-        InlineFunctionBody(g->flib_def(), g, n, fbody.get(), inline_options));
+        InlineFunctionBody(flib_def, g, n, fbody.get(), inline_options));
   } else {
     VLOG(2) << "Failed to inline function call node: "
             << can_inline_function_call.error_message();

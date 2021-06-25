@@ -32,19 +32,37 @@ from __future__ import print_function
 
 import collections
 import functools
+
+import warnings
 import six
 
 from tensorflow.core.protobuf import struct_pb2
+from tensorflow.python.data.ops import dataset_ops
+from tensorflow.python.data.ops import iterator_ops
+from tensorflow.python.data.ops import optional_ops
+from tensorflow.python.distribute import values
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import extension_type
+from tensorflow.python.framework import indexed_slices
+from tensorflow.python.framework import sparse_tensor
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import tensor_spec
+from tensorflow.python.framework import tensor_util
+from tensorflow.python.framework import type_spec
+from tensorflow.python.ops import resource_variable_ops
+from tensorflow.python.ops import tensor_array_ops
+from tensorflow.python.ops.ragged import ragged_tensor
+from tensorflow.python.ops.ragged import row_partition
 from tensorflow.python.util import compat
+from tensorflow.python.util.compat import collections_abc
+from tensorflow.python.util.tf_export import tf_export
 
 
 class NotEncodableError(Exception):
   """Error raised when a coder cannot encode an object."""
 
 
+@tf_export("__internal__.saved_model.StructureCoder", v1=[])
 class StructureCoder(object):
   """Encoder and decoder for nested structures into protos."""
 
@@ -153,7 +171,7 @@ def _is_named_tuple(instance):
   if not isinstance(instance, tuple):
     return False
   return (hasattr(instance, "_fields") and
-          isinstance(instance._fields, collections.Sequence) and
+          isinstance(instance._fields, collections_abc.Sequence) and
           all(isinstance(f, six.string_types) for f in instance._fields))
 
 
@@ -207,7 +225,7 @@ class _NamedTupleCodec(object):
   """Codec for namedtuples.
 
   Encoding and decoding a namedtuple reconstructs a namedtuple with a different
-  actual Python type, but with same `typename` and `fields`.
+  actual Python type, but with the same `typename` and `fields`.
   """
 
   def can_encode(self, pyobj):
@@ -408,7 +426,9 @@ class _TensorSpecCodec(object):
   """Codec for `TensorSpec`."""
 
   def can_encode(self, pyobj):
-    return isinstance(pyobj, tensor_spec.TensorSpec)
+    # BoundedTensorSpec has its own decoder.
+    return (isinstance(pyobj, tensor_spec.TensorSpec) and
+            not isinstance(pyobj, tensor_spec.BoundedTensorSpec))
 
   def do_encode(self, tensor_spec_value, encode_fn):
     encoded_tensor_spec = struct_pb2.StructuredValue()
@@ -423,6 +443,7 @@ class _TensorSpecCodec(object):
     return value.HasField("tensor_spec_value")
 
   def do_decode(self, value, decode_fn):
+    name = value.tensor_spec_value.name
     return tensor_spec.TensorSpec(
         shape=decode_fn(
             struct_pb2.StructuredValue(
@@ -430,7 +451,157 @@ class _TensorSpecCodec(object):
         dtype=decode_fn(
             struct_pb2.StructuredValue(
                 tensor_dtype_value=value.tensor_spec_value.dtype)),
-        name=value.tensor_spec_value.name)
+        name=(name if name else None))
 
 
 StructureCoder.register_codec(_TensorSpecCodec())
+
+
+class _BoundedTensorSpecCodec(object):
+  """Codec for `BoundedTensorSpec`."""
+
+  def can_encode(self, pyobj):
+    return isinstance(pyobj, tensor_spec.BoundedTensorSpec)
+
+  def do_encode(self, bounded_tensor_spec_value, encode_fn):
+    """Returns an encoded proto for the given `tf.BoundedTensorSpec`."""
+    encoded_bounded_tensor_spec = struct_pb2.StructuredValue()
+    encoded_bounded_tensor_spec.bounded_tensor_spec_value.CopyFrom(
+        struct_pb2.BoundedTensorSpecProto(
+            shape=encode_fn(bounded_tensor_spec_value.shape).tensor_shape_value,
+            dtype=encode_fn(bounded_tensor_spec_value.dtype).tensor_dtype_value,
+            name=bounded_tensor_spec_value.name,
+            minimum=tensor_util.make_tensor_proto(
+                bounded_tensor_spec_value.minimum),
+            maximum=tensor_util.make_tensor_proto(
+                bounded_tensor_spec_value.maximum)))
+    return encoded_bounded_tensor_spec
+
+  def can_decode(self, value):
+    return value.HasField("bounded_tensor_spec_value")
+
+  def do_decode(self, value, decode_fn):
+    btsv = value.bounded_tensor_spec_value
+    name = btsv.name
+    return tensor_spec.BoundedTensorSpec(
+        shape=decode_fn(
+            struct_pb2.StructuredValue(tensor_shape_value=btsv.shape)),
+        dtype=decode_fn(
+            struct_pb2.StructuredValue(tensor_dtype_value=btsv.dtype)),
+        minimum=tensor_util.MakeNdarray(btsv.minimum),
+        maximum=tensor_util.MakeNdarray(btsv.maximum),
+        name=(name if name else None))
+
+
+StructureCoder.register_codec(_BoundedTensorSpecCodec())
+
+
+class _TypeSpecCodec(object):
+  """Codec for `tf.TypeSpec`."""
+
+  # Mapping from enum value to type (TypeSpec subclass).
+  TYPE_SPEC_CLASS_FROM_PROTO = {
+      struct_pb2.TypeSpecProto.SPARSE_TENSOR_SPEC:
+          sparse_tensor.SparseTensorSpec,
+      struct_pb2.TypeSpecProto.INDEXED_SLICES_SPEC:
+          indexed_slices.IndexedSlicesSpec,
+      struct_pb2.TypeSpecProto.RAGGED_TENSOR_SPEC:
+          ragged_tensor.RaggedTensorSpec,
+      struct_pb2.TypeSpecProto.TENSOR_ARRAY_SPEC:
+          tensor_array_ops.TensorArraySpec,
+      struct_pb2.TypeSpecProto.DATA_DATASET_SPEC:
+          dataset_ops.DatasetSpec,
+      struct_pb2.TypeSpecProto.DATA_ITERATOR_SPEC:
+          iterator_ops.IteratorSpec,
+      struct_pb2.TypeSpecProto.OPTIONAL_SPEC:
+          optional_ops.OptionalSpec,
+      struct_pb2.TypeSpecProto.PER_REPLICA_SPEC:
+          values.PerReplicaSpec,
+      struct_pb2.TypeSpecProto.VARIABLE_SPEC:
+          resource_variable_ops.VariableSpec,
+      struct_pb2.TypeSpecProto.ROW_PARTITION_SPEC:
+          row_partition.RowPartitionSpec,
+  }
+
+  # Mapping from type (TypeSpec subclass) to enum value.
+  TYPE_SPEC_CLASS_TO_PROTO = dict(
+      (cls, enum) for (enum, cls) in TYPE_SPEC_CLASS_FROM_PROTO.items())
+
+  def can_encode(self, pyobj):
+    """Returns true if `pyboj` can be encoded as a TypeSpec."""
+    if type(pyobj) in self.TYPE_SPEC_CLASS_TO_PROTO:  # pylint: disable=unidiomatic-typecheck
+      return True
+
+    # Check if it's a registered type.
+    if isinstance(pyobj, type_spec.TypeSpec):
+      try:
+        type_spec.get_name(type(pyobj))
+        return True
+      except ValueError:
+        return False
+
+    return False
+
+  def do_encode(self, type_spec_value, encode_fn):
+    """Returns an encoded proto for the given `tf.TypeSpec`."""
+    type_spec_class = self.TYPE_SPEC_CLASS_TO_PROTO.get(type(type_spec_value))
+    type_spec_class_name = type(type_spec_value).__name__
+
+    if type_spec_class is None:
+      type_spec_class_name = type_spec.get_name(type(type_spec_value))
+      if isinstance(type_spec_value, extension_type.ExtensionTypeSpec):
+        type_spec_class = struct_pb2.TypeSpecProto.EXTENSION_TYPE_SPEC
+      else:
+        type_spec_class = struct_pb2.TypeSpecProto.REGISTERED_TYPE_SPEC
+        # Support for saving registered TypeSpecs is currently experimental.
+        # Issue a warning to indicate the limitations.
+        warnings.warn("Encoding a StructuredValue with type %s; loading this "
+                      "StructuredValue will require that this type be "
+                      "imported and registered." % type_spec_class_name)
+
+    type_state = type_spec_value._serialize()  # pylint: disable=protected-access
+    encoded_type_spec = struct_pb2.StructuredValue()
+    encoded_type_spec.type_spec_value.CopyFrom(
+        struct_pb2.TypeSpecProto(
+            type_spec_class=type_spec_class,
+            type_state=encode_fn(type_state),
+            type_spec_class_name=type_spec_class_name))
+    return encoded_type_spec
+
+  def can_decode(self, value):
+    return value.HasField("type_spec_value")
+
+  def do_decode(self, value, decode_fn):
+    """Returns the `tf.TypeSpec` encoded by the proto `value`."""
+    type_spec_proto = value.type_spec_value
+    type_spec_class_enum = type_spec_proto.type_spec_class
+    class_name = type_spec_proto.type_spec_class_name
+
+    if type_spec_class_enum == struct_pb2.TypeSpecProto.REGISTERED_TYPE_SPEC:
+      try:
+        type_spec_class = type_spec.lookup(class_name)
+      except ValueError as e:
+        raise ValueError(
+            "The type '%s' has not been registered.  It must be registered "
+            "before you load this object (typically by importing its module)."
+            % class_name) from e
+    elif type_spec_class_enum == struct_pb2.TypeSpecProto.EXTENSION_TYPE_SPEC:
+      try:
+        type_spec_class = type_spec.lookup(class_name)
+      except ValueError:
+        type_spec_class = extension_type.AnonymousExtensionTypeSpec
+        warnings.warn("The type %r has not been registered.  Falling back to "
+                      "using AnonymousExtensionTypeSpec instead.")
+    else:
+      if type_spec_class_enum not in self.TYPE_SPEC_CLASS_FROM_PROTO:
+        raise ValueError(
+            "The type '%s' is not supported by this version of TensorFlow. "
+            "(The object you are loading must have been created with a newer "
+            "version of TensorFlow.)" % class_name)
+      type_spec_class = self.TYPE_SPEC_CLASS_FROM_PROTO[type_spec_class_enum]
+
+    # pylint: disable=protected-access
+    return type_spec_class._deserialize(decode_fn(type_spec_proto.type_state))
+
+
+StructureCoder.register_codec(_TypeSpecCodec())

@@ -48,7 +48,7 @@ namespace {
 //
 //  - A T to indicate a successful operation.
 template <class T>
-using StatusOrOptional = xla::StatusOr<absl::optional<T>>;
+using StatusOrOptional = StatusOr<absl::optional<T>>;
 
 StatusOrOptional<Tensor> TryToGetTensorFromConstOp(Node* n) {
   if (n->type_string() != "Const") {
@@ -194,7 +194,7 @@ Status ComputeSliceSize(const Scope& host_scope,
   ConstantCache constant_pool(host_scope, control_deps);
 
   std::vector<Output> slice_size;
-  for (int i = 0; i < slice_inputs.size_as_vector.size(); i++) {
+  for (int i = 0, end = slice_inputs.size_as_vector.size(); i < end; i++) {
     if (slice_inputs.size_as_vector[i] >= 0) {
       slice_size.push_back(
           constant_pool.Get1DHostConstant(slice_inputs.size_as_vector[i]));
@@ -315,7 +315,7 @@ Status RewriteSlice(Graph* g, Node* slice, const SliceInputs& slice_inputs,
 
 // Return true if `n` is a slice we should rewrite to have a static shape
 // (i.e. have the output shape only depend on the "size" input).
-xla::StatusOr<bool> ShouldRewriteSlice(Node* n) {
+StatusOr<bool> ShouldRewriteSlice(Node* n) {
   if (n->type_string() != "Slice") {
     return false;
   }

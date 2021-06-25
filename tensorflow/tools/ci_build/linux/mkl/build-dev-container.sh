@@ -45,7 +45,11 @@ WORKSPACE="${WORKSPACE:-$(upsearch WORKSPACE)}"
 
 ROOT_CONTAINER=${ROOT_CONTAINER:-tensorflow/tensorflow}
 TF_ROOT_CONTAINER_TAG=${ROOT_CONTAINER_TAG:-devel}
+
+# TF_BUILD_VERSION can be either a tag, branch, commit ID or PR number.
+# For a PR, set TF_BUILD_VERSION_IS_PR="yes"
 TF_BUILD_VERSION=${TF_DOCKER_BUILD_DEVEL_BRANCH:-master}
+TF_BUILD_VERSION_IS_PR=${TF_DOCKER_BUILD_DEVEL_BRANCH_IS_PR:-no}
 TF_REPO=${TF_REPO:-https://github.com/tensorflow/tensorflow}
 FINAL_IMAGE_NAME=${TF_DOCKER_BUILD_IMAGE_NAME:-intel-mkl/tensorflow}
 TF_DOCKER_BUILD_VERSION=${TF_DOCKER_BUILD_VERSION:-nightly}
@@ -53,22 +57,53 @@ BUILD_AVX_CONTAINERS=${BUILD_AVX_CONTAINERS:-no}
 BUILD_AVX2_CONTAINERS=${BUILD_AVX2_CONTAINERS:-no}
 BUILD_SKX_CONTAINERS=${BUILD_SKX_CONTAINERS:-no}
 BUILD_CLX_CONTAINERS=${BUILD_CLX_CONTAINERS:-no}
+BUILD_ICX_CLIENT_CONTAINERS=${BUILD_ICX_CLIENT_CONTAINERS:-no}
+BUILD_ICX_SERVER_CONTAINERS=${BUILD_ICX_SERVER_CONTAINERS:-no}
 CONTAINER_PORT=${TF_DOCKER_BUILD_PORT:-8888}
-BUILD_TF_V2_CONTAINERS=${BUILD_TF_V2_CONTAINERS:-no}
+BUILD_TF_V2_CONTAINERS=${BUILD_TF_V2_CONTAINERS:-yes}
+BUILD_TF_BFLOAT16_CONTAINERS=${BUILD_TF_BFLOAT16_CONTAINERS:-no}
 ENABLE_SECURE_BUILD=${ENABLE_SECURE_BUILD:-no}
+BAZEL_VERSION=${BAZEL_VERSION}
+BUILD_PY2_CONTAINERS=${BUILD_PY2_CONTAINERS:-no}
+ENABLE_DNNL1=${ENABLE_DNNL1:-no}
+ENABLE_HOROVOD=${ENABLE_HOROVOD:-no}
+INSTALL_HOROVOD_FROM_COMMIT=${INSTALL_HOROVOD_FROM_COMMIT:-no}
+ENABLE_GCC8=${ENABLE_GCC8:-no}
+OPENMPI_VERSION=${OPENMPI_VERSION}
+OPENMPI_DOWNLOAD_URL=${OPENMPI_DOWNLOAD_URL}
+HOROVOD_VERSION=${HOROVOD_VERSION}
+BUILD_SSH=${BUILD_SSH:-no}
+IS_NIGHTLY=${IS_NIGHTLY:-no}
+RELEASE_CONTAINER=${RELEASE_CONTAINER:-no}
 
 debug "ROOT_CONTAINER=${ROOT_CONTAINER}"
 debug "TF_ROOT_CONTAINER_TAG=${TF_ROOT_CONTAINER_TAG}"
 debug "TF_BUILD_VERSION=${TF_BUILD_VERSION}"
+debug "TF_BUILD_VERSION_IS_PR=${TF_BUILD_VERSION_IS_PR}"
 debug "FINAL_IMAGE_NAME=${FINAL_IMAGE_NAME}"
 debug "TF_DOCKER_BUILD_VERSION=${TF_DOCKER_BUILD_VERSION}"
 debug "BUILD_AVX_CONTAINERS=${BUILD_AVX_CONTAINERS}"
 debug "BUILD_AVX2_CONTAINERS=${BUILD_AVX2_CONTAINERS}"
 debug "BUILD_SKX_CONTAINERS=${BUILD_SKX_CONTAINERS}"
 debug "BUILD_CLX_CONTAINERS=${BUILD_CLX_CONTAINERS}"
+debug "BUILD_ICX_CLIENT_CONTAINERS=${BUILD_ICX_CLIENT_CONTAINERS}"
+debug "BUILD_ICX_SERVER_CONTAINERS=${BUILD_ICX_SERVER_CONTAINERS}"
 debug "BUILD_TF_V2_CONTAINERS=${BUILD_TF_V2_CONTAINERS}"
+debug "BUILD_TF_BFLOAT16_CONTAINERS=${BUILD_TF_BFLOAT16_CONTAINERS}"
 debug "ENABLE_SECURE_BUILD=${ENABLE_SECURE_BUILD}"
 debug "TMP_DIR=${TMP_DIR}"
+debug "BAZEL_VERSION=${BAZEL_VERSION}"
+debug "ENABLE_GCC8=${ENABLE_GCC8}"
+debug "BUILD_PY2_CONTAINERS=${BUILD_PY2_CONTAINERS}"
+debug "ENABLE_DNNL1=${ENABLE_DNNL1}"
+debug "ENABLE_HOROVOD=${ENABLE_HOROVOD}"
+debug "INSTALL_HOROVOD_FROM_COMMIT=${INSTALL_HOROVOD_FROM_COMMIT}"
+debug "OPENMPI_VERSION=${OPENMPI_VERSION}"
+debug "OPENMPI_DOWNLOAD_URL=${OPENMPI_DOWNLOAD_URL}"
+debug "HOROVOD_VERSION=${HOROVOD_VERSION}"
+debug "BUILD_SSH=${BUILD_SSH}"
+debug "IS_NIGHTLY=${IS_NIGHTLY}"
+debug "RELEASE_CONTAINER=${RELEASE_CONTAINER}"
 
 function build_container()
 {
@@ -80,24 +115,63 @@ function build_container()
   shift
   TF_DOCKER_BUILD_ARGS=("${@}")
 
-  # Add the proxy info build args
+  # Add the proxy info build args. This will be later on passed to docker as
+  # --build-arg so that users behind corporate proxy can build the images
   TF_DOCKER_BUILD_ARGS+=("--build-arg http_proxy=${http_proxy}")
   TF_DOCKER_BUILD_ARGS+=("--build-arg https_proxy=${https_proxy}")
   TF_DOCKER_BUILD_ARGS+=("--build-arg socks_proxy=${socks_proxy}")
   TF_DOCKER_BUILD_ARGS+=("--build-arg no_proxy=${no_proxy}")
-  TF_DOCKER_BUILD_ARGS+=("--build-arg HTTP_PROXY=${http_proxy}")
-  TF_DOCKER_BUILD_ARGS+=("--build-arg SOCKS_PROXY=${socks_proxy}")
-  TF_DOCKER_BUILD_ARGS+=("--build-arg NO_PROXY=${no_proxy}")
+  # In general having uppercase proxies is a good idea because different
+  # applications running inside Docker may only honor uppercase proxies
+  TF_DOCKER_BUILD_ARGS+=("--build-arg HTTP_PROXY=${HTTP_PROXY}")
+  TF_DOCKER_BUILD_ARGS+=("--build-arg HTTPS_PROXY=${HTTPS_PROXY}")
+  TF_DOCKER_BUILD_ARGS+=("--build-arg SOCKS_PROXY=${SOCKS_PROXY}")
+  TF_DOCKER_BUILD_ARGS+=("--build-arg NO_PROXY=${NO_PROXY}")
 
   #Add --config=v2 build arg for TF v2
   if [[ ${BUILD_TF_V2_CONTAINERS} == "no" ]]; then
     TF_DOCKER_BUILD_ARGS+=("--build-arg CONFIG_V2_DISABLE=--disable-v2")
   fi
 
+  #Add build arg for bfloat16 build
+  if [[ ${BUILD_TF_BFLOAT16_CONTAINERS} == "yes" ]]; then
+    TF_DOCKER_BUILD_ARGS+=("--build-arg CONFIG_BFLOAT16_BUILD=--enable-bfloat16")
+  fi
+
   #Add build arg for Secure Build
   if [[ ${ENABLE_SECURE_BUILD} == "yes" ]]; then
     TF_DOCKER_BUILD_ARGS+=("--build-arg ENABLE_SECURE_BUILD=--secure-build")
   fi
+
+  # Add build arg for DNNL1
+  if [[ ${ENABLE_DNNL1} == "yes" ]]; then
+    TF_DOCKER_BUILD_ARGS+=("--build-arg ENABLE_DNNL1=--enable-dnnl1")
+  fi
+
+  # BAZEL Version
+  if [[ ${BAZEL_VERSION} != "" ]]; then
+    TF_DOCKER_BUILD_ARGS+=("--build-arg BAZEL_VERSION=${BAZEL_VERSION}")
+  fi
+
+  # Add build arg for installing OpenMPI/Horovod
+  if [[ ${ENABLE_HOROVOD} == "yes" ]]; then
+    TF_DOCKER_BUILD_ARGS+=("--build-arg ENABLE_HOROVOD=${ENABLE_HOROVOD}")
+    TF_DOCKER_BUILD_ARGS+=("--build-arg OPENMPI_VERSION=${OPENMPI_VERSION}")
+    TF_DOCKER_BUILD_ARGS+=("--build-arg OPENMPI_DOWNLOAD_URL=${OPENMPI_DOWNLOAD_URL}")
+    TF_DOCKER_BUILD_ARGS+=("--build-arg HOROVOD_VERSION=${HOROVOD_VERSION}")
+    TF_DOCKER_BUILD_ARGS+=("--build-arg INSTALL_HOROVOD_FROM_COMMIT=${INSTALL_HOROVOD_FROM_COMMIT}")
+    TF_DOCKER_BUILD_ARGS+=("--build-arg BUILD_SSH=${BUILD_SSH}")
+  fi
+
+  # Add build arg --nightly_flag for the nightly build
+  if [[ ${IS_NIGHTLY} == "yes" ]]; then
+    TF_DOCKER_BUILD_ARGS+=("--build-arg TF_NIGHTLY_FLAG=--nightly_flag")
+  fi
+
+  # Add build arg GCC8 install
+  TF_DOCKER_BUILD_ARGS+=("--build-arg ENABLE_GCC8=${ENABLE_GCC8}")
+
+  TF_DOCKER_BUILD_ARGS+=("--build-arg RELEASE_CONTAINER=${RELEASE_CONTAINER}")
 
   # Perform docker build
   debug "Building docker image with image name and tag: ${TEMP_IMAGE_NAME}"
@@ -146,14 +220,27 @@ function test_container()
   debug "ID of the running docker container: ${CONTAINER_ID}"
 
   debug "Performing basic sanity checks on the running container..."
-  TEST_CMD=$(${DOCKER_BINARY} exec ${CONTAINER_ID} bash -c "${PYTHON} -c 'from tensorflow.python import pywrap_tensorflow; print(pywrap_tensorflow.IsMklEnabled())'")
-  debug "Running test command: ${TEST_CMD}"
-  if [ "${TEST_CMD}" = "True" ] ; then
-      echo "PASS: MKL enabled test in ${TEMP_IMAGE_NAME}"
-  else
-      die "FAIL: MKL enabled test in ${TEMP_IMAGE_NAME}"
-  fi
+  {
+    ${DOCKER_BINARY} exec ${CONTAINER_ID} bash -c "${PYTHON} -c 'from tensorflow.python import _pywrap_util_port; print(_pywrap_util_port.IsMklEnabled())'"
+    echo "PASS: MKL enabled test in ${TEMP_IMAGE_NAME}"
+  } || {
+    ${DOCKER_BINARY} exec ${CONTAINER_ID} bash -c "${PYTHON} -c 'from tensorflow.python import pywrap_tensorflow; print(pywrap_tensorflow.IsMklEnabled())'"
+    echo "PASS: Old MKL enabled in ${TEMP_IMAGE_NAME}"
+  } || {
+    die "FAIL: MKL enabled test in ${TEMP_IMAGE_NAME}"
+  }
 
+  # Test to check if horovod is installed successfully
+  if [[ ${ENABLE_HOROVOD} == "yes" ]]; then
+      debug "Test horovod in the container..."
+      ${DOCKER_BINARY} exec ${CONTAINER_ID} bash -c "${PYTHON} -c 'import horovod.tensorflow as hvd;'"
+      if [[ $? == "0" ]]; then
+          echo "PASS: HOROVOD installation test in ${TEMP_IMAGE_NAME}"
+      else
+          die "FAIL: HOROVOD installation test in ${TEMP_IMAGE_NAME}"
+      fi
+  fi
+  
   # Stop the running docker container
   sleep 1
   "${DOCKER_BINARY}" stop --time=0 ${CONTAINER_ID}
@@ -161,12 +248,13 @@ function test_container()
 
 function checkout_tensorflow()
 {
-  if [[ "$#" != "2" ]]; then
-    die "Usage: ${FUNCNAME} <REPO_URL> <BRANCH/TAG/COMMIT-ID>"
+  if [[ "$#" != "3" ]]; then
+    die "Usage: ${FUNCNAME} <REPO_URL> <BRANCH/TAG/COMMIT-ID/PR-ID> <TF_BUILD_VERSION_IS_PR>"
   fi
 
   TF_REPO="${1}"
   TF_BUILD_VERSION="${2}"
+  TF_BUILD_VERSION_IS_PR="${3}"
   TENSORFLOW_DIR="tensorflow"
 
   debug "Checking out ${TF_REPO}:${TF_BUILD_VERSION} into ${TENSORFLOW_DIR}"
@@ -174,10 +262,15 @@ function checkout_tensorflow()
   # Clean any existing tensorflow sources
   rm -rf "${TENSORFLOW_DIR}"
 
-  # Let's make this simeple for now; we can be more fancy later
   git clone ${TF_REPO} ${TENSORFLOW_DIR}
   cd ${TENSORFLOW_DIR}
-  git checkout ${TF_BUILD_VERSION}
+  if [[ "${TF_BUILD_VERSION_IS_PR}" == "yes" ]]; then
+    # If TF_BUILD_VERSION is a PR number, then fetch first
+    git fetch origin pull/${TF_BUILD_VERSION}/head:pr-${TF_BUILD_VERSION}
+    git checkout pr-${TF_BUILD_VERSION}
+  else
+    git checkout ${TF_BUILD_VERSION}
+  fi
   if [ $? -ne 0 ]; then
     die "Unable to find ${TF_BUILD_VERSION} on ${TF_REPO}"
   fi
@@ -209,7 +302,11 @@ function tag_container()
   debug "Successfully tagged docker image: ${FINAL_IMG}"
 }
 
-PYTHON_VERSIONS=("python" "python3")
+PYTHON_VERSIONS=("python3")
+if [[ ${BUILD_PY2_CONTAINERS} == "yes" ]]; then
+  PYTHON_VERSIONS+=("python")
+fi
+
 PLATFORMS=()
 if [[ ${BUILD_AVX_CONTAINERS} == "yes" ]]; then
   PLATFORMS+=("sandybridge")
@@ -227,8 +324,16 @@ if [[ ${BUILD_CLX_CONTAINERS} == "yes" ]]; then
   PLATFORMS+=("icelake")
 fi
 
+if [[ ${BUILD_ICX_CLIENT_CONTAINERS} == "yes" ]]; then
+  PLATFORMS+=("icelake-client")
+fi
+
+if [[ ${BUILD_ICX_SERVER_CONTAINERS} == "yes" ]]; then
+  PLATFORMS+=("icelake-server")
+fi
+
 # Checking out sources needs to be done only once
-checkout_tensorflow "${TF_REPO}" "${TF_BUILD_VERSION}"
+checkout_tensorflow "${TF_REPO}" "${TF_BUILD_VERSION}" "${TF_BUILD_VERSION_IS_PR}"
 
 for PLATFORM in "${PLATFORMS[@]}"
 do
@@ -252,13 +357,19 @@ do
         FINAL_TAG="${FINAL_TAG}-avx512-VNNI"
       fi
 
+      if [[ ${PLATFORM} == "icelake-client" ]]; then
+        FINAL_TAG="${FINAL_TAG}-icx-client"
+      fi
+
+      if [[ ${PLATFORM} == "icelake-server" ]]; then
+        FINAL_TAG="${FINAL_TAG}-icx-server"
+      fi
+
       # Add -devel-mkl to the image tag
       FINAL_TAG="${FINAL_TAG}-devel-mkl"
       if [[ "${PYTHON}" == "python3" ]]; then
         TF_DOCKER_BUILD_ARGS+=("--build-arg WHL_DIR=/tmp/pip3")
         TF_DOCKER_BUILD_ARGS+=("--build-arg PIP=pip3")
-        FINAL_TAG="${FINAL_TAG}-py3"
-        ROOT_CONTAINER_TAG="${ROOT_CONTAINER_TAG}-py3"
       fi
 
       TF_DOCKER_BUILD_ARGS+=("--build-arg PYTHON=${PYTHON}")
@@ -271,4 +382,3 @@ do
       tag_container "${TEMP_IMAGE_NAME}" "${FINAL_IMAGE_NAME}:${FINAL_TAG}"
   done
 done
-

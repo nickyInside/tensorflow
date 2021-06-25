@@ -43,7 +43,7 @@ class XlaJitCompiledCpuFunction {
   // `config` specifies the portion of the graph to compile, via feeds and
   // fetches. Each feed is a positional input argument for the compiled
   // function, while each fetch is a positional output argument.
-  static xla::StatusOr<std::unique_ptr<XlaJitCompiledCpuFunction>> Compile(
+  static StatusOr<std::unique_ptr<XlaJitCompiledCpuFunction>> Compile(
       const GraphDef& graph_def, const tf2xla::Config& config,
       const xla::ExecutableBuildOptions& build_options);
 
@@ -77,8 +77,10 @@ class XlaJitCompiledCpuFunction {
   // nonempty_*_names_, and hold arrays of pointers in *_names_ for the static
   // data to refer to.
   std::vector<string> nonempty_arg_names_;
+  std::vector<string> nonempty_variable_names_;
   std::vector<string> nonempty_result_names_;
   std::vector<const char*> arg_names_;
+  std::vector<const char*> variable_names_;
   std::vector<const char*> result_names_;
 
   // The backing data for the program shape. The proto form of program shape is

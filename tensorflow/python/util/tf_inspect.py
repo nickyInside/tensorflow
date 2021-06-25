@@ -25,6 +25,20 @@ import six
 
 from tensorflow.python.util import tf_decorator
 
+
+# inspect.signature() is preferred over inspect.getfullargspec() in PY3.
+# Note that while it can handle TFDecorators, it will ignore a TFDecorator's
+# provided ArgSpec/FullArgSpec and instead return the signature of the
+# inner-most function.
+def signature(obj, *, follow_wrapped=True):
+  """TFDecorator-aware replacement for inspect.signature."""
+  return _inspect.signature(
+      tf_decorator.unwrap(obj)[1], follow_wrapped=follow_wrapped)
+
+
+Parameter = _inspect.Parameter
+Signature = _inspect.Signature
+
 ArgSpec = _inspect.ArgSpec
 
 
@@ -151,7 +165,7 @@ def _get_argspec_for_partial(obj):
   """Implements `getargspec` for `functools.partial` objects.
 
   Args:
-    obj: The `functools.partial` obeject
+    obj: The `functools.partial` object
   Returns:
     An `inspect.ArgSpec`
   Raises:
@@ -257,12 +271,12 @@ def getfullargspec(obj):
   return _getfullargspec(target)
 
 
-def getcallargs(func, *positional, **named):
+def getcallargs(*func_and_positional, **named):
   """TFDecorator-aware replacement for inspect.getcallargs.
 
   Args:
-    func: A callable, possibly decorated
-    *positional: The positional arguments that would be passed to `func`.
+    *func_and_positional: A callable, possibly decorated, followed by any
+      positional arguments that would be passed to `func`.
     **named: The named argument dictionary that would be passed to `func`.
 
   Returns:
@@ -273,6 +287,8 @@ def getcallargs(func, *positional, **named):
   it. If no attached decorators modify argspec, the final unwrapped target's
   argspec will be used.
   """
+  func = func_and_positional[0]
+  positional = func_and_positional[1:]
   argspec = getfullargspec(func)
   call_args = named.copy()
   this = getattr(func, 'im_self', None) or getattr(func, '__self__', None)
@@ -285,6 +301,10 @@ def getcallargs(func, *positional, **named):
     for arg, value in zip(argspec.args[-default_count:], argspec.defaults):
       if arg not in call_args:
         call_args[arg] = value
+  if argspec.kwonlydefaults is not None:
+    for k, v in argspec.kwonlydefaults.items():
+      if k not in call_args:
+        call_args[k] = v
   return call_args
 
 
@@ -384,6 +404,20 @@ def isgeneratorfunction(object):  # pylint: disable=redefined-builtin
 def ismethod(object):  # pylint: disable=redefined-builtin
   """TFDecorator-aware replacement for inspect.ismethod."""
   return _inspect.ismethod(tf_decorator.unwrap(object)[1])
+
+
+def isanytargetmethod(object):  # pylint: disable=redefined-builtin
+  # pylint: disable=g-doc-args,g-doc-return-or-yield
+  """Checks all the decorated targets along the chain of decorators.
+
+  Returns True if any of the decorated targets in the chain is a method.
+  """
+  decorators, _ = tf_decorator.unwrap(object)
+  for decorator in decorators:
+    if _inspect.ismethod(decorator.decorated_target):
+      return True
+
+  return False
 
 
 def ismodule(object):  # pylint: disable=redefined-builtin

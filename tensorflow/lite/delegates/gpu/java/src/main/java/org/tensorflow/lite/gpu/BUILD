@@ -1,7 +1,12 @@
-licenses(["notice"])  # Apache 2.0
+package(
+    licenses = ["notice"],
+)
 
 filegroup(
     name = "gpu_delegate",
-    srcs = ["GpuDelegate.java"],
+    srcs = [
+        "CompatibilityList.java",
+        "GpuDelegate.java",
+    ],
     visibility = ["//visibility:public"],
 )

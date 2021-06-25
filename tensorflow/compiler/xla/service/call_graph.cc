@@ -59,6 +59,8 @@ CallContext GetInstructionCallContext(HloOpcode opcode) {
     case HloOpcode::kWhile:
       return CallContext::kSequential;
     case HloOpcode::kAllReduce:
+    case HloOpcode::kAllReduceScatter:
+    case HloOpcode::kAllReduceStart:
     case HloOpcode::kMap:
     case HloOpcode::kReduce:
     case HloOpcode::kReduceWindow:
@@ -66,6 +68,7 @@ CallContext GetInstructionCallContext(HloOpcode opcode) {
     case HloOpcode::kSelectAndScatter:
     case HloOpcode::kSort:
     case HloOpcode::kFusion:
+    case HloOpcode::kCustomCall:
       return CallContext::kParallel;
     default:
       return CallContext::kNone;
@@ -93,6 +96,8 @@ const CallSite* CallGraphNode::GetCallSite(
   }
   return &callsites_[it->second];
 }
+
+std::string CallGraphNode::ToString() const { return computation_->name(); }
 
 void CallGraphNode::AddCallerCallSite(const CallSite& caller_callsite) {
   caller_callsites_.push_back(caller_callsite);
@@ -366,7 +371,7 @@ bool CallGraph::IsFlattened() const {
 std::vector<HloInstruction*> CallGraph::GetComputationCallers(
     HloComputation* c) {
   std::vector<HloInstruction*> callers;
-  for (auto callsite : GetNode(c).caller_callsites()) {
+  for (const auto& callsite : GetNode(c).caller_callsites()) {
     callers.push_back(callsite.instruction());
   }
   return callers;

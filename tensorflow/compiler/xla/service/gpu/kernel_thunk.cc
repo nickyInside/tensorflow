@@ -33,14 +33,16 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-KernelThunk::KernelThunk(absl::Span<const BufferAllocation* const> args,
-                         const string& kernel_name,
-                         const HloInstruction* hlo_instruction,
-                         int unroll_factor)
-    : Thunk(Kind::kKernel, hlo_instruction),
+KernelThunk::KernelThunk(ThunkInfo thunk_info,
+                         absl::Span<const BufferAllocation* const> args,
+                         const string& kernel_name)
+    : Thunk(Kind::kKernel, thunk_info),
       args_(args.begin(), args.end()),
-      kernel_name_(kernel_name),
-      unroll_factor_(unroll_factor) {}
+      kernel_name_(kernel_name) {}
+
+std::string KernelThunk::ToStringExtra(int indent) const {
+  return " ,kernel = " + kernel_name_;
+}
 
 Status KernelThunk::Initialize(const GpuExecutable& executable,
                                se::StreamExecutor* executor) {
@@ -55,8 +57,8 @@ Status KernelThunk::Initialize(const GpuExecutable& executable,
   if (kernel_cache_.end() == it) {
     TF_ASSIGN_OR_RETURN(
         std::unique_ptr<se::KernelBase> kernel,
-        CreateKernel(kernel_name_, args_.size(), executable.ptx(),
-                     executable.cubin(), executor));
+        CreateKernel(kernel_name_, args_.size(), executable.text(),
+                     executable.binary(), executor));
 
     kernel_cache_.emplace(executor, std::move(kernel));
   }
@@ -69,11 +71,26 @@ void KernelThunk::SetLaunchDimensions(const LaunchDimensions& launch_dims) {
   launch_dimensions_ = launch_dims;
 }
 
-Status KernelThunk::ExecuteOnStream(const BufferAllocations& buffer_allocations,
-                                    se::Stream* stream,
-                                    HloExecutionProfiler* profiler) {
+static void PrintBufferContents(
+    se::Stream* stream, absl::Span<const se::DeviceMemoryBase> buffer_args) {
+  int input_idx = 0;
+  for (const se::DeviceMemoryBase& buf : buffer_args) {
+    auto host_buffer = absl::make_unique<char[]>(buf.size());
+    CHECK(stream->ThenMemcpy(host_buffer.get(), buf, buf.size()).ok());
+    CHECK(stream->BlockHostUntilDone().ok());
+
+    std::string buffer_contents;
+    for (int i = 0; i < buf.size(); i++) {
+      absl::StrAppendFormat(&buffer_contents, "%x ",
+                            static_cast<unsigned>(host_buffer[i]));
+    }
+    VLOG(100) << "BUF(" << input_idx++ << ") = " << buffer_contents;
+  }
+}
+
+Status KernelThunk::ExecuteOnStream(const ExecuteParams& params) {
   // Load the kernel.
-  se::StreamExecutor* executor = stream->parent();
+  se::StreamExecutor* executor = params.stream->parent();
   LaunchDimensions launch_dimensions;
   const se::KernelBase* kernel = nullptr;
 
@@ -90,15 +107,20 @@ Status KernelThunk::ExecuteOnStream(const BufferAllocations& buffer_allocations,
   absl::InlinedVector<se::DeviceMemoryBase, 4> buffer_args;
   for (const BufferAllocation* arg : args_) {
     se::DeviceMemoryBase buf =
-        buffer_allocations.GetDeviceAddress(arg->index());
+        params.buffer_allocations->GetDeviceAddress(arg->index());
     VLOG(3) << "  Arg: alloc #" << arg->index() << ": " << buf.opaque() << "  ("
             << buf.size() << "B)";
     buffer_args.push_back(buf);
   }
-  auto op_profiler = profiler->MakeScopedInstructionProfiler(hlo_instruction());
-  return ExecuteKernelOnStream(*kernel, buffer_args,
-                               launch_dimensions.threads_per_block(),
-                               launch_dimensions.block_count(), stream);
+
+  if (VLOG_IS_ON(100)) {
+    PrintBufferContents(params.stream, buffer_args);
+  }
+
+  auto op_profiler =
+      params.profiler->MakeScopedInstructionProfiler(profile_index());
+  return ExecuteKernelOnStream(*kernel, buffer_args, launch_dimensions,
+                               params.stream);
 }
 
 }  // namespace gpu

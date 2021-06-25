@@ -41,9 +41,20 @@ namespace wav {
 // if (EncodeAudioAsS16LEWav(audio_buffer, 8000, 2, 4, &wav_string).ok()) {
 //   // Use wav_string.
 // }
+template <typename T>
 Status EncodeAudioAsS16LEWav(const float* audio, size_t sample_rate,
                              size_t num_channels, size_t num_frames,
-                             string* wav_string);
+                             T* wav_string);
+
+// Explicit instantiations defined in wav_io.cc.
+extern template Status EncodeAudioAsS16LEWav<std::string>(
+    const float* audio, size_t sample_rate, size_t num_channels,
+    size_t num_frames, std::string* wav_string);
+extern template Status EncodeAudioAsS16LEWav<tstring>(const float* audio,
+                                                      size_t sample_rate,
+                                                      size_t num_channels,
+                                                      size_t num_frames,
+                                                      tstring* wav_string);
 
 // Decodes the little-endian signed 16-bit PCM WAV file data (aka LIN16
 // encoding) into a float Tensor. The channels are encoded as the lowest
@@ -52,7 +63,7 @@ Status EncodeAudioAsS16LEWav(const float* audio, size_t sample_rate,
 // is read from the file header, and an error is returned if the format is not
 // supported.
 // The results are output as floats within the range -1 to 1,
-Status DecodeLin16WaveAsFloatVector(const string& wav_string,
+Status DecodeLin16WaveAsFloatVector(const std::string& wav_string,
                                     std::vector<float>* float_values,
                                     uint32* sample_count, uint16* channel_count,
                                     uint32* sample_rate);
@@ -68,7 +79,7 @@ Status IncrementOffset(int old_offset, size_t increment, size_t max_size,
 // template that needs to be instantiated. Reads a typed numeric value from a
 // stream of data.
 template <class T>
-Status ReadValue(const string& data, T* value, int* offset) {
+Status ReadValue(const std::string& data, T* value, int* offset) {
   int new_offset;
   TF_RETURN_IF_ERROR(
       IncrementOffset(*offset, sizeof(T), data.size(), &new_offset));

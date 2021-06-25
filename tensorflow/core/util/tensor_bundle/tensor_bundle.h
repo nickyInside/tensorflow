@@ -61,8 +61,6 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_UTIL_TENSOR_BUNDLE_TENSOR_BUNDLE_H_
 #define TENSORFLOW_CORE_UTIL_TENSOR_BUNDLE_TENSOR_BUNDLE_H_
 
-#include "tensorflow/core/protobuf/tensor_bundle.pb.h"
-
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -72,12 +70,15 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_slice.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/gtl/array_slice.h"
+#include "tensorflow/core/lib/io/cache.h"
 #include "tensorflow/core/lib/io/inputbuffer.h"
 #include "tensorflow/core/lib/io/table.h"
+#include "tensorflow/core/platform/cord.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/file_system.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/core/protobuf/tensor_bundle.pb.h"
 #include "tensorflow/core/util/tensor_bundle/naming.h"
 #include "tensorflow/core/util/tensor_slice_set.h"
 
@@ -149,8 +150,9 @@ class BundleWriter {
   Env* const env_;  // Not owned.
   const Options options_;
   const string prefix_;
-  const string tmp_metadata_path_;
-  const string tmp_data_path_;
+  string metadata_path_;
+  string data_path_;
+  bool use_temp_file_;
   std::unique_ptr<FileOutputBuffer> out_;
   int64 size_;  // Number of bytes written into out_.
   std::map<string, BundleEntryProto> entries_;
@@ -172,7 +174,7 @@ class BundleWriter {
 //
 // Once merged, makes a best effort to delete the old metadata files.
 // Returns OK iff all bundles are successfully merged.
-Status MergeBundles(Env* env, gtl::ArraySlice<string> prefixes,
+Status MergeBundles(Env* env, gtl::ArraySlice<tstring> prefixes,
                     StringPiece merged_prefix);
 
 // On construction, silently attempts to read the metadata associated with
@@ -288,6 +290,7 @@ class BundleReader {
   Status status_;
   RandomAccessFile* metadata_;  // Owned.
   table::Table* table_;
+  table::Cache* index_cache_;
   table::Iterator* iter_;
   // Owned the InputBuffer objects and their underlying RandomAccessFile's.
   std::unordered_map<int32, io::InputBuffer*> data_;
@@ -300,6 +303,10 @@ class BundleReader {
   // the header entry in the metadata table.
   int num_shards_;
 
+  // Flag that this class sets to true when the endianness of the target bundle
+  // differs from that of the current system's processor architecture.
+  bool need_to_swap_bytes_;
+
   friend class TensorBundleAlignmentTest;  // For testing data alignment.
 
   TF_DISALLOW_COPY_AND_ASSIGN(BundleReader);
@@ -310,11 +317,7 @@ class BundleReader {
 // External synchronization must be used in the presence of concurrent callers.
 class FileOutputBuffer {
  public:
-  FileOutputBuffer(WritableFile* file, size_t buffer_size)
-      : file_(file), position_(0), buffer_size_(buffer_size) {
-    DCHECK_GT(buffer_size, 0);
-    buffer_.resize(buffer_size);
-  }
+  FileOutputBuffer(WritableFile* file, size_t buffer_size);
   ~FileOutputBuffer();
 
   // Buffered append.
@@ -330,15 +333,15 @@ class FileOutputBuffer {
 
  private:
   // Appends the buffered data to the underlying file. Does NOT flush the file.
-  Status FlushBuffer();
+  Status FlushBuffer(bool closing);
 
   WritableFile* file_;  // Owned.
 
-  // buffer_[0, position_) holds the buffered data not yet appended to the
+  // buffer_ptr_[0, position_) holds the buffered data not yet appended to the
   // underlying file.
   size_t position_;
   const size_t buffer_size_;
-  std::vector<char> buffer_;
+  char* buffer_ptr_;
 
   // Checksum of all appended bytes since construction or last clear_crc32c().
   uint32 crc32c_ = 0;

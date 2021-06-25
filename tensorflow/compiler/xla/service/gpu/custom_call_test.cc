@@ -13,9 +13,17 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "cuda/include/cuda.h"
-#include "cuda/include/cuda_runtime_api.h"
-#include "cuda/includes/cuda_headers/third_party/gpus/cuda/include/driver_types.h"
+#include <sstream>
+
+#if GOOGLE_CUDA
+#include "third_party/gpus/cuda/include/cuda.h"
+#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
+#include "third_party/gpus/cuda/include/driver_types.h"
+#define PLATFORM "CUDA"
+#elif TENSORFLOW_USE_ROCM
+#include "rocm/include/hip/hip_runtime.h"
+#define PLATFORM "ROCM"
+#endif
 #include "tensorflow/compiler/xla/client/lib/constants.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/service/custom_call_target_registry.h"
@@ -23,6 +31,23 @@ limitations under the License.
 #include "tensorflow/compiler/xla/test_helpers.h"
 #include "tensorflow/compiler/xla/tests/client_library_test_base.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/stream_executor/gpu/gpu_types.h"
+
+#if GOOGLE_CUDA
+#define gpuSuccess cudaSuccess
+#define gpuMemcpyAsync cudaMemcpyAsync
+#define gpuMemcpyDeviceToDevice cudaMemcpyDeviceToDevice
+#define gpuMemcpy cudaMemcpy
+#define gpuMemcpyDeviceToHost cudaMemcpyDeviceToHost
+#define gpuMemcpyHostToDevice cudaMemcpyHostToDevice
+#elif TENSORFLOW_USE_ROCM
+#define gpuSuccess hipSuccess
+#define gpuMemcpyAsync hipMemcpyAsync
+#define gpuMemcpyDeviceToDevice hipMemcpyDeviceToDevice
+#define gpuMemcpy hipMemcpy
+#define gpuMemcpyDeviceToHost hipMemcpyDeviceToHost
+#define gpuMemcpyHostToDevice hipMemcpyHostToDevice
+#endif
 
 namespace xla {
 namespace {
@@ -30,11 +55,11 @@ namespace {
 class CustomCallTest : public ClientLibraryTestBase {};
 
 bool is_invoked_called = false;
-void Callback_IsInvoked(CUstream /*stream*/, void** /*buffers*/,
+void Callback_IsInvoked(se::gpu::GpuStreamHandle /*stream*/, void** /*buffers*/,
                         const char* /*opaque*/, size_t /*opaque_len*/) {
   is_invoked_called = true;
 }
-XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_IsInvoked, "CUDA");
+XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_IsInvoked, PLATFORM);
 
 TEST_F(CustomCallTest, IsInvoked) {
   XlaBuilder b(TestName());
@@ -48,20 +73,20 @@ TEST_F(CustomCallTest, IsInvoked) {
 
 TEST_F(CustomCallTest, UnknownTarget) {
   XlaBuilder b(TestName());
-  CustomCall(&b, "UknownTarget", /*operands=*/{}, ShapeUtil::MakeShape(F32, {}),
+  CustomCall(&b, "UnknownTarget", /*operands=*/{},
+             ShapeUtil::MakeShape(F32, {}),
              /*opaque=*/"");
   ASSERT_FALSE(Execute(&b, {}).ok());
 }
-
-void Callback_Memcpy(CUstream stream, void** buffers, const char* /*opaque*/,
-                     size_t /*opaque_len*/) {
+void Callback_Memcpy(se::gpu::GpuStreamHandle stream, void** buffers,
+                     const char* /*opaque*/, size_t /*opaque_len*/) {
   void* src = buffers[0];
   void* dst = buffers[1];
-  auto err = cudaMemcpyAsync(dst, src, /*count=*/sizeof(float) * 128,
-                             cudaMemcpyDeviceToDevice, stream);
-  CHECK_EQ(err, cudaSuccess);
+  auto err = gpuMemcpyAsync(dst, src, /*count=*/sizeof(float) * 128,
+                            gpuMemcpyDeviceToDevice, stream);
+  ASSERT_EQ(err, gpuSuccess);
 }
-XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_Memcpy, "CUDA");
+XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_Memcpy, PLATFORM);
 TEST_F(CustomCallTest, Memcpy) {
   XlaBuilder b(TestName());
   CustomCall(&b, "Callback_Memcpy",
@@ -73,12 +98,12 @@ TEST_F(CustomCallTest, Memcpy) {
 
 // Check that opaque handles nulls within the string.
 std::string& kExpectedOpaque = *new std::string("abc\0def", 7);
-void Callback_Opaque(CUstream /*stream*/, void** /*buffers*/,
+void Callback_Opaque(se::gpu::GpuStreamHandle /*stream*/, void** /*buffers*/,
                      const char* opaque, size_t opaque_len) {
   std::string opaque_str(opaque, opaque_len);
-  CHECK_EQ(opaque_str, kExpectedOpaque);
+  ASSERT_EQ(opaque_str, kExpectedOpaque);
 }
-XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_Opaque, "CUDA");
+XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_Opaque, PLATFORM);
 TEST_F(CustomCallTest, Opaque) {
   XlaBuilder b(TestName());
   CustomCall(&b, "Callback_Opaque", /*operands=*/{},
@@ -86,74 +111,32 @@ TEST_F(CustomCallTest, Opaque) {
   TF_ASSERT_OK(Execute(&b, {}).status());
 }
 
-void Callback_SubBuffers(CUstream stream, void** buffers,
+void Callback_SubBuffers(se::gpu::GpuStreamHandle stream, void** buffers,
                          const char* /*opaque*/, size_t /*opaque_len*/) {
   // `buffers` is a flat array containing device pointers to the following.
   //
-  //   0: root tuple of param 0
-  //   1:   param 0 at tuple index {0}, shape f32[128]
-  //   2:   param 0 at tuple index {1}, shape f32[256]
-  //   3: root tuple of param 1
-  //   4:   param 1 at tuple index {0}, shape f32[1024]
-  //   5:   param 1 at tuple index {1}, shape f32[8]
-  //   6: root tuple of custom-call result
-  //   7:   result at tuple index {0}, shape f32[8]
-  //   8:   result at tuple index {1}, shape (f32[128], f32[256])
-  //   9:     result at tuple index {1, 0}, shape f32[128]
-  //  10:     result at tuple index {1, 1}, shape f32[256]
-  //  11:   result at tuple index {2}, shape f32[1024]
+  //  0:  param 0 at tuple index {0}, shape f32[128]
+  //  1:  param 0 at tuple index {1}, shape f32[256]
+  //  2:  param 1 at tuple index {0}, shape f32[1024]
+  //  3:  param 1 at tuple index {1}, shape f32[8]
+  //  4:  result at tuple index {0}, shape f32[8]
+  //  5:  result at tuple index {1, 0}, shape f32[128]
+  //  6:  result at tuple index {1, 1}, shape f32[256]
+  //  7:  result at tuple index {2}, shape f32[1024]
   //
-  // It's the contract of custom-call that the non-root pointers (i.e.
-  // everything other than indices 0, 3, and 6) may be null, if XLA is unable to
-  // analyze the program well enough to determine for sure what's in those
-  // buffers.  For this simple example, all of the buffers should be non-null.
 
-  // Check the param 0 tuple, namely that
-  //
-  //   (*buffers[0])[0] == buffers[1] and
-  //   (*buffers[0])[1] == buffers[2].
-  //
-  // because buffers contains pointers to device memory, we have to retrieve
-  // these values via cudaMemcpy.
-  void* p0[2];
-  cudaMemcpy(p0, buffers[0], 2 * sizeof(void*), cudaMemcpyDeviceToHost);
-  CHECK_EQ(p0[0], buffers[1]);
-  CHECK_EQ(p0[1], buffers[2]);
-
-  // Check the param 1 tuple, namely that
-  //
-  //   (*buffers[3])[0] == buffers[4]
-  //   (*buffers[3])[1] == buffers[5].
-  void* p1[2];
-  cudaMemcpy(p1, buffers[3], 2 * sizeof(void*), cudaMemcpyDeviceToHost);
-  CHECK_EQ(p1[0], buffers[4]);
-  CHECK_EQ(p1[1], buffers[5]);
-
-  // We don't have an equivalent check for the output tuple (i.e. we don't check
-  // (*buffers[6])[0] == buffers[7]) because it's up to us to set the tuple
-  // as part of this custom-call.
-
-  // Write the results.  First set the root tuple output buffer to {b7, b8,
-  // b11}.
-  void* root[3] = {buffers[7], buffers[8], buffers[11]};
-  cudaMemcpy(buffers[6], root, 3 * sizeof(void*), cudaMemcpyHostToDevice);
-
-  // Now set the sub-tuple output buffer at index 8 to {b9, b10}.
-  void* sub_tuple[2] = {buffers[9], buffers[10]};
-  cudaMemcpy(buffers[8], sub_tuple, 2 * sizeof(void*), cudaMemcpyDeviceToHost);
-
-  // Now set output leaf buffers 7, 9, 10, and 11, copying data from the
-  // corresponding same-sized inputs.
-  cudaMemcpyAsync(buffers[7], buffers[5], 8 * sizeof(float),
-                  cudaMemcpyDeviceToDevice, stream);
-  cudaMemcpyAsync(buffers[9], buffers[1], 128 * sizeof(float),
-                  cudaMemcpyDeviceToDevice, stream);
-  cudaMemcpyAsync(buffers[10], buffers[2], 256 * sizeof(float),
-                  cudaMemcpyDeviceToDevice, stream);
-  cudaMemcpyAsync(buffers[11], buffers[4], 1024 * sizeof(float),
-                  cudaMemcpyDeviceToDevice, stream);
+  // Set output leaf buffers, copying data from the corresponding same-sized
+  // inputs.
+  gpuMemcpyAsync(buffers[4], buffers[3], 8 * sizeof(float),
+                 gpuMemcpyDeviceToDevice, stream);
+  gpuMemcpyAsync(buffers[5], buffers[0], 128 * sizeof(float),
+                 gpuMemcpyDeviceToDevice, stream);
+  gpuMemcpyAsync(buffers[6], buffers[1], 256 * sizeof(float),
+                 gpuMemcpyDeviceToDevice, stream);
+  gpuMemcpyAsync(buffers[7], buffers[2], 1024 * sizeof(float),
+                 gpuMemcpyDeviceToDevice, stream);
 }
-XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_SubBuffers, "CUDA");
+XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_SubBuffers, PLATFORM);
 TEST_F(CustomCallTest, SubBuffers) {
   XlaBuilder b(TestName());
   CustomCall(&b, "Callback_SubBuffers", /*operands=*/
@@ -184,6 +167,114 @@ TEST_F(CustomCallTest, SubBuffers) {
   EXPECT_THAT(result.data<float>({1, 1}), ::testing::Each(2));
   EXPECT_THAT(result.data<float>({2}), ::testing::Each(3));
 }
+
+// The test case for custom call with tokens encodes the arguments and result
+// type using a string with A(=Array), T(=Token) and {} for Tuples. It also
+// encodes the check that the callback has to do in terms of a string of A and T
+// where all the As need to be non-null and all the Ts need to be null. This is
+// passed to the custom call as its opaque data.
+//
+// As an example, "ATTA" for an input encodes 4 inputs to custom call,
+// "{A{A}T}" for output encodes a custom call with return type containing a
+// single tuple, with another tuple as the 2nd element. For outputs, it is
+// either a single element or a tuple. Note, no error checking is performed.
+
+struct TokenTestCase {
+  std::string input;
+  std::string output;
+  std::string opaque;
+};
+
+std::ostream& operator<<(std::ostream& s, const TokenTestCase& tc) {
+  s << tc.input << "x" << tc.output << "x" << tc.opaque;
+  return s;
+}
+
+void Callback_Tokens(se::gpu::GpuStreamHandle stream, void** buffers,
+                     const char* opaque, size_t opaque_len) {
+  for (int i = 0; i < opaque_len; ++i) {
+    char c = opaque[i];
+    ASSERT_TRUE(c == 'A' || c == 'T');
+    if (c == 'A') {
+      ASSERT_NE(buffers[i], nullptr);
+    } else {
+      ASSERT_EQ(buffers[i], nullptr);
+    }
+  }
+}
+
+XLA_REGISTER_CUSTOM_CALL_TARGET(Callback_Tokens, PLATFORM);
+
+std::vector<TokenTestCase> GetTokenTestCases() {
+  return {{"{AT}{AT}", "{A{AT}A}", "ATATAATA"},  // tokens in input and output
+          {"{A}", "T", "AT"},                    // single token as output
+          {"{{T}}", "A", "TA"},                  // single token as input
+          {"AA", "{TA}", "AATA"},
+          {"TA{TA{TA}}", "{AA}", "TATATAAA"}};
+}
+
+class CustomCallTokensTest
+    : public ::testing::WithParamInterface<TokenTestCase>,
+      public ClientLibraryTestBase {
+ public:
+  static std::vector<XlaOp> BuildInputs(XlaBuilder& b,
+                                        std::istringstream& str) {
+    std::vector<XlaOp> values;
+    while (!str.eof()) {
+      int ch = str.get();
+      if (ch == 'A') {
+        values.push_back(Broadcast(ConstantR0WithType(&b, F32, 1), {128}));
+      } else if (ch == 'T') {
+        values.push_back(CreateToken(&b));
+      } else if (ch == '{') {
+        // build a tuple of values. This will eat the } as well.
+        std::vector<XlaOp> tuple_elements = BuildInputs(b, str);
+        values.push_back(Tuple(&b, tuple_elements));
+      } else if (ch == '}') {
+        break;
+      }
+    }
+    return values;
+  }
+
+  static std::vector<Shape> BuildOutputType(std::istringstream& str) {
+    std::vector<Shape> shapes;
+    while (!str.eof()) {
+      int ch = str.get();
+      if (ch == 'A') {
+        shapes.push_back(ShapeUtil::MakeShape(F32, {8}));
+      } else if (ch == 'T') {
+        shapes.push_back(ShapeUtil::MakeTokenShape());
+      } else if (ch == '{') {
+        // build a tuple shape. This will eat the } as well.
+        std::vector<Shape> tuple_elements = BuildOutputType(str);
+        shapes.push_back(ShapeUtil::MakeTupleShape(tuple_elements));
+      } else if (ch == '}') {
+        break;
+      }
+    }
+    return shapes;
+  }
+};
+
+TEST_P(CustomCallTokensTest, TokensTest) {
+  const TokenTestCase& tc = GetParam();
+
+  XlaBuilder b("CustomCallTokens");
+
+  std::istringstream input(tc.input);
+  std::istringstream output(tc.output);
+  std::vector<XlaOp> call_inputs = BuildInputs(b, input);
+  std::vector<Shape> call_output = BuildOutputType(output);
+  ASSERT_EQ(call_output.size(), 1);
+
+  CustomCall(&b, "Callback_Tokens", call_inputs, call_output.front(),
+             tc.opaque);
+  TF_ASSERT_OK(Execute(&b, {}).status());
+}
+
+INSTANTIATE_TEST_CASE_P(CustomCallTokens, CustomCallTokensTest,
+                        ::testing::ValuesIn(GetTokenTestCases()));
 
 }  // anonymous namespace
 }  // namespace xla

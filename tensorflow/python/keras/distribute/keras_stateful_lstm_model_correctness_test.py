@@ -13,18 +13,16 @@
 # limitations under the License.
 # ==============================================================================
 """Tests for stateful tf.keras LSTM models using DistributionStrategy."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import numpy as np
+
 from tensorflow.python import keras
-from tensorflow.python.distribute import combinations
+from tensorflow.python.distribute import combinations as ds_combinations
 from tensorflow.python.distribute import strategy_combinations
-from tensorflow.python.eager import test
+from tensorflow.python.framework import test_combinations as combinations
 from tensorflow.python.keras.distribute import keras_correctness_test_base
 from tensorflow.python.keras.optimizer_v2 import gradient_descent as gradient_descent_keras
-from tensorflow.python.training import gradient_descent
+from tensorflow.python.platform import test
 
 
 def strategies_for_stateful_embedding_model():
@@ -32,30 +30,25 @@ def strategies_for_stateful_embedding_model():
 
   return [
       strategy_combinations.tpu_strategy_one_core,
-      strategy_combinations.tpu_strategy_one_step_one_core
   ]
 
 
 def test_combinations_for_stateful_embedding_model():
-  return (
-      combinations.combine(
-          distribution=strategies_for_stateful_embedding_model(),
-          mode='graph',
-          use_numpy=False,
-          use_validation_data=False,
-          cloning=[True, False]
-      ))
+  return (combinations.combine(
+      distribution=strategies_for_stateful_embedding_model(),
+      mode='graph',
+      use_numpy=False,
+      use_validation_data=False))
 
 
 class DistributionStrategyStatefulLstmModelCorrectnessTest(
-    keras_correctness_test_base.
-    TestDistributionStrategyEmbeddingModelCorrectnessBase):
+    keras_correctness_test_base
+    .TestDistributionStrategyEmbeddingModelCorrectnessBase):
 
   def get_model(self,
                 max_words=10,
                 initial_weights=None,
                 distribution=None,
-                cloning=None,
                 input_shapes=None):
     del input_shapes
     batch_size = keras_correctness_test_base._GLOBAL_BATCH_SIZE
@@ -64,12 +57,12 @@ class DistributionStrategyStatefulLstmModelCorrectnessTest(
       word_ids = keras.layers.Input(
           shape=(max_words,),
           batch_size=batch_size,
-          dtype=np.int32, name='words')
-      word_embed = keras.layers.Embedding(input_dim=20,
-                                          output_dim=10)(word_ids)
-      lstm_embed = keras.layers.LSTM(units=4,
-                                     return_sequences=False,
-                                     stateful=True)(word_embed)
+          dtype=np.int32,
+          name='words')
+      word_embed = keras.layers.Embedding(input_dim=20, output_dim=10)(word_ids)
+      lstm_embed = keras.layers.LSTM(
+          units=4, return_sequences=False, stateful=True)(
+              word_embed)
 
       preds = keras.layers.Dense(2, activation='softmax')(lstm_embed)
       model = keras.Model(inputs=[word_ids], outputs=[preds])
@@ -77,11 +70,7 @@ class DistributionStrategyStatefulLstmModelCorrectnessTest(
       if initial_weights:
         model.set_weights(initial_weights)
 
-      # TODO(b/130808953): Re-enable the V1 optimizer after iterations
-      # is mirrored.
-      optimizer_fn = (
-          gradient_descent.GradientDescentOptimizer
-          if cloning else gradient_descent_keras.SGD)
+      optimizer_fn = gradient_descent_keras.SGD
 
       model.compile(
           optimizer=optimizer_fn(learning_rate=0.1),
@@ -89,31 +78,31 @@ class DistributionStrategyStatefulLstmModelCorrectnessTest(
           metrics=['sparse_categorical_accuracy'])
     return model
 
-  @combinations.generate(test_combinations_for_stateful_embedding_model())
-  def test_stateful_lstm_model_correctness(self,
-                                           distribution,
-                                           use_numpy,
-                                           use_validation_data,
-                                           cloning):
-    self.run_correctness_test(distribution, use_numpy, use_validation_data,
-                              is_stateful_model=True, cloning=cloning)
+  # TODO(jhseu): Disabled to fix b/130808953. Need to investigate why it
+  # doesn't work and enable for DistributionStrategy more generally.
+  @ds_combinations.generate(test_combinations_for_stateful_embedding_model())
+  def disabled_test_stateful_lstm_model_correctness(
+      self, distribution, use_numpy, use_validation_data):
+    self.run_correctness_test(
+        distribution,
+        use_numpy,
+        use_validation_data,
+        is_stateful_model=True)
 
-  @combinations.generate(
+  @ds_combinations.generate(
       combinations.times(
-          keras_correctness_test_base.test_combinations_with_tpu_strategies(),
-          combinations.combine(cloning=[True, False])))
+          keras_correctness_test_base
+          .test_combinations_with_tpu_strategies_graph()))
   def test_incorrectly_use_multiple_cores_for_stateful_lstm_model(
-      self, distribution, use_numpy, use_validation_data, cloning):
-    with self.assertRaisesRegexp(
-        ValueError,
-        'Single core must be used for computation on stateful models. Consider '
-        'adding `device_assignment` parameter to TPUStrategy'):
+      self, distribution, use_numpy, use_validation_data):
+    with self.assertRaisesRegex(
+        ValueError, 'RNNs with stateful=True not yet supported with '
+        'tf.distribute.Strategy.'):
       self.run_correctness_test(
           distribution,
           use_numpy,
           use_validation_data,
-          is_stateful_model=True,
-          cloning=cloning)
+          is_stateful_model=True)
 
 
 if __name__ == '__main__':

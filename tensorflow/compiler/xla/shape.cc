@@ -48,7 +48,7 @@ Shape::Shape(const ShapeProto& shape_proto) {
   }
   tuple_shapes_.reserve(shape_proto.tuple_shapes_size());
   for (const ShapeProto& element_shape : shape_proto.tuple_shapes()) {
-    *add_tuple_shapes() = Shape(element_shape);
+    tuple_shapes_.emplace_back(element_shape);
   }
   if (shape_proto.has_layout()) {
     *mutable_layout() = Layout::CreateFromProto(shape_proto.layout());
@@ -80,6 +80,25 @@ string Shape::ToString(bool print_layout) const {
     return ShapeUtil::HumanStringWithLayout(*this);
   } else {
     return ShapeUtil::HumanString(*this);
+  }
+}
+
+bool Shape::IsInteger() const {
+  switch (element_type()) {
+    case PrimitiveType::S8:
+    case PrimitiveType::S16:
+    case PrimitiveType::S32:
+    case PrimitiveType::S64:
+    case PrimitiveType::U8:
+    case PrimitiveType::U16:
+    case PrimitiveType::U32:
+    case PrimitiveType::U64:
+      return true;
+    case PrimitiveType::TUPLE:
+      return absl::c_any_of(tuple_shapes_,
+                            [](const Shape& s) { return s.IsInteger(); });
+    default:
+      return false;
   }
 }
 
@@ -141,9 +160,16 @@ bool Shape::Equal::operator()(const Shape& lhs, const Shape& rhs) {
     }
   }
 
-  if (!ShapeUtil::SameDimensions(lhs, rhs)) {
-    VLOG(3) << "CompareShapes: lhs dimensions != rhs dimensions";
-    return false;
+  if (!ignore_dimensions_) {
+    if (!ShapeUtil::SameDimensions(lhs, rhs)) {
+      VLOG(3) << "CompareShapes: lhs dimensions != rhs dimensions";
+      return false;
+    }
+  } else {
+    if (!ShapeUtil::SameRank(lhs, rhs)) {
+      VLOG(3) << "CompareShapes: lhs rank != rhs rank";
+      return false;
+    }
   }
 
   if (!ignore_layout_) {
@@ -158,6 +184,9 @@ bool Shape::Equal::operator()(const Shape& lhs, const Shape& rhs) {
       }
       if (ignore_element_size_in_layout_) {
         equal.IgnoreElementSize();
+      }
+      if (ignore_memory_space_in_layout_) {
+        equal.IgnoreMemorySpace();
       }
       if (!equal(lhs.layout(), rhs.layout())) {
         VLOG(3) << "CompareShapes: lhs layout != rhs layout";

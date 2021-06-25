@@ -14,22 +14,16 @@
 # ==============================================================================
 """Tests for distributed training utility functions."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.keras import callbacks
-from tensorflow.python.keras.distribute import distributed_training_utils
+from tensorflow.python.keras.distribute import distributed_training_utils_v1
 from tensorflow.python.keras.optimizer_v2 import adam
 from tensorflow.python.platform import test
-from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import adam as v1_adam
 
 
 class DistributedTrainingUtilsTest(test.TestCase):
 
-  @test.mock.patch.object(logging, 'warning', autospec=True)
-  def test_validate_callbacks_predefined_callbacks(self, mock_warning):
+  def test_validate_callbacks_predefined_callbacks(self):
     supported_predefined_callbacks = [
         callbacks.TensorBoard(),
         callbacks.CSVLogger(filename='./log.csv'),
@@ -41,7 +35,7 @@ class DistributedTrainingUtilsTest(test.TestCase):
         callbacks.RemoteMonitor()
     ]
 
-    distributed_training_utils.validate_callbacks(
+    distributed_training_utils_v1.validate_callbacks(
         supported_predefined_callbacks, adam.Adam())
 
     unsupported_predefined_callbacks = [
@@ -50,12 +44,10 @@ class DistributedTrainingUtilsTest(test.TestCase):
     ]
 
     for callback in unsupported_predefined_callbacks:
-      with self.assertRaisesRegexp(
-          ValueError, 'You must specify a Keras Optimizer V2'):
-        distributed_training_utils.validate_callbacks([callback],
-                                                      v1_adam.AdamOptimizer())
-
-    self.assertEqual(0, mock_warning.call_count)
+      with self.assertRaisesRegex(ValueError,
+                                  'You must specify a Keras Optimizer V2'):
+        distributed_training_utils_v1.validate_callbacks(
+            [callback], v1_adam.AdamOptimizer())
 
 
 if __name__ == '__main__':

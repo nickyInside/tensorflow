@@ -31,11 +31,10 @@ class ModelPruner : public GraphOptimizer {
 
   string name() const override { return "model_pruner"; };
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* pruned_graph) override;
+  bool UsesFunctionLibrary() const override { return false; }
 
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& pruned_graph, double result) override;
+  Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                  GraphDef* optimized_graph) override;
 };
 
 }  // end namespace grappler
