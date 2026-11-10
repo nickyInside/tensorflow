@@ -14,9 +14,7 @@
 # ==============================================================================
 """Tests for the swig wrapper of clusters."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import concurrent.futures
 
 from tensorflow.core.protobuf import device_properties_pb2
 from tensorflow.python.framework import meta_graph
@@ -81,9 +79,9 @@ class ClusterTest(test.TestCase):
         self.assertLessEqual(1, len(peak_mem))
         snapshot = peak_mem['/job:localhost/replica:0/task:0/device:CPU:0']
         peak_usage = snapshot[0]
-        self.assertEqual(52, peak_usage)
+        self.assertEqual(12, peak_usage)
         live_tensors = snapshot[1]
-        self.assertEqual(15, len(live_tensors))
+        self.assertEqual(5, len(live_tensors))
 
   def testVirtualCluster(self):
     with ops.Graph().as_default() as g:
@@ -107,8 +105,8 @@ class ClusterTest(test.TestCase):
           disable_timeline=False,
           devices=[named_device])
       op_perfs, run_time, _ = grappler_cluster.MeasureCosts(grappler_item)
-      self.assertEqual(run_time, 0.000545)
-      self.assertEqual(len(op_perfs), 15)
+      self.assertEqual(run_time, 0.000209)
+      self.assertEqual(len(op_perfs), 5)
 
       estimated_perf = grappler_cluster.EstimatePerformance(named_device)
       self.assertEqual(7680.0, estimated_perf)
@@ -136,6 +134,32 @@ class ClusterTest(test.TestCase):
       self.assertTrue('Add' in op_names)
       self.assertTrue('MatMul' in op_names)
       self.assertEqual(op_names, sorted(op_names))
+
+  def testConcurrentListDevices(self):
+    cpu_properties = device_properties_pb2.DeviceProperties(
+        type='CPU', frequency=3000, num_cores=8
+    )
+    gpu_properties = device_properties_pb2.DeviceProperties(
+        type='GPU', frequency=1000, num_cores=60
+    )
+    named_cpu = device_properties_pb2.NamedDevice(
+        properties=cpu_properties, name='/CPU:0'
+    )
+    named_gpu = device_properties_pb2.NamedDevice(
+        properties=gpu_properties, name='/GPU:0'
+    )
+    grappler_cluster = cluster.Cluster(devices=[named_cpu, named_gpu])
+    self.addCleanup(grappler_cluster.Shutdown)
+
+    def list_device_names(_):
+      return sorted(device.name for device in grappler_cluster.ListDevices())
+
+    expected = ['/CPU:0', '/GPU:0']
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+      results = list(executor.map(list_device_names, range(64)))
+
+    for names in results:
+      self.assertEqual(names, expected)
 
   def testSupportDevices(self):
     with ops.Graph().as_default() as g:

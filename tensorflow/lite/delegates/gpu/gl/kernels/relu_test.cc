@@ -33,8 +33,8 @@ class ReluTest : public ::testing::Test {
   ReluTest() = default;
   ~ReluTest() override = default;
 
-  TensorRefFloat32 GetTensorRef(int ref) {
-    TensorRefFloat32 tensor_ref;
+  TensorRef<BHWC> GetTensorRef(int ref) {
+    TensorRef<BHWC> tensor_ref;
     tensor_ref.type = DataType::FLOAT32;
     tensor_ref.ref = ref;
     tensor_ref.shape = BHWC(1, 2, 2, 1);
@@ -45,12 +45,12 @@ class ReluTest : public ::testing::Test {
 TEST_F(ReluTest, Smoke) {
   OperationType op_type = OperationType::RELU;
   ReLUAttributes attr;
-  attr.clip = 0;
+  attr.activation_max = 0;
   attr.alpha = 0;
   SingleOpModel model({ToString(op_type), attr}, {GetTensorRef(0)},
                       {GetTensorRef(1)});
   ASSERT_TRUE(model.PopulateTensor(0, {-6.0, 0.0, 2.0, 8.0}));
-  ASSERT_TRUE(model.Invoke(*NewReLUNodeShader()));
+  ASSERT_OK(model.Invoke(*NewReLUNodeShader()));
   EXPECT_THAT(model.GetOutput(0),
               Pointwise(FloatNear(1e-6), {0.0, 0.0, 2.0, 8.0}));
 }
@@ -58,12 +58,12 @@ TEST_F(ReluTest, Smoke) {
 TEST_F(ReluTest, ClipOnly) {
   OperationType op_type = OperationType::RELU;
   ReLUAttributes attr;
-  attr.clip = 6;
+  attr.activation_max = 6;
   attr.alpha = 0;
   SingleOpModel model({ToString(op_type), attr}, {GetTensorRef(0)},
                       {GetTensorRef(1)});
   ASSERT_TRUE(model.PopulateTensor(0, {-6.0, 0.0, 2.0, 8.0}));
-  ASSERT_TRUE(model.Invoke(*NewReLUNodeShader()));
+  ASSERT_OK(model.Invoke(*NewReLUNodeShader()));
   EXPECT_THAT(model.GetOutput(0),
               Pointwise(FloatNear(1e-6), {0.0, 0.0, 2.0, 6.0}));
 }
@@ -71,12 +71,12 @@ TEST_F(ReluTest, ClipOnly) {
 TEST_F(ReluTest, AlphaOnly) {
   OperationType op_type = OperationType::RELU;
   ReLUAttributes attr;
-  attr.clip = 0;
+  attr.activation_max = 0;
   attr.alpha = 0.5;
   SingleOpModel model({ToString(op_type), attr}, {GetTensorRef(0)},
                       {GetTensorRef(1)});
   ASSERT_TRUE(model.PopulateTensor(0, {-6.0, 0.0, 2.0, 8.0}));
-  ASSERT_TRUE(model.Invoke(*NewReLUNodeShader()));
+  ASSERT_OK(model.Invoke(*NewReLUNodeShader()));
   EXPECT_THAT(model.GetOutput(0),
               Pointwise(FloatNear(1e-6), {-3.0, 0.0, 2.0, 8.0}));
 }
@@ -84,12 +84,68 @@ TEST_F(ReluTest, AlphaOnly) {
 TEST_F(ReluTest, ClipAndAlpha) {
   OperationType op_type = OperationType::RELU;
   ReLUAttributes attr;
-  attr.clip = 6;
+  attr.activation_max = 6;
   attr.alpha = 0.5;
   SingleOpModel model({ToString(op_type), attr}, {GetTensorRef(0)},
                       {GetTensorRef(1)});
   ASSERT_TRUE(model.PopulateTensor(0, {-6.0, 0.0, 2.0, 8.0}));
-  ASSERT_TRUE(model.Invoke(*NewReLUNodeShader()));
+  ASSERT_OK(model.Invoke(*NewReLUNodeShader()));
+  EXPECT_THAT(model.GetOutput(0),
+              Pointwise(FloatNear(1e-6), {-3.0, 0.0, 2.0, 6.0}));
+}
+
+TEST_F(ReluTest, ReLUN1Smoke) {
+  OperationType op_type = OperationType::RELU;
+  ReLUAttributes attr;
+  attr.activation_min = -1;
+  attr.activation_max = 0;
+  attr.alpha = 0;
+  SingleOpModel model({ToString(op_type), attr}, {GetTensorRef(0)},
+                      {GetTensorRef(1)});
+  ASSERT_TRUE(model.PopulateTensor(0, {-12.0f, -0.5f, 0.8f, 3.2f}));
+  ASSERT_OK(model.Invoke(*NewReLUNodeShader()));
+  EXPECT_THAT(model.GetOutput(0),
+              Pointwise(FloatNear(1e-6), {-1.0f, -0.5f, 0.8f, 3.2f}));
+}
+
+TEST_F(ReluTest, ReLUN1ClipOnly) {
+  OperationType op_type = OperationType::RELU;
+  ReLUAttributes attr;
+  attr.activation_min = -1;
+  attr.activation_max = 1;
+  attr.alpha = 0;
+  SingleOpModel model({ToString(op_type), attr}, {GetTensorRef(0)},
+                      {GetTensorRef(1)});
+  ASSERT_TRUE(model.PopulateTensor(0, {-12.0f, -0.5f, 0.8f, 3.2f}));
+  ASSERT_OK(model.Invoke(*NewReLUNodeShader()));
+  EXPECT_THAT(model.GetOutput(0),
+              Pointwise(FloatNear(1e-6), {-1.0f, -0.5f, 0.8f, 1.0f}));
+}
+
+TEST_F(ReluTest, ReLUN1AlphaOnly) {
+  OperationType op_type = OperationType::RELU;
+  ReLUAttributes attr;
+  attr.activation_min = -1;  // activation_min ignored if alpha != 0
+  attr.activation_max = 0;
+  attr.alpha = 0.5;
+  SingleOpModel model({ToString(op_type), attr}, {GetTensorRef(0)},
+                      {GetTensorRef(1)});
+  ASSERT_TRUE(model.PopulateTensor(0, {-6.0, 0.0, 2.0, 8.0}));
+  ASSERT_OK(model.Invoke(*NewReLUNodeShader()));
+  EXPECT_THAT(model.GetOutput(0),
+              Pointwise(FloatNear(1e-6), {-3.0, 0.0, 2.0, 8.0}));
+}
+
+TEST_F(ReluTest, ReLUN1ClipAndAlpha) {
+  OperationType op_type = OperationType::RELU;
+  ReLUAttributes attr;
+  attr.activation_min = -1;  // activation_min ignored if alpha != 0
+  attr.activation_max = 6;
+  attr.alpha = 0.5;
+  SingleOpModel model({ToString(op_type), attr}, {GetTensorRef(0)},
+                      {GetTensorRef(1)});
+  ASSERT_TRUE(model.PopulateTensor(0, {-6.0, 0.0, 2.0, 8.0}));
+  ASSERT_OK(model.Invoke(*NewReLUNodeShader()));
   EXPECT_THAT(model.GetOutput(0),
               Pointwise(FloatNear(1e-6), {-3.0, 0.0, 2.0, 6.0}));
 }

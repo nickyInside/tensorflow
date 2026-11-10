@@ -15,9 +15,16 @@ limitations under the License.
 #include "tensorflow/lite/tools/evaluation/stages/topk_accuracy_eval_stage.h"
 
 #include <stdint.h>
-#include <numeric>
 
+#include <algorithm>
+#include <cstddef>
+#include <numeric>
+#include <vector>
+
+#include "absl/log/log.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/lite/c/c_api_types.h"
+#include "tensorflow/lite/tools/evaluation/proto/evaluation_config.pb.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_stages.pb.h"
 
 namespace tflite {
@@ -27,8 +34,8 @@ namespace {
 std::vector<int> GetTopKIndices(const std::vector<float>& values, int k) {
   std::vector<int> indices(values.size());
   std::iota(indices.begin(), indices.end(), 0);
-  std::sort(indices.begin(), indices.end(),
-            [&values](int a, int b) { return values[a] > values[b]; });
+  std::stable_sort(indices.begin(), indices.end(),
+                   [&values](int a, int b) { return values[a] > values[b]; });
   indices.resize(k);
   return indices;
 }
@@ -104,12 +111,7 @@ TfLiteStatus TopkAccuracyEvalStage::Run() {
   }
 
   std::vector<int> top_k = GetTopKIndices(probabilities, params.k());
-  int ground_truth_index = GroundTruthIndex(*ground_truth_label_);
-  if (ground_truth_index < 0) {
-    LOG(ERROR) << "Invalid ground truth label";
-    return kTfLiteError;
-  }
-  UpdateCounts(top_k, ground_truth_index);
+  UpdateCounts(top_k);
   return kTfLiteOk;
 }
 
@@ -126,10 +128,9 @@ EvaluationStageMetrics TopkAccuracyEvalStage::LatestMetrics() {
   return metrics;
 }
 
-void TopkAccuracyEvalStage::UpdateCounts(const std::vector<int>& topk_indices,
-                                         int ground_truth_index) {
+void TopkAccuracyEvalStage::UpdateCounts(const std::vector<int>& topk_indices) {
   for (size_t i = 0; i < topk_indices.size(); ++i) {
-    if (ground_truth_index == topk_indices[i]) {
+    if (*ground_truth_label_ == ground_truth_labels_[topk_indices[i]]) {
       for (size_t j = i; j < topk_indices.size(); j++) {
         accuracy_counts_[j] += 1;
       }
@@ -137,16 +138,6 @@ void TopkAccuracyEvalStage::UpdateCounts(const std::vector<int>& topk_indices,
     }
   }
   num_runs_++;
-}
-
-int TopkAccuracyEvalStage::GroundTruthIndex(const std::string& label) const {
-  auto index = std::find(ground_truth_labels_.cbegin(),
-                         ground_truth_labels_.cend(), label);
-  if (index == ground_truth_labels_.end()) {
-    LOG(ERROR) << "Invalid label: " << label;
-    return -1;
-  }
-  return std::distance(ground_truth_labels_.cbegin(), index);
 }
 
 }  // namespace evaluation

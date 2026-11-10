@@ -19,8 +19,8 @@ limitations under the License.
 #include "tensorflow/core/framework/function.pb.h"
 #include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/framework/tensor.pb.h"
-#include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/strcat.h"
 #include "tensorflow/core/public/session_options.h"
 
 using tensorflow::GraphDef;
@@ -285,8 +285,8 @@ TF_Operation* RandomUniform(TF_Operation* shape, TF_DataType dtype,
 
 void Split3Helper(TF_Operation* input, TF_Graph* graph, TF_Status* s,
                   const char* name, TF_Operation** op) {
-  TF_Operation* zero = ScalarConst(
-      0, graph, s, ::tensorflow::strings::StrCat(name, "_const0").c_str());
+  TF_Operation* zero =
+      ScalarConst(0, graph, s, absl::StrCat(name, "_const0").c_str());
   TF_OperationDescription* desc = TF_NewOperation(graph, "Split", name);
   TF_AddInput(desc, {zero, 0});
   TF_AddInput(desc, {input, 0});
@@ -443,7 +443,9 @@ std::vector<std::pair<string, string>> GetGradDefs(
 
 std::vector<string> GetFuncNames(const tensorflow::GraphDef& graph_def) {
   std::vector<string> names;
-  for (const tensorflow::FunctionDef& func : graph_def.library().function()) {
+  auto functions = graph_def.library().function();
+  names.reserve(functions.size());
+  for (const tensorflow::FunctionDef& func : functions) {
     names.push_back(func.signature().name());
   }
   std::sort(names.begin(), names.end());

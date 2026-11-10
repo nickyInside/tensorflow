@@ -14,10 +14,6 @@
 # ==============================================================================
 """The Categorical distribution class."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
@@ -266,7 +262,7 @@ class Categorical(distribution.Distribution):
     return constant_op.constant([], dtype=dtypes.int32)
 
   def _event_shape(self):
-    return tensor_shape.scalar()
+    return tensor_shape.TensorShape([])
 
   def _sample_n(self, n, seed=None):
     if self.logits.get_shape().ndims == 2:
@@ -311,8 +307,10 @@ class Categorical(distribution.Distribution):
     k, logits = _broadcast_cat_event_and_params(
         k, self.logits, base_dtype=self.dtype.base_dtype)
 
-    return -nn_ops.sparse_softmax_cross_entropy_with_logits(labels=k,
-                                                            logits=logits)
+    # pylint: disable=invalid-unary-operand-type
+    return -nn_ops.sparse_softmax_cross_entropy_with_logits(
+        labels=k,
+        logits=logits)
 
   def _entropy(self):
     return -math_ops.reduce_sum(

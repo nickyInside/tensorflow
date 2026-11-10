@@ -13,34 +13,33 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/tools/graph_transforms/fold_constants_lib.h"
-
 #include "tensorflow/core/common_runtime/constant_folding.h"
-#include "tensorflow/core/graph/graph_constructor.h"
+#include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/graph/node_builder.h"
 #include "tensorflow/core/graph/subgraph.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/public/session.h"
+#include "tensorflow/tools/graph_transforms/fold_constants_lib.h"
 #include "tensorflow/tools/graph_transforms/transform_utils.h"
 
 namespace tensorflow {
 namespace graph_transforms {
 
 // Changes the op type of a specified op.
-Status RenameOp(const GraphDef& input_graph_def,
-                const TransformFuncContext& context,
-                GraphDef* output_graph_def) {
+absl::Status RenameOp(const GraphDef& input_graph_def,
+                      const TransformFuncContext& context,
+                      GraphDef* output_graph_def) {
   if (!context.params.count("old_op_name") ||
       (context.params.at("old_op_name").size() != 1) ||
       !context.params.count("new_op_name") ||
       (context.params.at("new_op_name").size() != 1)) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "rename_op expects exactly one 'old_op_name' and 'new_op_name' "
         "argument, e.g. rename_op(old_op_name=Mul, new_op_name=Multiply)");
   }
 
-  const string old_op_name = context.params.at("old_op_name")[0];
-  const string new_op_name = context.params.at("new_op_name")[0];
+  const std::string old_op_name = context.params.at("old_op_name")[0];
+  const std::string new_op_name = context.params.at("new_op_name")[0];
   output_graph_def->Clear();
   for (const NodeDef& node : input_graph_def.node()) {
     NodeDef* new_node = output_graph_def->mutable_node()->Add();
@@ -50,7 +49,7 @@ Status RenameOp(const GraphDef& input_graph_def,
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_GRAPH_TRANSFORM("rename_op", RenameOp);

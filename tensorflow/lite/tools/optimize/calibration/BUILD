@@ -1,29 +1,94 @@
-load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+load("//tensorflow/lite:build_def.bzl", "tflite_copts")
+load("//tensorflow/lite:special_rules.bzl", "tflite_portable_test_suite")
 
-package(default_visibility = [
-    "//visibility:public",
-])
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    default_visibility = [
+        "//visibility:public",
+    ],
+    licenses = ["notice"],
+)
 
-licenses(["notice"])  # Apache 2.0
+cc_library(
+    name = "builtin_logging_op",
+    srcs = ["builtin_logging_ops/lstm.cc"],
+    hdrs = ["builtin_logging_ops/lstm.h"],
+    copts = tflite_copts(),
+    deps = [
+        ":calibration_logger",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite/core:framework_stable",
+        "//tensorflow/lite/core/api",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/kernels:kernel_util",
+        "//tensorflow/lite/kernels:lstm_shared",
+        "//tensorflow/lite/kernels:op_macros",
+        "//tensorflow/lite/kernels/internal:reference",
+        "//tensorflow/lite/kernels/internal:tensor_utils",
+        "@ruy//ruy/profiler:instrumentation",
+    ],
+)
+
+cc_library(
+    name = "custom_logging_op",
+    srcs = ["custom_logging_ops/lstm.cc"],
+    hdrs = ["custom_logging_ops/lstm.h"],
+    copts = tflite_copts(),
+    deps = [
+        ":calibration_logger",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite/core:framework_stable",
+        "//tensorflow/lite/core/api",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/kernels:kernel_util",
+        "//tensorflow/lite/kernels:lstm_shared",
+        "//tensorflow/lite/kernels:op_macros",
+        "//tensorflow/lite/kernels/internal:reference",
+        "//tensorflow/lite/kernels/internal:tensor_utils",
+    ],
+)
 
 cc_library(
     name = "calibrator_lib",
     srcs = ["calibrator.cc"],
     hdrs = ["calibrator.h"],
+    copts = tflite_copts(),
     deps = [
+        ":builtin_logging_op",
         ":calibration_common",
         ":calibration_logger",
         ":calibration_reader",
+        ":custom_logging_op",
+        ":logging_op",
         ":logging_op_resolver",
-        ":node_info_delegate",
+        "//tensorflow/compiler/mlir/lite:allocation",
+        "//tensorflow/compiler/mlir/lite/schema:schema_utils",
         "//tensorflow/lite:framework",
-        "//tensorflow/lite:string_util",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite:string",
+        "//tensorflow/lite/core:framework",
         "//tensorflow/lite/core/api",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/schema:schema_fbs",
-        "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@flatbuffers",
     ],
 )
@@ -35,18 +100,30 @@ tf_cc_test(
         "--test_model_file=$(location //tensorflow/lite:testdata/multi_add.bin)",
     ],
     data = [
+        "//tensorflow/lite:testdata/call_once_mul.bin",
+        "//tensorflow/lite:testdata/custom_lstm.bin",
+        "//tensorflow/lite:testdata/lstm.bin",
         "//tensorflow/lite:testdata/multi_add.bin",
+        "//tensorflow/lite:testdata/multi_subgraphs_while.bin",
+        "//tensorflow/lite:testdata/unidirectional_sequence_lstm.bin",
     ],
     tags = [
         "tflite_not_portable_android",
         "tflite_not_portable_ios",
     ],
     deps = [
+        ":calibration_reader",
         ":calibrator_lib",
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/lite:framework",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite:string",
+        "//tensorflow/lite/c:c_api_types",
+        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core:framework",
+        "//tensorflow/lite/core/kernels:builtin_ops",
+        "//tensorflow/lite/schema:schema_fbs",
+        "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_googletest//:gtest",
     ],
 )
@@ -55,11 +132,15 @@ cc_library(
     name = "logging_op_resolver",
     srcs = ["logging_op_resolver.cc"],
     hdrs = ["logging_op_resolver.h"],
+    copts = tflite_copts(),
     deps = [
         ":calibration_common",
         "//tensorflow/lite:framework",
+        "//tensorflow/lite:util",
+        "//tensorflow/lite/c:common",
         "//tensorflow/lite/core/api",
-        "@com_google_absl//absl/memory",
+        "//tensorflow/lite/schema:schema_fbs",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -67,10 +148,14 @@ cc_test(
     name = "logging_op_resolver_test",
     srcs = ["logging_op_resolver_test.cc"],
     deps = [
+        ":calibration_common",
         ":logging_op_resolver",
         "//tensorflow/lite:framework",
+        "//tensorflow/lite/c:c_api_types",
+        "//tensorflow/lite/c:common",
         "//tensorflow/lite/kernels:builtin_ops",
-        "@com_google_googletest//:gtest",
+        "//tensorflow/lite/schema:schema_fbs",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -78,61 +163,49 @@ cc_library(
     name = "calibration_reader",
     srcs = ["calibration_reader.cc"],
     hdrs = ["calibration_reader.h"],
+    copts = tflite_copts(),
     deps = [
         ":calibration_logger",
         "//tensorflow/lite:framework",
-        "@com_google_absl//absl/memory",
+        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core:framework",
+        "//tensorflow/lite/core/c:c_api_types",
+        "//tensorflow/lite/schema:schema_fbs",
+        "@com_google_absl//absl/container:flat_hash_map",
     ],
 )
 
 cc_library(
     name = "calibration_logger",
+    srcs = ["calibration_logger.cc"],
     hdrs = ["calibration_logger.h"],
+    copts = tflite_copts(),
     deps = [
-        "//tensorflow/core:tflite_portable_logging",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite:framework",
+        "//tensorflow/lite:minimal_logging",
+        "//tensorflow/lite/c:c_api_types",
+        "//tensorflow/lite/core/api",
+        "//tensorflow/lite/core/c:common",
+        "@com_google_absl//absl/container:flat_hash_map",
     ],
 )
 
 cc_library(
     name = "calibration_common",
     hdrs = ["calibration_common.h"],
+    copts = tflite_copts(),
     deps = [
         "//tensorflow/lite:framework",
     ],
 )
 
 cc_library(
-    name = "node_info_delegate",
-    srcs = ["node_info_delegate.cc"],
-    hdrs = ["node_info_delegate.h"],
+    name = "logging_op",
+    hdrs = ["logging_op.h"],
+    copts = tflite_copts(),
     deps = [
-        ":calibration_common",
-        "//tensorflow/lite:framework",
-    ],
-)
-
-tf_cc_test(
-    name = "node_info_delegate_test",
-    srcs = ["node_info_delegate_test.cc"],
-    args = [
-        "--test_model_file=$(location //tensorflow/lite/tools/optimize:testdata/single_conv_weights_min_0_max_plus_10.bin)",
-    ],
-    data = [
-        "//tensorflow/lite/tools/optimize:testdata/single_conv_weights_min_0_max_plus_10.bin",
-    ],
-    tags = [
-        "tflite_not_portable_android",
-        "tflite_not_portable_ios",
-    ],
-    deps = [
-        ":node_info_delegate",
-        "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
-        "//tensorflow/lite:framework",
-        "//tensorflow/lite/kernels:builtin_ops",
-        "//tensorflow/lite/tools/optimize:test_util",
-        "@com_google_googletest//:gtest",
+        ":calibration_logger",
+        "//tensorflow/lite/core/c:common",
     ],
 )
 

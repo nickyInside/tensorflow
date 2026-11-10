@@ -193,7 +193,7 @@ TEST(HingeLoss, ComputeDualLoss) {
 TEST(HingeLoss, ConvertLabel) {
   HingeLossUpdater loss_updater;
   float example_label = 1.0;
-  Status status;
+  absl::Status status;
 
   // A label with value 1.0 should remain intact.
   TF_EXPECT_OK(loss_updater.ConvertLabel(&example_label));
@@ -213,7 +213,7 @@ TEST(HingeLoss, ConvertLabel) {
 TEST(HingeLoss, ComputeUpdatedDual) {
   HingeLossUpdater loss_updater;
   // For the two tests belows, y*wx=1 after the update which is a
-  // non-differetiable point of the hinge loss and TestComputeUpdatedDual
+  // non-differentiable point of the hinge loss and TestComputeUpdatedDual
   // cannot be used. Check value of the dual variable instead.
   EXPECT_NEAR(0.507,
               loss_updater.ComputeUpdatedDual(
@@ -338,7 +338,7 @@ TEST(PoissonLoss, ConvertLabel) {
   PoissonLossUpdater loss_updater;
   float example_label = -1.0;
   // Negative label should throw an error.
-  Status status = loss_updater.ConvertLabel(&example_label);
+  absl::Status status = loss_updater.ConvertLabel(&example_label);
   EXPECT_FALSE(status.ok());
 }
 

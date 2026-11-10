@@ -16,7 +16,9 @@ limitations under the License.
 #include "tensorflow/core/framework/run_handler_util.h"
 
 #include <vector>
+
 #include "tensorflow/core/lib/strings/strcat.h"
+#include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/test.h"
 namespace tensorflow {
@@ -35,7 +37,7 @@ void VerifySchedulingRanges(int num_active_requests, int num_threads,
 
   ComputeInterOpSchedulingRanges(num_active_requests, num_threads,
                                  min_threads_per_request, &start, &end);
-  string range_str = "";
+  std::string range_str = "";
   for (int i = 0; i < num_active_requests; ++i) {
     if (i > 0) range_str += " ";
     range_str += strings::StrCat("[", start[i], ", ", end[i], ")");
@@ -105,12 +107,62 @@ TEST(RunHandlerUtilTest, TestComputeInterOpStealingRanges) {
   for (int i = 0; i < num_inter_op_threads; ++i) {
     int expected_start = stealing_ranges[i / 6][0];
     int expected_end = stealing_ranges[i / 6][1];
-    string message =
+    std::string message =
         strings::StrCat("Stealing range of thread ", i, " should be [",
                         expected_start, ", ", expected_end, "]");
     ASSERT_EQ(start_vec[i], expected_start) << message;
     ASSERT_EQ(end_vec[i], expected_end) << message;
   }
+}
+
+TEST(RunHandlerUtilTest, TestExponentialRequestDistribution) {
+  int num_active_requests = 3;
+  int num_threads = 10;
+  std::vector<int> actual_distribution =
+      ChooseRequestsWithExponentialDistribution(num_active_requests,
+                                                num_threads);
+
+  std::vector<int> expected_distribution{0, 0, 0, 0, 0, 1, 1, 1, 2, 2};
+  ASSERT_EQ(actual_distribution, expected_distribution);
+}
+
+TEST(RunHandlerUtilTest, TestParamFromEnvWithDefault) {
+  std::vector<double> result = ParamFromEnvWithDefault(
+      "RUN_HANDLER_TEST_ENV", std::vector<double>{0, 0, 0});
+  EXPECT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], 0);
+  EXPECT_EQ(result[1], 0);
+  EXPECT_EQ(result[2], 0);
+
+  std::vector<int> result2 = ParamFromEnvWithDefault("RUN_HANDLER_TEST_ENV",
+                                                     std::vector<int>{0, 0, 0});
+  EXPECT_EQ(result2.size(), 3);
+  EXPECT_EQ(result2[0], 0);
+  EXPECT_EQ(result2[1], 0);
+  EXPECT_EQ(result2[2], 0);
+
+  bool result3 =
+      ParamFromEnvBoolWithDefault("RUN_HANDLER_TEST_ENV_BOOL", false);
+  EXPECT_EQ(result3, false);
+
+  // Set environment variable.
+  EXPECT_EQ(setenv("RUN_HANDLER_TEST_ENV", "1,2,3", true), 0);
+  result = ParamFromEnvWithDefault("RUN_HANDLER_TEST_ENV",
+                                   std::vector<double>{0, 0, 0});
+  EXPECT_EQ(result.size(), 3);
+  EXPECT_EQ(result[0], 1);
+  EXPECT_EQ(result[1], 2);
+  EXPECT_EQ(result[2], 3);
+  result2 = ParamFromEnvWithDefault("RUN_HANDLER_TEST_ENV",
+                                    std::vector<int>{0, 0, 0});
+  EXPECT_EQ(result.size(), 3);
+  EXPECT_EQ(result2[0], 1);
+  EXPECT_EQ(result2[1], 2);
+  EXPECT_EQ(result2[2], 3);
+
+  EXPECT_EQ(setenv("RUN_HANDLER_TEST_ENV_BOOL", "true", true), 0);
+  result3 = ParamFromEnvBoolWithDefault("RUN_HANDLER_TEST_ENV_BOOL", false);
+  EXPECT_EQ(result3, true);
 }
 
 }  // namespace

@@ -19,8 +19,12 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/status/status.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/optimization_registry.h"
+#include "tensorflow/core/framework/device.h"
+#include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 
@@ -30,26 +34,25 @@ namespace tensorflow {
 // to test individual Tensorflow Optimization passes.
 class OptimizationPassRunner {
  public:
-  explicit OptimizationPassRunner()
-      : jit_level_(OptimizerOptions::GlobalJitLevel::
-                       OptimizerOptions_GlobalJitLevel_DEFAULT) {}
+  explicit OptimizationPassRunner() : jit_level_(OptimizerOptions::DEFAULT) {}
 
   // Increasing the Jit level will cause XLA to compile parts of the tensorflow
   // graph that it is able to.
-  Status SetJitLevel(OptimizerOptions::GlobalJitLevel jit_level);
+  absl::Status SetJitLevel(OptimizerOptions::GlobalJitLevel jit_level);
 
-  Status Run(absl::string_view pass_to_run, GraphDef input, GraphDef* result);
+  absl::Status Run(absl::string_view pass_to_run, GraphDef input,
+                   GraphDef* result);
 
-  Status AddCpus(int count) {
+  absl::Status AddCpus(int count) {
     return AddDevices(tensorflow::DEVICE_CPU, count);
   }
 
-  Status AddGpus(int count) {
+  absl::Status AddGpus(int count) {
     return AddDevices(tensorflow::DEVICE_GPU, count);
   }
 
  private:
-  Status AddDevices(absl::string_view type, int count);
+  absl::Status AddDevices(absl::string_view type, int count);
 
   OptimizerOptions::GlobalJitLevel jit_level_;
   std::vector<std::unique_ptr<Device>> devices_;

@@ -16,12 +16,32 @@ limitations under the License.
 #ifndef TENSORFLOW_PYTHON_LIB_CORE_PY_UTIL_H_
 #define TENSORFLOW_PYTHON_LIB_CORE_PY_UTIL_H_
 
+#include <Python.h>
+
+#include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
+
 // Fetch the exception message as a string. An exception must be set
 // (PyErr_Occurred() must be true).
-string PyExceptionFetch();
-}  // end namespace tensorflow
+std::string PyExceptionFetch();
+
+// Assert that the current thread may access the Python C API.
+//
+// On regular CPython builds this means holding the GIL. On free-threaded
+// builds, the GIL may be disabled, but an attached thread state is still
+// required when accessing Python objects or calling the Python C API.
+inline void DCheckPyGilState() {
+#if PY_MAJOR_VERSION >= 3 && PY_MINOR_VERSION >= 4
+#ifdef Py_GIL_DISABLED
+  DCHECK(PyThreadState_GetUnchecked() != nullptr);
+#else
+  DCHECK(PyGILState_Check());
+#endif
+#endif
+}
+
+}  // namespace tensorflow
 
 #endif  // TENSORFLOW_PYTHON_LIB_CORE_PY_UTIL_H_

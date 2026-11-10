@@ -15,13 +15,17 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOOLS_EVALUATION_STAGES_TFLITE_INFERENCE_STAGE_H_
 #define TENSORFLOW_LITE_TOOLS_EVALUATION_STAGES_TFLITE_INFERENCE_STAGE_H_
 
-#include <stdint.h>
+#include <cstdint>
+#include <memory>
 #include <vector>
 
-#include "tensorflow/core/util/stats_calculator.h"
+#include "xla/tsl/util/stats_calculator.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/kernels/register.h"
 #include "tensorflow/lite/model.h"
+#include "tensorflow/lite/model_builder.h"
+#include "tensorflow/lite/tools/evaluation/evaluation_delegate_provider.h"
 #include "tensorflow/lite/tools/evaluation/evaluation_stage.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_config.pb.h"
 
@@ -39,20 +43,38 @@ class TfliteInferenceStage : public EvaluationStage {
   explicit TfliteInferenceStage(const EvaluationStageConfig& config)
       : EvaluationStage(config) {}
 
-  TfLiteStatus Init() override;
+  TfLiteStatus Init() override { return Init(nullptr); }
+  TfLiteStatus Init(const DelegateProviders* delegate_providers);
 
   TfLiteStatus Run() override;
 
   // EvaluationStageMetrics.num_runs denotes the number of inferences run.
   EvaluationStageMetrics LatestMetrics() override;
 
-  ~TfliteInferenceStage() {}
+  ~TfliteInferenceStage() override = default;
 
   // Call before Run().
   // This class does not take ownership of raw_input_ptrs.
-  void SetInputs(std::vector<void*>& raw_input_ptrs) {
+  void SetInputs(const std::vector<void*>& raw_input_ptrs) {
     inputs_ = &raw_input_ptrs;
+    input_buffer_sizes_.reset();
   }
+
+  // Call before Run().
+  // This class does not take ownership of raw_input_ptrs. It stores a copy of
+  // input_buffer_sizes.
+  void SetInputs(const std::vector<void*>& raw_input_ptrs,
+                 const std::vector<size_t>& input_buffer_sizes) {
+    inputs_ = &raw_input_ptrs;
+    input_buffer_sizes_ =
+        std::make_unique<std::vector<size_t>>(input_buffer_sizes);
+  }
+
+  // Resize input tensors with given shapes.
+  TfLiteStatus ResizeInputs(const std::vector<std::vector<int>>& shapes);
+
+  // Applies provided delegate to the underlying TFLite Interpreter.
+  TfLiteStatus ApplyCustomDelegate(Interpreter::TfLiteDelegatePtr delegate);
 
   // Read-only view of a TfliteModelInfo. TfliteInferenceStage retains
   // ownership.
@@ -61,19 +83,23 @@ class TfliteInferenceStage : public EvaluationStage {
 
   // Provides a read-only view to the model's output tensor(s). Retains
   // ownership of object.
-  const std::vector<void*>* GetOutputs() const { return &outputs_; }
+  const std::vector<void*>* GetOutputs() const;
 
  private:
+  // Sets model_info_ after interpreter tensors are (re)allocated.
+  void UpdateModelInfo();
+
   std::unique_ptr<FlatBufferModel> model_;
   std::unique_ptr<ops::builtin::BuiltinOpResolver> resolver_;
   std::unique_ptr<Interpreter> interpreter_;
   std::vector<Interpreter::TfLiteDelegatePtr> delegates_;
 
   TfLiteModelInfo model_info_;
-  std::vector<void*>* inputs_ = nullptr;
-  std::vector<void*> outputs_;
+  const std::vector<void*>* inputs_ = nullptr;
+  std::unique_ptr<std::vector<size_t>> input_buffer_sizes_;
+  mutable std::vector<void*> outputs_;
 
-  tensorflow::Stat<int64_t> latency_stats_;
+  tsl::Stat<int64_t> latency_stats_;
 };
 
 }  // namespace evaluation

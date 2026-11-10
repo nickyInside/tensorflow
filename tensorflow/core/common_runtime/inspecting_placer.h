@@ -59,7 +59,7 @@ struct IOColocationGroups {
   // group_devices[i] contains possible devices for group with id i.
   std::vector<PossibleDevices> group_devices;
 
-  string DebugString() const;
+  std::string DebugString() const;
 };
 
 class InspectingPlacer {
@@ -69,18 +69,17 @@ class InspectingPlacer {
   // TODO(iga): Add a "stack trace" to detect recursion and improve log
   // messages. Currently, we will enter an infinite loop for recursive
   // functions.
-  InspectingPlacer(const Graph* graph, const FunctionStack& stack,
+  InspectingPlacer(const FunctionStack& stack,
                    const FunctionLibraryDefinition* flib_def,
                    const DeviceSet* device_set, const Device* default_device,
                    bool allow_soft_placement, bool log_device_placement);
 
   // `node` must be
   // PlacerInspectionRequiredOpsChecker::IsPlacerInspectionRequired.
-  Status ComputeIOColocationGroups(const Node& node,
-                                   IOColocationGroups* groups);
+  absl::Status ComputeIOColocationGroups(const Node& node,
+                                         IOColocationGroups* groups);
 
  private:
-  const Graph& graph_;
   const FunctionStack stack_;
   const FunctionLibraryDefinition& flib_def_;
   const DeviceSet& device_set_;
@@ -88,7 +87,8 @@ class InspectingPlacer {
   const bool allow_soft_placement_;
   const bool log_device_placement_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(InspectingPlacer);
+  InspectingPlacer(const InspectingPlacer&) = delete;
+  void operator=(const InspectingPlacer&) = delete;
 };
 
 }  // namespace tensorflow

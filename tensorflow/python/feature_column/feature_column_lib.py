@@ -14,12 +14,9 @@
 # ==============================================================================
 """FeatureColumns: tools for ingesting and representing features."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-# pylint: disable=unused-import,line-too-long,wildcard-import
+# pylint: disable=unused-import,line-too-long,wildcard-import,g-bad-import-order
 from tensorflow.python.feature_column.feature_column import *
 from tensorflow.python.feature_column.feature_column_v2 import *
 from tensorflow.python.feature_column.sequence_feature_column import *
+from tensorflow.python.feature_column.serialization import *
 # pylint: enable=unused-import,line-too-long

@@ -13,9 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/compiler/aot/aot_only_var_handle_op.h"
+
 #include "tensorflow/compiler/tf2xla/xla_context.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "tensorflow/core/framework/shape_inference.h"
 
 namespace tensorflow {
 namespace {
@@ -28,7 +31,7 @@ class XlaAotOnlyVarHandleOp : public XlaOpKernel {
   void Compile(XlaOpKernelContext* context) override;
 
  private:
-  string name_;
+  std::string name_;
 };
 
 XlaAotOnlyVarHandleOp::XlaAotOnlyVarHandleOp(OpKernelConstruction* c)
@@ -46,11 +49,37 @@ void XlaAotOnlyVarHandleOp::Compile(XlaOpKernelContext* context) {
       return;
     }
   }
-  context->SetStatus(
-      errors::InvalidArgument("Variable: ", name_, " not configured"));
+  context->SetStatus(absl::InvalidArgumentError(
+      absl::StrCat("Variable: ", name_, " not configured")));
 }
 }  // namespace
 
-REGISTER_XLA_OP(Name("VarHandleOp").CompilationOnly(), XlaAotOnlyVarHandleOp);
+REGISTER_OP(tfcompile::kXlaAotOnlyVarHandleOp)
+    .Doc(R"doc(
+Internal VarHandleOp registration used for XLA AOT compilation.
+)doc")
+    .Attr("container: string = ''")
+    .Attr("shared_name: string = ''")
+    .Attr("debug_name: string = ''")
+    .Attr("dtype: type")
+    .Attr("shape: shape")
+    .Output("resource: resource")
+    .SetIsStateful()
+    .SetShapeFn([](shape_inference::InferenceContext* c) {
+      c->set_output(0, c->Scalar());
+      DataType t;
+      TF_RETURN_IF_ERROR(c->GetAttr("dtype", &t));
+      PartialTensorShape p;
+      TF_RETURN_IF_ERROR(c->GetAttr("shape", &p));
+      shape_inference::ShapeHandle s;
+      TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(p, &s));
+      c->set_output_handle_shapes_and_types(
+          0, std::vector<shape_inference::ShapeAndType>{{s, t}});
+
+      return absl::OkStatus();
+    });
+
+REGISTER_XLA_OP(Name(tfcompile::kXlaAotOnlyVarHandleOp).CompilationOnly(),
+                XlaAotOnlyVarHandleOp);
 
 }  // namespace tensorflow

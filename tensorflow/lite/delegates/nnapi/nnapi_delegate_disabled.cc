@@ -19,17 +19,57 @@ namespace tflite {
 
 // Return a non-functional NN API Delegate struct.
 TfLiteDelegate* NnApiDelegate() {
-  static TfLiteDelegate delegate = [] {
-    TfLiteDelegate delegate = TfLiteDelegateCreate();
-    delegate.Prepare = [](TfLiteContext* context,
-                          TfLiteDelegate* delegate) -> TfLiteStatus {
-      // Silently succeed without modifying the graph.
-      return kTfLiteOk;
-    };
-    return delegate;
-  }();
+  static StatefulNnApiDelegate* delegate = new StatefulNnApiDelegate();
+  return delegate;
+}
 
-  return &delegate;
+StatefulNnApiDelegate::StatefulNnApiDelegate(const NnApi* /* nnapi */)
+    : StatefulNnApiDelegate() {}
+
+StatefulNnApiDelegate::StatefulNnApiDelegate(Options /* options */)
+    : StatefulNnApiDelegate() {}
+
+StatefulNnApiDelegate::StatefulNnApiDelegate(const NnApi* /* nnapi */,
+                                             Options /* options */)
+    : StatefulNnApiDelegate() {}
+
+StatefulNnApiDelegate::StatefulNnApiDelegate(
+    const NnApiSLDriverImplFL5* /* nnapi_support_library_driver */,
+    Options /* options */)
+    : StatefulNnApiDelegate() {}
+
+StatefulNnApiDelegate::StatefulNnApiDelegate()
+    : TfLiteDelegate(TfLiteDelegateCreate()),
+      delegate_data_(/*nnapi=*/nullptr) {
+  Prepare = DoPrepare;
+}
+
+TfLiteStatus StatefulNnApiDelegate::DoPrepare(TfLiteContext* /* context */,
+                                              TfLiteDelegate* /* delegate */) {
+  return kTfLiteOk;
+}
+
+TfLiteBufferHandle StatefulNnApiDelegate::RegisterNnapiMemory(
+    ANeuralNetworksMemory* memory, CopyToHostTensorFnPtr callback,
+    void* callback_context) {
+  return kTfLiteNullBufferHandle;
+}
+
+int StatefulNnApiDelegate::GetNnApiErrno() const { return 0; }
+
+using ::tflite::delegate::nnapi::NNAPIDelegateKernel;
+
+StatefulNnApiDelegate::Data::Data(const NnApi* nnapi) : nnapi(nnapi) {}
+
+StatefulNnApiDelegate::Data::~Data() {}
+
+void StatefulNnApiDelegate::Data::CacheDelegateKernel(
+    const TfLiteDelegateParams* delegate_params,
+    NNAPIDelegateKernel* delegate_state) {}
+
+NNAPIDelegateKernel* StatefulNnApiDelegate::Data::MaybeGetCachedDelegateKernel(
+    const TfLiteDelegateParams* delegate_params) {
+  return nullptr;
 }
 
 }  // namespace tflite

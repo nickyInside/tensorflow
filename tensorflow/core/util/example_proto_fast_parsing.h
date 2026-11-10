@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "tensorflow/core/example/example.pb.h"
@@ -35,13 +36,25 @@ namespace tensorflow {
 namespace example {
 
 // FastParseExampleConfig defines how to parse features in Example.
-// Each sub-config is responsible for one feature identified with feautre_name.
+// Each sub-config is responsible for one feature identified with feature_name.
 // FastParseExampleConfig can't have two sub-configs with the same feature_name.
 // dtype identifies the type of output vector and the kind of Feature expected
 // in Example.
 struct FastParseExampleConfig {
   struct Dense {
-    string feature_name;
+    Dense(absl::string_view feature_name, DataType dtype,
+          PartialTensorShape shape, Tensor default_value, bool variable_length,
+          std::size_t elements_per_stride)
+        : feature_name(feature_name),  // TODO(mrry): Switch to preallocated
+                                       // tstring when this is available.
+          dtype(dtype),
+          shape(std::move(shape)),
+          default_value(std::move(default_value)),
+          variable_length(variable_length),
+          elements_per_stride(elements_per_stride) {}
+    Dense() = default;
+
+    tstring feature_name;
     DataType dtype;
     // These 2 fields correspond exactly to dense_shapes and dense_defaults in
     // ParseExample op.
@@ -53,12 +66,33 @@ struct FastParseExampleConfig {
   };
 
   struct Sparse {
-    string feature_name;
+    Sparse(absl::string_view feature_name, DataType dtype)
+        : feature_name(feature_name),  // TODO(mrry): Switch to preallocated
+                                       // tstring when this is available.
+          dtype(dtype) {}
+    Sparse() = default;
+
+    tstring feature_name;
     DataType dtype;
+  };
+
+  struct Ragged {
+    Ragged(absl::string_view feature_name, DataType dtype,
+           DataType splits_dtype)
+        : feature_name(feature_name),  // TODO(mrry): Switch to preallocated
+                                       // tstring when this is available.
+          dtype(dtype),
+          splits_dtype(splits_dtype) {}
+    Ragged() = default;
+
+    tstring feature_name;
+    DataType dtype;
+    DataType splits_dtype;
   };
 
   std::vector<Dense> dense;
   std::vector<Sparse> sparse;
+  std::vector<Ragged> ragged;
 
   // If `true`, `Result::feature_stats` will contain one
   // `PerExampleFeatureStats` for each serialized example in the input.
@@ -88,6 +122,9 @@ struct Result {
   std::vector<Tensor> sparse_values;
   std::vector<Tensor> sparse_shapes;
   std::vector<Tensor> dense_values;
+  std::vector<Tensor> ragged_values;
+  std::vector<Tensor> ragged_splits;
+  std::vector<Tensor> ragged_outer_splits;  // For SequenceExamples
 
   // This vector will be populated with one element per example if
   // `FastParseExampleConfig::collect_feature_stats` is set to `true`.
@@ -98,34 +135,51 @@ struct Result {
 // according to given config.
 // Given example names have to either be empty or the same size as serialized.
 // example_names are used only for error messages.
-Status FastParseExample(const FastParseExampleConfig& config,
-                        gtl::ArraySlice<string> serialized,
-                        gtl::ArraySlice<string> example_names,
-                        thread::ThreadPool* thread_pool, Result* result);
+absl::Status FastParseExample(const FastParseExampleConfig& config,
+                              absl::Span<const tstring> serialized,
+                              absl::Span<const tstring> example_names,
+                              thread::ThreadPool* thread_pool, Result* result);
 
 // TODO(mrry): Move the hash table construction into the config object.
 typedef FastParseExampleConfig FastParseSingleExampleConfig;
 
-Status FastParseSingleExample(const FastParseSingleExampleConfig& config,
-                              const string& serialized, Result* result);
+absl::Status FastParseSingleExample(const FastParseSingleExampleConfig& config,
+                                    absl::string_view serialized,
+                                    Result* result);
 
 // Parses a batch of serialized SequenceExample protos and converts them into
 // result according to given config.
 // Given example names have to either be empty or the same size as serialized.
 // example_names are used only for error messages.
-Status FastParseSequenceExample(
+// (If batch=true, then this parses a single SequenceExample.)
+absl::Status FastParseSequenceExample(
     const example::FastParseExampleConfig& context_config,
-    const example::FastParseExampleConfig& feature_list_config,
-    gtl::ArraySlice<string> serialized, gtl::ArraySlice<string> example_names,
-    thread::ThreadPool* thread_pool, example::Result* context_result,
-    example::Result* feature_list_result,
-    std::vector<Tensor>* dense_feature_lengths);
+    const example::FastParseExampleConfig& sequence_config,
+    absl::Span<const tstring> serialized,
+    absl::Span<const tstring> example_names, thread::ThreadPool* thread_pool,
+    example::Result* context_result, example::Result* sequence_result,
+    std::vector<Tensor>* dense_feature_lengths, bool is_batch = true);
 
 // This function parses serialized Example and populates given example.
 // It uses the same specialized parser as FastParseExample which is efficient.
 // But then constructs Example which is relatively slow.
 // It is exported here as a convenient API to test parser part separately.
-bool TestFastParse(const string& serialized, Example* example);
+bool TestFastParse(const std::string& serialized, Example* example);
+
+// These run the helpers that FastParseSequenceExample uses to fill its outputs,
+// so that their bounds checks can be tested on their own. The counting pass
+// sizes every output to fit, so the checks can't fail through
+// FastParseSequenceExample.
+// TestParseFeature parses the serialized Feature into `out` starting at
+// `*out_offset` and returns the number of values added, or -1 if they don't
+// fit. TestPadFeature and TestCopyTensorIntoTensor return false if the values
+// don't fit.
+int TestParseFeature(DataType dtype, const std::string& serialized_feature,
+                     Tensor* out, size_t* out_offset);
+bool TestPadFeature(DataType dtype, size_t num_to_pad, Tensor* out,
+                    size_t* out_offset);
+bool TestCopyTensorIntoTensor(DataType dtype, const Tensor& src, Tensor* dst,
+                              size_t* dst_offset);
 
 }  // namespace example
 }  // namespace tensorflow

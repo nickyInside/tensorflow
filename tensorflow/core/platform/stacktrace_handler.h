@@ -16,11 +16,16 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_PLATFORM_STACKTRACE_HANDLER_H_
 #define TENSORFLOW_CORE_PLATFORM_STACKTRACE_HANDLER_H_
 
+#include "tsl/platform/stacktrace_handler.h"
+
 namespace tensorflow {
 namespace testing {
 
 // Installs signal handlers to print out stack trace.
-void InstallStacktraceHandler();
+// Although GoogleTest has support for generating stacktraces with abseil via
+// https://github.com/google/googletest/pull/1653, this doesn't cover our use
+// case of getting C++ stacktraces in our python tests.
+using tsl::testing::InstallStacktraceHandler;
 
 }  // namespace testing
 }  // namespace tensorflow

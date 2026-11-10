@@ -21,14 +21,13 @@ limitations under the License.
 #include "tensorflow/cc/ops/control_flow_ops_internal.h"
 #include "tensorflow/cc/ops/function_ops.h"
 #include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/common_runtime/graph_runner.h"
 #include "tensorflow/core/framework/function_testlib.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
-#include "tensorflow/core/graph/graph_constructor.h"
 #include "tensorflow/core/graph/graph_def_builder.h"
-#include "tensorflow/core/graph/graph_def_builder_util.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/test.h"
@@ -41,8 +40,8 @@ typedef FunctionDefHelper FDH;
 constexpr const char* const kLowerUsingSwitchMergeAttr =
     LowerFunctionalOpsPass::kLowerUsingSwitchMergeAttr;
 
-static void AssertHasSubstr(StringPiece s, StringPiece expected) {
-  ASSERT_TRUE(str_util::StrContains(s, expected))
+static void AssertHasSubstr(absl::string_view s, absl::string_view expected) {
+  ASSERT_TRUE(absl::StrContains(s, expected))
       << "'" << s << "' does not contain '" << expected << "'";
 }
 
@@ -54,7 +53,7 @@ SessionOptions SessionOptionsWithInlining() {
   return session_options;
 }
 
-Status Rewrite(std::unique_ptr<Graph>* graph) {
+absl::Status Rewrite(std::unique_ptr<Graph>* graph) {
   FunctionLibraryDefinition flib_def((*graph)->flib_def());
   GraphOptimizationPassOptions opt_options;
   SessionOptions session_options = SessionOptionsWithInlining();
@@ -66,8 +65,8 @@ Status Rewrite(std::unique_ptr<Graph>* graph) {
 }
 
 // (counter:int32, pred:bool, x:int32) -> counter < N
-FunctionDef WhileWithIfCond(int32 N) {
-  const Tensor kN = test::AsScalar<int32>(N);
+FunctionDef WhileWithIfCond(int32_t N) {
+  const Tensor kN = test::AsScalar<int32_t>(N);
   return FDH::Define(
       // Name
       "WhileWithIfCond",
@@ -91,7 +90,7 @@ FunctionDef WhileWithIfBody() {
   then_func.set_name("XTimesTwo");
   NameAttrList else_func;
   else_func.set_name("XTimesFour");
-  const Tensor kOne = test::AsScalar<int32>(1);
+  const Tensor kOne = test::AsScalar<int32_t>(1);
   std::vector<DataType> input_types = {DT_INT32};
   std::vector<DataType> output_types = {DT_INT32};
   return FDH::Define(
@@ -324,26 +323,6 @@ TEST(LowerIfWhileTest, WhileInCond) {
     ASSERT_EQ(out_tensors.size(), 1);
     EXPECT_EQ(out_tensors[0].scalar<int>()(), 2);
   }
-}
-
-TEST(LowerIfWhileTest, RaisesWhenLoweringUnhandledOpType) {
-  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-
-  Scope root = Scope::NewRootScope().ExitOnError();
-  Node* const_node;
-  Tensor const_val(DT_INT32, TensorShape({}));
-  const_val.scalar<int32>()() = 1;
-  TF_ASSERT_OK(NodeBuilder("const", "Const")
-                   .Attr("value", const_val)
-                   .Attr("dtype", const_val.dtype())
-                   .Attr(kLowerUsingSwitchMergeAttr, true)
-                   .Finalize(root.graph(), &const_node));
-  TF_ASSERT_OK(root.DoShapeInference(const_node));
-  TF_ASSERT_OK(root.ToGraph(graph.get()));
-
-  Status s = Rewrite(&graph);
-  ASSERT_EQ(s.code(), error::INTERNAL);
-  AssertHasSubstr(s.error_message(), "does not support lowering");
 }
 
 }  // namespace

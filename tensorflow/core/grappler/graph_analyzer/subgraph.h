@@ -18,6 +18,7 @@ limitations under the License.
 
 #include <initializer_list>
 #include <set>
+#include <unordered_set>
 
 #include "tensorflow/core/grappler/graph_analyzer/gen_node.h"
 #include "tensorflow/core/grappler/graph_analyzer/map_tools.h"
@@ -63,7 +64,7 @@ class Subgraph {
   size_t Hash() const { return hash_; }
 
   // Dump the subgraph information to a string.
-  string Dump();
+  std::string Dump();
 
   // Extract this subgraph into a separate graph representation for signature
   // building, that includes only the links between the nodes in the subgraph

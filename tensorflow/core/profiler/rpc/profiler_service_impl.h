@@ -15,17 +15,22 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_PROFILER_RPC_PROFILER_SERVICE_IMPL_H_
 #define TENSORFLOW_CORE_PROFILER_RPC_PROFILER_SERVICE_IMPL_H_
 
-#include "grpcpp/grpcpp.h"
-#include "grpcpp/server_context.h"
-#include "grpcpp/support/status.h"
-#include "tensorflow/core/common_runtime/eager/context.h"
-#include "tensorflow/core/platform/grpc_services.h"
-#include "tensorflow/core/profiler/lib/profiler_session.h"
+#include <memory>
+
+#include "absl/base/macros.h"
+#include "xla/tsl/profiler/rpc/profiler_service_impl.h"
+#include "tsl/profiler/protobuf/profiler_service.grpc.pb.h"
 
 namespace tensorflow {
+namespace profiler {
 
-std::unique_ptr<grpc::ProfilerService::Service> CreateProfilerService(
-    const ProfilerContext& profiler_context);
+ABSL_DEPRECATE_AND_INLINE()
+inline std::unique_ptr<tensorflow::grpc::ProfilerService::Service>
+CreateProfilerService() {
+  return tsl::profiler::CreateProfilerService();
+}
+
+}  // namespace profiler
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_CORE_PROFILER_RPC_PROFILER_SERVICE_IMPL_H_

@@ -15,12 +15,15 @@ limitations under the License.
 
 #include "tensorflow/java/src/main/native/eager_operation_builder_jni.h"
 
+#include <cstdint>
 #include <cstring>
 #include <memory>
-#include <set>
 
 #include "tensorflow/c/eager/c_api.h"
 #include "tensorflow/java/src/main/native/exception_jni.h"
+
+// This value should be >= to the maximum number of outputs in any op
+#define MAX_OUTPUTS_PER_OP 8
 
 namespace {
 
@@ -88,8 +91,8 @@ JNIEXPORT void JNICALL Java_org_tensorflow_EagerOperationBuilder_delete(
 JNIEXPORT jlongArray JNICALL Java_org_tensorflow_EagerOperationBuilder_execute(
     JNIEnv* env, jclass clazz, jlong op_handle) {
   TFE_Op* op = requireOp(env, op_handle);
-  if (op == nullptr) return 0;
-  int num_retvals = 8;  // should be >= than max number of outputs in any op
+  if (op == nullptr) return nullptr;
+  int num_retvals = MAX_OUTPUTS_PER_OP;
   std::unique_ptr<TFE_TensorHandle*[]> retvals(
       new TFE_TensorHandle*[num_retvals]);
   TF_Status* status = TF_NewStatus();

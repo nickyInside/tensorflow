@@ -14,35 +14,60 @@
 # ==============================================================================
 """Bring in all of the public TensorFlow interface into this module."""
 
-from __future__ import absolute_import as _absolute_import
-from __future__ import division as _division
-from __future__ import print_function as _print_function
+# pylint: disable=g-bad-import-order,g-import-not-at-top,protected-access
 
 import os as _os
 import sys as _sys
 
 from tensorflow.python.tools import module_util as _module_util
-
-# pylint: disable=g-bad-import-order
+from tensorflow.python.util.lazy_loader import KerasLazyLoader as _KerasLazyLoader
 
 # API IMPORTS PLACEHOLDER
 
+# WRAPPER_PLACEHOLDER
+
 # Hook external TensorFlow modules.
 _current_module = _sys.modules[__name__]
-try:
-  from tensorflow_estimator.python.estimator.api._v1 import estimator
-  _current_module.__path__ = (
-      [_module_util.get_parent_dir(estimator)] + _current_module.__path__)
-except ImportError:
-  pass
 
-try:
-  from tensorflow.python.keras.api._v1 import keras
-  _current_module.__path__ = (
-      [_module_util.get_parent_dir(keras)] + _current_module.__path__)
-except ImportError:
-  pass
+# Lazy load Keras v1
+_tf_uses_legacy_keras = (
+    _os.environ.get("TF_USE_LEGACY_KERAS", None) in ("true", "True", "1"))
+setattr(_current_module, "keras", _KerasLazyLoader(globals(), mode="v1"))
+if _tf_uses_legacy_keras:
+  _module_dir = _module_util.get_parent_dir_for_name("tf_keras.api._v1.keras")
+else:
+  _module_dir = _module_util.get_parent_dir_for_name("keras.api._v1.keras")
+_current_module.__path__ = [_module_dir] + list(_current_module.__path__)
 
 
 from tensorflow.python.platform import flags  # pylint: disable=g-import-not-at-top
-app.flags = flags  # pylint: disable=undefined-variable
+_current_module.app.flags = flags  # pylint: disable=undefined-variable
+setattr(_current_module, "flags", flags)
+
+# Add module aliases from Keras to TF.
+# Some tf endpoints actually lives under Keras.
+_current_module.layers = _KerasLazyLoader(
+    globals(),
+    submodule="__internal__.legacy.layers",
+    name="layers",
+    mode="v1")
+if _tf_uses_legacy_keras:
+  _module_dir = _module_util.get_parent_dir_for_name(
+      "tf_keras.api._v1.keras.__internal__.legacy.layers")
+else:
+  _module_dir = _module_util.get_parent_dir_for_name(
+      "keras.api._v1.keras.__internal__.legacy.layers")
+_current_module.__path__ = [_module_dir] + list(_current_module.__path__)
+
+_current_module.nn.rnn_cell = _KerasLazyLoader(
+    globals(),
+    submodule="__internal__.legacy.rnn_cell",
+    name="rnn_cell",
+    mode="v1")
+if _tf_uses_legacy_keras:
+  _module_dir = _module_util.get_parent_dir_for_name(
+      "tf_keras.api._v1.keras.__internal__.legacy.rnn_cell")
+else:
+  _module_dir = _module_util.get_parent_dir_for_name(
+      "keras.api._v1.keras.__internal__.legacy.rnn_cell")
+_current_module.nn.__path__ = [_module_dir] + list(_current_module.nn.__path__)

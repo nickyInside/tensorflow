@@ -12,47 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Signal processing operations.
-
-See the [tf.signal](https://tensorflow.org/api_guides/python/contrib.signal)
-guide.
-
-@@frame
-@@hamming_window
-@@hann_window
-@@inverse_stft
-@@inverse_stft_window_fn
-@@mfccs_from_log_mel_spectrograms
-@@linear_to_mel_weight_matrix
-@@overlap_and_add
-@@stft
-
-[hamming]: https://en.wikipedia.org/wiki/Window_function#Hamming_window
-[hann]: https://en.wikipedia.org/wiki/Window_function#Hann_window
-[mel]: https://en.wikipedia.org/wiki/Mel_scale
-[mfcc]: https://en.wikipedia.org/wiki/Mel-frequency_cepstrum
-[stft]: https://en.wikipedia.org/wiki/Short-time_Fourier_transform
-"""
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+"""Signal processing operations."""
 
 # pylint: disable=unused-import
+from tensorflow.python.ops import signal
 from tensorflow.python.ops.signal.dct_ops import dct
-from tensorflow.python.ops.signal.dct_ops import idct
 from tensorflow.python.ops.signal.fft_ops import fft
 from tensorflow.python.ops.signal.fft_ops import fft2d
 from tensorflow.python.ops.signal.fft_ops import fft3d
-from tensorflow.python.ops.signal.fft_ops import ifft
-from tensorflow.python.ops.signal.fft_ops import ifft2d
-from tensorflow.python.ops.signal.fft_ops import ifft3d
-from tensorflow.python.ops.signal.fft_ops import irfft
-from tensorflow.python.ops.signal.fft_ops import irfft2d
-from tensorflow.python.ops.signal.fft_ops import irfft3d
+from tensorflow.python.ops.signal.fft_ops import fftshift
 from tensorflow.python.ops.signal.fft_ops import rfft
 from tensorflow.python.ops.signal.fft_ops import rfft2d
 from tensorflow.python.ops.signal.fft_ops import rfft3d
+from tensorflow.python.ops.signal.dct_ops import idct
+from tensorflow.python.ops.signal.fft_ops import ifft
+from tensorflow.python.ops.signal.fft_ops import ifft2d
+from tensorflow.python.ops.signal.fft_ops import ifft3d
+from tensorflow.python.ops.signal.fft_ops import ifftshift
+from tensorflow.python.ops.signal.fft_ops import irfft
+from tensorflow.python.ops.signal.fft_ops import irfft2d
+from tensorflow.python.ops.signal.fft_ops import irfft3d
 from tensorflow.python.ops.signal.mel_ops import linear_to_mel_weight_matrix
 from tensorflow.python.ops.signal.mfcc_ops import mfccs_from_log_mel_spectrograms
 from tensorflow.python.ops.signal.reconstruction_ops import overlap_and_add

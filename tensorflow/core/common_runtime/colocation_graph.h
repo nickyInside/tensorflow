@@ -37,20 +37,25 @@ class Member {
  public:
   Member() = default;
 
-  Status SetParentAndSupportedDevices(const Node& node,
-                                      const std::vector<DeviceType>& types);
+  absl::Status SetParentAndSupportedDevices(
+      const Node& node, const std::vector<DeviceType>& types,
+      const DeviceNameUtils::ParsedName* local_address_spec);
 
   const DeviceNameUtils::ParsedName& requested_device_name() const {
     return requested_device_name_;
   }
 
-  Status SetAssignedDeviceName(const string& device_name);
-  Status SetResourceDeviceName(const Node& node);
-  Status SetRequestedDeviceName(const Node& node);
+  absl::Status SetAssignedDeviceName(const std::string& device_name);
+  absl::Status SetResourceDeviceName(const Node& node);
+  absl::Status SetRequestedDeviceName(const Node& node);
 
-  Status FillPossibleDevices(PossibleDevices* possible_device) const;
+  absl::Status FillPossibleDevices(PossibleDevices* possible_device) const;
 
-  Status EnsureCompatibilityAcrossResourceEdge(
+  // Returns whether `src_root` is assigned to a CompositeDevice and `this` is
+  // assigned to a physical device.
+  bool IsEdgeFromCompositeDeviceToPhysicalDevice(const Member& src_root) const;
+
+  absl::Status EnsureCompatibilityAcrossResourceEdge(
       const Node& src, const Member& src_root,
       const Node& dst, /*dst_root is this*/
       bool log_device_placement);
@@ -73,19 +78,23 @@ class Member {
   static int FindRoot(const std::vector<Member>& tree, int node_id);
   static int FindAndUpdateRoot(std::vector<Member>* tree, int node_id);
 
-  Status MergeDeviceNames(const Member& other, bool allow_soft_placement);
+  absl::Status MergeDeviceNames(const Member& other, bool allow_soft_placement);
 
   // Updates this to contain the intersection of the device types in
   // this and "other". If the intersection is empty, returns false and does
   // not update this. Else returns true and updates this.
   bool MergeSupportedDevices(const Member& other);
 
-  Status AssignDevice(const Node& node, bool allow_soft_placement);
+  absl::Status AssignDevice(const Node& node);
+
+  // If user does not explicitly request XLA device and non-XLA device is
+  // supported for this node, use only the non-XLA device. See b/140896502.
+  void MaybeExcludeXlaDevices();
 
   // Limit the possible devices of this (should be a root) to the device
   // specifications in `devices`.
-  Status LimitToPossibleDevices(const PossibleDevices& devices,
-                                bool allow_soft_placement);
+  absl::Status LimitToPossibleDevices(const PossibleDevices& devices,
+                                      bool allow_soft_placement);
 
   void set_possible_devices(std::vector<Device*>&& devices) {
     possible_devices_ = devices;
@@ -102,7 +111,9 @@ class Member {
   // cleared if resource device has them set.
   DeviceNameUtils::ParsedName GetPreferredSoftDeviceName() const;
 
-  string DebugString() const;
+  std::string DebugString() const;
+
+  bool has_assigned_device_name() const { return assigned_device_name_.has_id; }
 
  private:
   // Updates this to contain the intersection of the device types in
@@ -203,28 +214,29 @@ class Member {
 class ColocationGraph {
  public:
   // graph, flib_def, and device_set must not be null and must outlive
-  // this ColocationGraph. default_device can be null. If not, must outlive
-  // this.
+  // this ColocationGraph. default_local_device can be null. If not, must
+  // outlive this.
   ColocationGraph(const Graph* graph, const FunctionStack& stack,
                   const FunctionLibraryDefinition* flib_def,
-                  const DeviceSet* device_set, const Device* default_device,
-                  bool allow_soft_placement, bool log_device_placement);
+                  const DeviceSet* device_set,
+                  const Device* default_local_device, bool allow_soft_placement,
+                  bool log_device_placement);
 
-  Status Initialize();
+  absl::Status Initialize();
 
   const std::vector<Member>& members() const { return members_; }
 
   // Limit the group containing `node` to the device specifications in
   // `devices`.
-  Status LimitToPossibleDevices(const Node& node,
-                                const PossibleDevices& devices);
+  absl::Status LimitToPossibleDevices(const Node& node,
+                                      const PossibleDevices& devices);
 
   // Limits the possible devices of `node`'s colocation group to the device
   // to which `node` is assigned. This makes sure that all nodes in this
   // colocation group will be assigned to the same device. Without this
   // explicit restriction, heuristics can choose a different possible device
   // for other nodes in the group.
-  Status LimitToAssignedDevice(const Node& node);
+  absl::Status LimitToAssignedDevice(const Node& node);
 
   // Returns the root node of the disjoint tree to which the node with the
   // given id is connected.
@@ -240,13 +252,21 @@ class ColocationGraph {
   // Note: This method returns a pointer to a field within members_.
   // The caller must not use the returned pointer after there is any possibility
   // that the members_[i].possible_devices field has been modified.
-  Status GetDevicesForNode(Node* node,
-                           const std::vector<Device*>** possible_devices);
+  absl::Status GetDevicesForNode(Node* node,
+                                 const std::vector<Device*>** possible_devices);
 
   // Returns debugging info for the node referred to by 'node_root'.
-  string DebugInfo(const int node_root) const;
+  std::string DebugInfo(const int node_root) const;
 
-  string DebugString() const;
+  std::string DebugString() const;
+
+  // Returns a list of devices having type in supported_device_types.  The
+  // returned list is sorted by preferred type (higher numeric type is
+  // preferred).
+  static std::vector<Device*> FilterSupportedDevices(
+      const std::vector<Device*>& devices,
+      const PrioritizedDeviceTypeVector& supported_device_types,
+      const Device* default_local_device);
 
  private:
   // Adds each node of the Graph to this ColocationGraph as a singleton.
@@ -256,9 +276,13 @@ class ColocationGraph {
   // the largest node ID.
   // NOTE: If this method returns an error, *this is left in an undefined
   // state.
-  Status ColocateAllNodes();
+  absl::Status ColocateAllNodes();
 
-  Status ColocateResourceOrRefEdge(const Node* src, const Node* dst);
+  absl::Status ColocateResourceOrRefEdge(const Node* src, const Node* dst);
+
+  // Adds colocation constraints to data types known not to support copying.
+  absl::Status ColocateUncopiableTypeEdges(
+      std::unordered_set<Node*>* inspection_required);
 
   // Updates this ColocationGraph by making sure that all nodes
   // touching resource and/or ref tensors are colocated.
@@ -266,10 +290,19 @@ class ColocationGraph {
   // the nodes that
   // PlacerInspectionRequiredOpChecker::IsPlacerInspectionRequired
   // deems as requiring deep inspection by placer. This is an optimization.
-  Status ColocateResourceAndRefEdges(
+  // TODO(mdan): Deprecate in favor of ColocateUncopiableTypeEdges.
+  absl::Status ColocateResourceAndRefEdges(
       std::unordered_set<Node*>* inspection_required);
 
-  Status AddInspectionConstraints(
+  // Updates this ColocationGraph by making sure that all nodes having inputs of
+  // a DT_VARIANT data type with a host-only underlying types (e.g. strings) can
+  // be placed only on CPU device. We do that by reverse-DFS traversal from all
+  // nodes that take variant inputs to the node that produces that variant.
+  // TODO(ezhulenev): This function does not yet support "deep op" inspection,
+  // that we have for DT_RESOURCE edges.
+  absl::Status AddHostOnlyDataTypesConstraints();
+
+  absl::Status AddInspectionConstraints(
       const std::unordered_set<Node*>& inspection_required);
 
   // Applies colocation groups for `node`'s inputs and outputs to this
@@ -296,38 +329,39 @@ class ColocationGraph {
   // ColocateNodes(a, c) and LimitToPossibleDevices(`a`, "GPU"). The colocation
   // group of the `node` itself is not directly impacted.
   //
-  Status ApplyIOColocationGroups(const IOColocationGroups& groups,
-                                 const Node& node);
+  absl::Status ApplyIOColocationGroups(const IOColocationGroups& groups,
+                                       const Node& node);
 
-  Status ColocateNodeToGroup(
-      std::unordered_map<StringPiece, const Node*, StringPieceHasher>*
+  absl::Status ColocateNodeToGroup(
+      std::unordered_map<absl::string_view, const Node*, StringPieceHasher>*
           colocation_group_root,
-      const Node* node, StringPiece colocation_group);
+      const Node* node, absl::string_view colocation_group);
 
   // Merge the (possibly disjoint) sets containing nodes "x" and
   // "y". Returns OK if the all nodes in the union of these sets can
   // be placed on the same device type.
   //
   // If this method returns an error, *this is unchanged.
-  Status ColocateNodes(const Node& x, const Node& y);
+  absl::Status ColocateNodes(const Node& x, const Node& y);
 
   // This overload of ColocateNodes() allows a caller to provide the root node
   // ids for the two nodes. For large graphs, this noticeably reduces the
   // graph load time.
   // If this method returns an error, *this is unchanged.
-  Status ColocateNodes(const Node& x, int x_root, const Node& y, int y_root);
+  absl::Status ColocateNodes(const Node& x, int x_root, const Node& y,
+                             int y_root);
 
   void GetSoftDeviceCandidates(const Node& node, const Member& root_member,
                                int root_id,
                                std::vector<Device*>* possible_devices);
 
-  Status InitializeMembers();
+  absl::Status InitializeMembers();
 
-  Status InitializeMemberWithAssignedDevice(const string& assigned_device_name,
-                                            const string& node_type,
-                                            Member* member);
+  absl::Status InitializeMemberWithAssignedDevice(
+      const std::string& assigned_device_name, const std::string& node_type,
+      Member* member);
 
-  Status InitializeMember(const Node& node, Member* member);
+  absl::Status InitializeMember(const Node& node, Member* member);
 
   // Returns the root node of the disjoint tree to which the node with the
   // given id is connected.
@@ -341,17 +375,18 @@ class ColocationGraph {
 
   const Graph& graph_;
   const FunctionStack stack_;
-  const FunctionLibraryDefinition& flib_def_;
   std::vector<Member> members_;
   InspectingPlacer inspecting_placer_;
   PlacerInspectionRequiredOpChecker inspection_required_checker_;
   const DeviceSet& device_set_;
   const std::vector<DeviceType> device_types_;
-  const Device* default_device_;
+  const DeviceNameUtils::ParsedName local_address_spec_;
+  const Device* default_local_device_;
   const bool allow_soft_placement_;
   const bool log_device_placement_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(ColocationGraph);
+  ColocationGraph(const ColocationGraph&) = delete;
+  void operator=(const ColocationGraph&) = delete;
 };
 
 }  // namespace tensorflow

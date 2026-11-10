@@ -13,12 +13,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include "tensorflow/cc/framework/scope.h"
 #include "tensorflow/cc/ops/array_ops.h"
-#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/kernels/fuzzing/fuzz_session.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 namespace fuzzing {
+
+// Don't generate tensors that are too large as we don't test that branch here
+constexpr size_t kMaxSize = 1024;
 
 class FuzzOneHot : public FuzzSession {
   void BuildGraph(const Scope& scope) override {
@@ -33,22 +40,27 @@ class FuzzOneHot : public FuzzSession {
   }
 
   void FuzzImpl(const uint8_t* data, size_t size) override {
-    int64 input_size;
-    int32 depth;
-    uint8 on, off;
+    int64_t input_size;
+    int32_t depth;
+    uint8_t on, off;
     const uint8_t* input_data;
 
     if (size > 3) {
-      depth = static_cast<int32>(data[0]);
+      // Since we only care about the one hot decoding and not about the size of
+      // the tensor, limit `size` to at most `kMaxSize`.
+      if (size > kMaxSize) {
+        size = kMaxSize;
+      }
+      depth = static_cast<int32_t>(data[0]);
       on = data[1];
       off = data[2];
-      input_size = static_cast<int64>(size - 3);
+      input_size = static_cast<int64_t>(size - 3);
       input_data = data + 3;
     } else {
       depth = 1;
       on = 1;
       off = 0;
-      input_size = static_cast<int64>(size);
+      input_size = static_cast<int64_t>(size);
       input_data = data;
     }
 
@@ -57,13 +69,13 @@ class FuzzOneHot : public FuzzSession {
     Tensor on_tensor(tensorflow::DT_UINT8, TensorShape({}));
     Tensor off_tensor(tensorflow::DT_UINT8, TensorShape({}));
 
-    auto flat_tensor = input_tensor.flat<uint8>();
+    auto flat_tensor = input_tensor.flat<uint8_t>();
     for (size_t i = 0; i < input_size; i++) {
       flat_tensor(i) = input_data[i];
     }
-    depth_tensor.scalar<int32>()() = depth;
-    on_tensor.scalar<uint8>()() = on;
-    off_tensor.scalar<uint8>()() = off;
+    depth_tensor.scalar<int32_t>()() = depth;
+    on_tensor.scalar<uint8_t>()() = on;
+    off_tensor.scalar<uint8_t>()() = off;
 
     RunInputs({{"input", input_tensor},
                {"depth", depth_tensor},

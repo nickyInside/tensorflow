@@ -13,9 +13,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/testing/tokenize.h"
+
+#include <cctype>
 #include <istream>
+#include <iterator>
 #include <string>
-#include "tensorflow/lite/string.h"
+
+#include "tensorflow/lite/string_type.h"
 
 namespace tflite {
 namespace testing {

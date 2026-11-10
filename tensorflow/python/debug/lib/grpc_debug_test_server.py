@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """GRPC debug server for testing."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import errno
 import functools
@@ -24,7 +20,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import tempfile
 import threading
 import time
@@ -40,6 +35,7 @@ from tensorflow.python.debug.lib import debug_utils
 from tensorflow.python.debug.lib import grpc_debug_server
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import errors
+from tensorflow.python.lib.io import file_io
 from tensorflow.python.ops import variables
 from tensorflow.python.util import compat
 
@@ -182,7 +178,7 @@ class EventListenerTestStreamHandler(
 
   def _write_graph_def(self, graph_def, device_name, wall_time):
     encoded_graph_def = graph_def.SerializeToString()
-    graph_hash = int(hashlib.md5(encoded_graph_def).hexdigest(), 16)
+    graph_hash = int(hashlib.sha1(encoded_graph_def).hexdigest(), 16)
     event = event_pb2.Event(graph_def=encoded_graph_def, wall_time=wall_time)
     graph_file_path = os.path.join(
         self._dump_dir,
@@ -471,7 +467,7 @@ def _poll_server_till_success(max_attempts,
       if dump_dir:
         if os.path.isdir(
             dump_dir) and debug_data.DebugDumpDir(dump_dir).size > 0:
-          shutil.rmtree(dump_dir)
+          file_io.delete_recursively(dump_dir)
           print("Poll succeeded.")
           return True
         else:

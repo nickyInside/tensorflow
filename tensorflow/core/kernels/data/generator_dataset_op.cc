@@ -14,13 +14,19 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/core/kernels/data/generator_dataset_op.h"
 
-#include <iterator>
+#include <memory>
+#include <utility>
 #include <vector>
+#ifdef __linux__
+#include <malloc.h>
+#endif
 
+#include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
+#include "tensorflow/core/data/captured_function.h"
+#include "tensorflow/core/data/dataset_utils.h"
+#include "tensorflow/core/data/name_utils.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/kernels/data/captured_function.h"
-#include "tensorflow/core/kernels/data/dataset_utils.h"
 #include "tensorflow/core/lib/random/random.h"
 
 namespace tensorflow {
@@ -28,6 +34,20 @@ namespace data {
 
 // See documentation in ../../ops/dataset_ops.cc for a high-level
 // description of the following op.
+
+/* static */ constexpr const char* const GeneratorDatasetOp::kDatasetType;
+/* static */ constexpr const char* const GeneratorDatasetOp::kInitFuncOtherArgs;
+/* static */ constexpr const char* const GeneratorDatasetOp::kNextFuncOtherArgs;
+/* static */ constexpr const char* const
+    GeneratorDatasetOp::kFinalizeFuncOtherArgs;
+/* static */ constexpr const char* const GeneratorDatasetOp::kInitFunc;
+/* static */ constexpr const char* const GeneratorDatasetOp::kNextFunc;
+/* static */ constexpr const char* const GeneratorDatasetOp::kFinalizeFunc;
+/* static */ constexpr const char* const GeneratorDatasetOp::kTinitFuncArgs;
+/* static */ constexpr const char* const GeneratorDatasetOp::kTnextFuncArgs;
+/* static */ constexpr const char* const GeneratorDatasetOp::kTfinalizeFuncArgs;
+/* static */ constexpr const char* const GeneratorDatasetOp::kOutputTypes;
+/* static */ constexpr const char* const GeneratorDatasetOp::kOutputShapes;
 
 class GeneratorDatasetOp::Dataset : public DatasetBase {
  public:
@@ -44,9 +64,9 @@ class GeneratorDatasetOp::Dataset : public DatasetBase {
         output_shapes_(output_shapes) {}
 
   std::unique_ptr<IteratorBase> MakeIteratorInternal(
-      const string& prefix) const override {
-    return absl::make_unique<Iterator>(
-        Iterator::Params{this, strings::StrCat(prefix, "::Generator")});
+      const std::string& prefix) const override {
+    return std::make_unique<Iterator>(Iterator::Params{
+        this, name_utils::IteratorPrefix(kDatasetType, prefix)});
   }
 
   const DataTypeVector& output_dtypes() const override { return output_types_; }
@@ -55,14 +75,27 @@ class GeneratorDatasetOp::Dataset : public DatasetBase {
     return output_shapes_;
   }
 
-  string DebugString() const override { return "GeneratorDatasetOp::Dataset"; }
+  std::string DebugString() const override {
+    return name_utils::DatasetDebugString(kDatasetType);
+  }
+
+  absl::Status InputDatasets(
+      std::vector<const DatasetBase*>* inputs) const override {
+    return absl::OkStatus();
+  }
+
+  absl::Status CheckExternalState() const override {
+    TF_RETURN_IF_ERROR(init_func_->CheckExternalState());
+    TF_RETURN_IF_ERROR(next_func_->CheckExternalState());
+    return finalize_func_->CheckExternalState();
+  }
 
  protected:
-  Status AsGraphDefInternal(SerializationContext* ctx,
-                            DatasetGraphDefBuilder* b,
-                            Node** output) const override {
-    return errors::Unimplemented("%s does not support serialization",
-                                 DebugString());
+  absl::Status AsGraphDefInternal(SerializationContext* ctx,
+                                  DatasetGraphDefBuilder* b,
+                                  Node** output) const override {
+    return absl::UnimplementedError(
+        absl::StrCat(DebugString(), " does not support serialization"));
   }
 
  private:
@@ -74,7 +107,7 @@ class GeneratorDatasetOp::Dataset : public DatasetBase {
     ~Iterator() override {
       if (!finalized_ && initialized_) {
         std::vector<Tensor> ignored;
-        Status s =
+        absl::Status s =
             instantiated_finalize_func_->RunInstantiated(state_, &ignored);
         if (!s.ok()) {
           LOG(WARNING)
@@ -84,47 +117,46 @@ class GeneratorDatasetOp::Dataset : public DatasetBase {
       }
     }
 
-    Status Initialize(IteratorContext* ctx) override {
+    absl::Status Initialize(IteratorContext* ctx) override {
       TF_RETURN_IF_ERROR(
           dataset()->init_func_->Instantiate(ctx, &instantiated_init_func_));
       TF_RETURN_IF_ERROR(
           dataset()->next_func_->Instantiate(ctx, &instantiated_next_func_));
       TF_RETURN_IF_ERROR(dataset()->finalize_func_->Instantiate(
           ctx, &instantiated_finalize_func_));
-      return Status::OK();
+      return absl::OkStatus();
     }
 
-    Status GetNextInternal(IteratorContext* ctx,
-                           std::vector<Tensor>* out_tensors,
-                           bool* end_of_sequence) override {
+    absl::Status GetNextInternal(IteratorContext* ctx,
+                                 std::vector<Tensor>* out_tensors,
+                                 bool* end_of_sequence) override {
       mutex_lock l(mu_);
 
       if (!initialized_) {
-        TF_RETURN_IF_ERROR(
-            instantiated_init_func_->RunWithBorrowedArgs(ctx, {}, &state_));
+        TF_RETURN_IF_ERROR(instantiated_init_func_->RunWithBorrowedArgs(
+            ctx, {}, &state_, model_node()));
         initialized_ = true;
       }
 
       if (finalized_) {
         *end_of_sequence = true;
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status s = instantiated_next_func_->RunWithBorrowedArgs(ctx, state_,
-                                                              out_tensors);
+      absl::Status s = instantiated_next_func_->RunWithBorrowedArgs(
+          ctx, state_, out_tensors, model_node());
       if (s.ok()) {
         *end_of_sequence = false;
-      } else if (errors::IsOutOfRange(s)) {
+      } else if (absl::IsOutOfRange(s)) {
         // `next_func` may deliberately raise `errors::OutOfRange`
         // to indicate that we should terminate the iteration.
-        s = Status::OK();
+        s = absl::OkStatus();
         *end_of_sequence = true;
 
-        // NOTE(mrry): We ignore any tensors returned by the
-        // finalize function.
+        // NOTE(mrry): We ignore any tensors returned by the finalize function.
         std::vector<Tensor> ignored;
-        TF_RETURN_IF_ERROR(
-            instantiated_finalize_func_->RunInstantiated(state_, &ignored));
+        TF_RETURN_IF_ERROR(instantiated_finalize_func_->RunWithBorrowedArgs(
+            ctx, state_, &ignored, model_node()));
         finalized_ = true;
       }
       return s;
@@ -136,11 +168,23 @@ class GeneratorDatasetOp::Dataset : public DatasetBase {
       return model::MakeSourceNode(std::move(args));
     }
 
+    absl::Status SaveInternal(SerializationContext* ctx,
+                              IteratorStateWriter* writer) override {
+      return absl::UnimplementedError(
+          "GeneratorDataset does not support checkpointing.");
+    }
+
+    absl::Status RestoreInternal(IteratorContext* ctx,
+                                 IteratorStateReader* reader) override {
+      return absl::UnimplementedError(
+          "GeneratorDataset does not support checkpointing.");
+    }
+
    private:
     mutex mu_;
-    bool initialized_ GUARDED_BY(mu_) = false;
-    bool finalized_ GUARDED_BY(mu_) = false;
-    std::vector<Tensor> state_ GUARDED_BY(mu_);
+    bool initialized_ TF_GUARDED_BY(mu_) = false;
+    bool finalized_ TF_GUARDED_BY(mu_) = false;
+    std::vector<Tensor> state_ TF_GUARDED_BY(mu_);
     std::unique_ptr<InstantiatedCapturedFunction> instantiated_init_func_;
     std::unique_ptr<InstantiatedCapturedFunction> instantiated_next_func_;
     std::unique_ptr<InstantiatedCapturedFunction> instantiated_finalize_func_;
@@ -153,35 +197,57 @@ class GeneratorDatasetOp::Dataset : public DatasetBase {
   const std::vector<PartialTensorShape> output_shapes_;
 };
 
+// PATCH: Fix for severe memory leak in Python 3.11+ (GitHub Issue #65675).
+// Python 3.11's allocation pattern causes glibc to retain memory
+// unnecessarily during generator iteration. Setting M_TRIM_THRESHOLD to 128kb
+// disables the dynamic memory allocator and forces to use mmaped memory,
+// preventing OOM crashes.
+void ApplyPython311MemoryPatch() {
+#ifdef __GLIBC__
+  // M_MMAP_THRESHOLD: 128KB is default, 0 means "always mmap"
+  int result_mmap = mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+
+  if (result_mmap != 1) {
+    LOG(WARNING) << "Cannot set mallopt to mitigate memory leak in Python 3.11";
+  } else {
+    LOG(INFO) << "Memory patch applied: M_TRIM_THRESHOLD=128 kb was set.";
+  }
+#endif
+}
+
 GeneratorDatasetOp::GeneratorDatasetOp(OpKernelConstruction* ctx)
     : DatasetOpKernel(ctx) {
-  OP_REQUIRES_OK(ctx, FunctionMetadata::Create(ctx, "init_func", /*params=*/{},
+  static const bool memory_patch_applied = [] {
+    ApplyPython311MemoryPatch();
+    return true;
+  }();
+  (void)memory_patch_applied;  // Silence unused variable warning.
+
+  OP_REQUIRES_OK(ctx, FunctionMetadata::Create(ctx, kInitFunc, /*params=*/{},
                                                &init_func_metadata_));
-  OP_REQUIRES_OK(ctx, FunctionMetadata::Create(ctx, "next_func", /*params=*/{},
+  OP_REQUIRES_OK(ctx, FunctionMetadata::Create(ctx, kNextFunc, /*params=*/{},
                                                &next_func_metadata_));
   OP_REQUIRES_OK(ctx,
-                 FunctionMetadata::Create(ctx, "finalize_func", /*params=*/{},
+                 FunctionMetadata::Create(ctx, kFinalizeFunc, /*params=*/{},
                                           &finalize_func_metadata_));
-  OP_REQUIRES_OK(ctx, ctx->GetAttr("output_types", &output_types_));
-  OP_REQUIRES_OK(ctx, ctx->GetAttr("output_shapes", &output_shapes_));
+  OP_REQUIRES_OK(ctx, ctx->GetAttr(kOutputTypes, &output_types_));
+  OP_REQUIRES_OK(ctx, ctx->GetAttr(kOutputShapes, &output_shapes_));
 }
 
 void GeneratorDatasetOp::MakeDataset(OpKernelContext* ctx,
                                      DatasetBase** output) {
   std::unique_ptr<CapturedFunction> init_func;
-  OP_REQUIRES_OK(ctx,
-                 CapturedFunction::Create(ctx, init_func_metadata_,
-                                          "init_func_other_args", &init_func));
+  OP_REQUIRES_OK(ctx, CapturedFunction::Create(ctx, init_func_metadata_,
+                                               kInitFuncOtherArgs, &init_func));
 
   std::unique_ptr<CapturedFunction> next_func;
-  OP_REQUIRES_OK(ctx,
-                 CapturedFunction::Create(ctx, next_func_metadata_,
-                                          "next_func_other_args", &next_func));
+  OP_REQUIRES_OK(ctx, CapturedFunction::Create(ctx, next_func_metadata_,
+                                               kNextFuncOtherArgs, &next_func));
 
   std::unique_ptr<CapturedFunction> finalize_func;
-  OP_REQUIRES_OK(ctx, CapturedFunction::Create(ctx, finalize_func_metadata_,
-                                               "finalize_func_other_args",
-                                               &finalize_func));
+  OP_REQUIRES_OK(
+      ctx, CapturedFunction::Create(ctx, finalize_func_metadata_,
+                                    kFinalizeFuncOtherArgs, &finalize_func));
 
   *output =
       new Dataset(ctx, std::move(init_func), std::move(next_func),
@@ -196,6 +262,7 @@ REGISTER_KERNEL_BUILDER(Name("GeneratorDataset")
                             .HostMemory("handle")
                             .Priority(1),
                         GeneratorDatasetOp);
+REGISTER_INPUT_COLOCATION_EXEMPTION("GeneratorDataset");
 }  // namespace
 
 }  // namespace data

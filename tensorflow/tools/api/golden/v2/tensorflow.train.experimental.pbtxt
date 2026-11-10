@@ -1,11 +1,23 @@
 path: "tensorflow.train.experimental"
 tf_module {
   member {
-    name: "PythonState"
-    mtype: "<type \'type\'>"
+    name: "MaxShardSizePolicy"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
-  member_method {
-    name: "enable_mixed_precision_graph_rewrite"
-    argspec: "args=[\'opt\', \'loss_scale\'], varargs=None, keywords=None, defaults=[\'dynamic\'], "
+  member {
+    name: "PythonState"
+    mtype: "<class \'abc.ABCMeta\'>"
+  }
+  member {
+    name: "ShardByTaskPolicy"
+    mtype: "<class \'abc.ABCMeta\'>"
+  }
+  member {
+    name: "ShardableTensor"
+    mtype: "<class \'type\'>"
+  }
+  member {
+    name: "ShardingCallback"
+    mtype: "<class \'abc.ABCMeta\'>"
   }
 }

@@ -19,26 +19,20 @@ This test ensures all changes to the public API of TensorFlow are intended.
 
 If this test fails, it means a change has been made to the public API. Backwards
 incompatible changes are not allowed. You can run the test with
-"--update_goldens" flag set to "True" to update goldens when making changes to
+"--update_goldens" flag set to "true" to update goldens when making changes to
 the public TF python API.
 """
-
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import argparse
 import os
 import re
 import sys
 
-import six
 import tensorflow as tf
 
 from google.protobuf import message
 from google.protobuf import text_format
 
-from tensorflow.python.framework import test_util
 from tensorflow.python.lib.io import file_io
 from tensorflow.python.platform import resource_loader
 from tensorflow.python.platform import test
@@ -47,6 +41,14 @@ from tensorflow.tools.api.lib import api_objects_pb2
 from tensorflow.tools.api.lib import python_object_to_proto_visitor
 from tensorflow.tools.common import public_api
 from tensorflow.tools.common import traverse
+
+# pylint: disable=g-import-not-at-top,unused-import
+_TENSORBOARD_AVAILABLE = True
+try:
+  import tensorboard as _tb
+except ImportError:
+  _TENSORBOARD_AVAILABLE = False
+# pylint: enable=g-import-not-at-top,unused-import
 
 # FLAGS defined at the bottom:
 FLAGS = None
@@ -70,19 +72,33 @@ _VERBOSE_DIFFS_HELP = """
      false, only print which libraries have differences.
 """
 
-_API_GOLDEN_FOLDER_V1 = 'tensorflow/tools/api/golden/v1'
-_API_GOLDEN_FOLDER_V2 = 'tensorflow/tools/api/golden/v2'
-_TEST_README_FILE = 'tensorflow/tools/api/tests/README.txt'
-_UPDATE_WARNING_FILE = 'tensorflow/tools/api/tests/API_UPDATE_WARNING.txt'
-
-_NON_CORE_PACKAGES = ['estimator']
+# Initialized with _InitPathConstants function below.
+_API_GOLDEN_FOLDER_V1 = None
+_API_GOLDEN_FOLDER_V2 = None
 
 
-# TODO(annarev): remove this once we test with newer version of
-# estimator that actually has compat v1 version.
-if not hasattr(tf.compat.v1, 'estimator'):
-  tf.compat.v1.estimator = tf.estimator
-  tf.compat.v2.estimator = tf.estimator
+def _InitPathConstants():
+  global _API_GOLDEN_FOLDER_V1
+  global _API_GOLDEN_FOLDER_V2
+  root_golden_path_v2 = os.path.join(resource_loader.get_data_files_path(),
+                                     '..', 'golden', 'v2', 'tensorflow.pbtxt')
+
+  if FLAGS.update_goldens:
+    root_golden_path_v2 = os.path.realpath(root_golden_path_v2)
+  # Get API directories based on the root golden file. This way
+  # we make sure to resolve symbolic links before creating new files.
+  _API_GOLDEN_FOLDER_V2 = os.path.dirname(root_golden_path_v2)
+  _API_GOLDEN_FOLDER_V1 = os.path.normpath(
+      os.path.join(_API_GOLDEN_FOLDER_V2, '..', 'v1'))
+
+
+_TEST_README_FILE = resource_loader.get_path_to_datafile('README.txt')
+_UPDATE_WARNING_FILE = resource_loader.get_path_to_datafile(
+    'API_UPDATE_WARNING.txt')
+
+_NON_CORE_PACKAGES = ['keras']
+_V1_APIS_FROM_KERAS = ['layers', 'nn.rnn_cell']
+_V2_APIS_FROM_KERAS = ['initializers', 'losses', 'metrics', 'optimizers']
 
 
 def _KeyToFilePath(key, api_version):
@@ -105,6 +121,13 @@ def _KeyToFilePath(key, api_version):
   case_insensitive_key = re.sub('([A-Z]{1})', _ReplaceCapsWithDash, key)
   api_folder = (
       _API_GOLDEN_FOLDER_V2 if api_version == 2 else _API_GOLDEN_FOLDER_V1)
+  if key.startswith('tensorflow.experimental.numpy'):
+    # Jumps up one more level in order to let Copybara find the
+    # 'tensorflow/third_party' string to replace
+    api_folder = os.path.join(
+        api_folder, '..', '..', '..', '..', '../third_party',
+        'py', 'numpy', 'tf_numpy_api')
+    api_folder = os.path.normpath(api_folder)
   return os.path.join(api_folder, '%s.pbtxt' % case_insensitive_key)
 
 
@@ -138,15 +161,35 @@ def _VerifyNoSubclassOfMessageVisitor(path, parent, unused_children):
 
 def _FilterNonCoreGoldenFiles(golden_file_list):
   """Filter out non-core API pbtxt files."""
+  return _FilterGoldenFilesByPrefix(golden_file_list, _NON_CORE_PACKAGES)
+
+
+def _FilterV1KerasRelatedGoldenFiles(golden_file_list):
+  return _FilterGoldenFilesByPrefix(golden_file_list, _V1_APIS_FROM_KERAS)
+
+
+def _FilterV2KerasRelatedGoldenFiles(golden_file_list):
+  return _FilterGoldenFilesByPrefix(golden_file_list, _V2_APIS_FROM_KERAS)
+
+
+def _FilterGoldenFilesByPrefix(golden_file_list, package_prefixes):
   filtered_file_list = []
-  filtered_package_prefixes = ['tensorflow.%s.' % p for p in _NON_CORE_PACKAGES]
+  filtered_package_prefixes = ['tensorflow.%s.' % p for p in package_prefixes]
   for f in golden_file_list:
     if any(
-        f.rsplit('/')[-1].startswith(pre) for pre in filtered_package_prefixes
-    ):
+        os.path.basename(f).startswith(pre)
+        for pre in filtered_package_prefixes):
       continue
     filtered_file_list.append(f)
   return filtered_file_list
+
+
+def _GetModuleOrClass(api_object):
+  if api_object.HasField('tf_module'):
+    return api_object.tf_module
+  if api_object.HasField('tf_class'):
+    return api_object.tf_class
+  return None
 
 
 def _FilterGoldenProtoDict(golden_proto_dict, omit_golden_symbols_map):
@@ -154,22 +197,26 @@ def _FilterGoldenProtoDict(golden_proto_dict, omit_golden_symbols_map):
   if not omit_golden_symbols_map:
     return golden_proto_dict
   filtered_proto_dict = dict(golden_proto_dict)
-  for key, symbol_list in six.iteritems(omit_golden_symbols_map):
+  for key, symbol_list in omit_golden_symbols_map.items():
     api_object = api_objects_pb2.TFAPIObject()
     api_object.CopyFrom(filtered_proto_dict[key])
     filtered_proto_dict[key] = api_object
-    module_or_class = None
-    if api_object.HasField('tf_module'):
-      module_or_class = api_object.tf_module
-    elif api_object.HasField('tf_class'):
-      module_or_class = api_object.tf_class
+    module_or_class = _GetModuleOrClass(api_object)
     if module_or_class is not None:
+      if 'is_instance' in symbol_list:
+        del module_or_class.is_instance[:]
       for members in (module_or_class.member, module_or_class.member_method):
         filtered_members = [m for m in members if m.name not in symbol_list]
         # Two steps because protobuf repeated fields disallow slice assignment.
         del members[:]
         members.extend(filtered_members)
   return filtered_proto_dict
+
+
+def _GetTFNumpyGoldenPattern(api_version):
+  return os.path.join(resource_loader.get_root_dir_with_all_resources(),
+                      _KeyToFilePath('tensorflow.experimental.numpy*',
+                                     api_version))
 
 
 class ApiCompatibilityTest(test.TestCase):
@@ -193,12 +240,13 @@ class ApiCompatibilityTest(test.TestCase):
                              verbose=False,
                              update_goldens=False,
                              additional_missing_object_message='',
-                             api_version=2):
+                             api_version=2,
+                             actual_dict_for_update=None):
     """Diff given dicts of protobufs and report differences a readable way.
 
     Args:
       expected_dict: a dict of TFAPIObject protos constructed from golden files.
-      actual_dict: a ict of TFAPIObject protos constructed by reading from the
+      actual_dict: a dict of TFAPIObject protos constructed by reading from the
         TF package linked to the test.
       verbose: Whether to log the full diffs, or simply report which files were
         different.
@@ -206,10 +254,14 @@ class ApiCompatibilityTest(test.TestCase):
       additional_missing_object_message: Message to print when a symbol is
         missing.
       api_version: TensorFlow API version to test.
+      actual_dict_for_update: Optional unfiltered actual protos to write when
+        update_goldens is true.
     """
+    if actual_dict_for_update is None:
+      actual_dict_for_update = actual_dict
+
     diffs = []
     verbose_diffs = []
-
     expected_keys = set(expected_dict.keys())
     actual_keys = set(actual_dict.keys())
     only_in_expected = expected_keys - actual_keys
@@ -252,9 +304,6 @@ class ApiCompatibilityTest(test.TestCase):
       diff_count = len(diffs)
       logging.error(self._test_readme_message)
       logging.error('%d differences found between API and golden.', diff_count)
-      messages = verbose_diffs if verbose else diffs
-      for i in range(diff_count):
-        print('Issue %d\t: %s' % (i + 1, messages[i]), file=sys.stderr)
 
       if update_goldens:
         # Write files if requested.
@@ -271,8 +320,13 @@ class ApiCompatibilityTest(test.TestCase):
         for key in only_in_actual | set(updated_keys):
           filepath = _KeyToFilePath(key, api_version)
           file_io.write_string_to_file(
-              filepath, text_format.MessageToString(actual_dict[key]))
+              filepath, text_format.MessageToString(
+                  actual_dict_for_update[key]))
       else:
+        # Include the actual differences to help debugging.
+        for d, verbose_d in zip(diffs, verbose_diffs):
+          logging.error('    %s', d)
+          logging.error('    %s', verbose_d)
         # Fail if we cannot fix the test by updating goldens.
         self.fail('%d differences found between API and golden.' % diff_count)
 
@@ -282,6 +336,7 @@ class ApiCompatibilityTest(test.TestCase):
   def testNoSubclassOfMessage(self):
     visitor = public_api.PublicAPIVisitor(_VerifyNoSubclassOfMessageVisitor)
     visitor.do_not_descend_map['tf'].append('contrib')
+    # visitor.do_not_descend_map['tf'].append('keras')
     # Skip compat.v1 and compat.v2 since they are validated in separate tests.
     visitor.private_map['tf.compat'] = ['v1', 'v2']
     traverse.traverse(tf, visitor)
@@ -293,6 +348,7 @@ class ApiCompatibilityTest(test.TestCase):
     visitor.do_not_descend_map['tf'].append('contrib')
     if FLAGS.only_test_core_api:
       visitor.do_not_descend_map['tf'].extend(_NON_CORE_PACKAGES)
+    visitor.private_map['tf.compat'] = ['v1', 'v2']
     traverse.traverse(tf.compat.v1, visitor)
 
   def testNoSubclassOfMessageV2(self):
@@ -307,7 +363,7 @@ class ApiCompatibilityTest(test.TestCase):
 
   def _checkBackwardsCompatibility(self,
                                    root,
-                                   golden_file_pattern,
+                                   golden_file_patterns,
                                    api_version,
                                    additional_private_map=None,
                                    omit_golden_symbols_map=None):
@@ -315,13 +371,26 @@ class ApiCompatibilityTest(test.TestCase):
     visitor = python_object_to_proto_visitor.PythonObjectToProtoVisitor()
 
     public_api_visitor = public_api.PublicAPIVisitor(visitor)
-    public_api_visitor.private_map['tf'] = ['contrib']
+    public_api_visitor.private_map['tf'].append('contrib')
     if api_version == 2:
       public_api_visitor.private_map['tf'].append('enable_v2_behavior')
 
     public_api_visitor.do_not_descend_map['tf.GPUOptions'] = ['Experimental']
+    # Do not descend into these numpy classes because their signatures may be
+    # different between internal and OSS.
+    public_api_visitor.do_not_descend_map['tf.experimental.numpy'] = [
+        'bool_', 'complex_', 'complex128', 'complex64', 'float_', 'float16',
+        'float32', 'float64', 'inexact', 'int_', 'int16', 'int32', 'int64',
+        'int8', 'object_', 'string_', 'uint16', 'uint32', 'uint64', 'uint8',
+        'unicode_', 'iinfo']
+    public_api_visitor.do_not_descend_map['tf'].append('keras')
     if FLAGS.only_test_core_api:
       public_api_visitor.do_not_descend_map['tf'].extend(_NON_CORE_PACKAGES)
+      if api_version == 2:
+        public_api_visitor.do_not_descend_map['tf'].extend(_V2_APIS_FROM_KERAS)
+      else:
+        public_api_visitor.do_not_descend_map['tf'].extend(['layers'])
+        public_api_visitor.do_not_descend_map['tf.nn'] = ['rnn_cell']
     if additional_private_map:
       public_api_visitor.private_map.update(additional_private_map)
 
@@ -329,9 +398,13 @@ class ApiCompatibilityTest(test.TestCase):
     proto_dict = visitor.GetProtos()
 
     # Read all golden files.
-    golden_file_list = file_io.get_matching_files(golden_file_pattern)
+    golden_file_list = file_io.get_matching_files(golden_file_patterns)
     if FLAGS.only_test_core_api:
       golden_file_list = _FilterNonCoreGoldenFiles(golden_file_list)
+      if api_version == 2:
+        golden_file_list = _FilterV2KerasRelatedGoldenFiles(golden_file_list)
+      else:
+        golden_file_list = _FilterV1KerasRelatedGoldenFiles(golden_file_list)
 
     def _ReadFileToProto(filename):
       """Read a filename, create a protobuf from its contents."""
@@ -345,77 +418,126 @@ class ApiCompatibilityTest(test.TestCase):
     }
     golden_proto_dict = _FilterGoldenProtoDict(golden_proto_dict,
                                                omit_golden_symbols_map)
+    filtered_proto_dict = _FilterGoldenProtoDict(proto_dict,
+                                                 omit_golden_symbols_map)
 
     # Diff them. Do not fail if called with update.
     # If the test is run to update goldens, only report diffs but do not fail.
     self._AssertProtoDictEquals(
         golden_proto_dict,
-        proto_dict,
+        filtered_proto_dict,
         verbose=FLAGS.verbose_diffs,
         update_goldens=FLAGS.update_goldens,
-        api_version=api_version)
+        api_version=api_version,
+        actual_dict_for_update=proto_dict)
 
-  @test_util.run_v1_only('b/120545219')
   def testAPIBackwardsCompatibility(self):
-    api_version = 2 if '_api.v2' in tf.bitwise.__name__ else 1
-    golden_file_pattern = os.path.join(
-        resource_loader.get_root_dir_with_all_resources(),
-        _KeyToFilePath('*', api_version))
+    api_version = 1
+    if hasattr(tf, '_major_api_version') and tf._major_api_version == 2:
+      api_version = 2
+    golden_file_patterns = [
+        os.path.join(resource_loader.get_root_dir_with_all_resources(),
+                     _KeyToFilePath('*', api_version)),
+        _GetTFNumpyGoldenPattern(api_version)]
     omit_golden_symbols_map = {}
-    if api_version == 2 and FLAGS.only_test_core_api:
+    if (api_version == 2 and FLAGS.only_test_core_api and
+        not _TENSORBOARD_AVAILABLE):
       # In TF 2.0 these summary symbols are imported from TensorBoard.
       omit_golden_symbols_map['tensorflow.summary'] = [
-          'audio', 'histogram', 'image', 'scalar', 'text']
+          'audio', 'histogram', 'image', 'scalar', 'text'
+      ]
+    omit_golden_symbols_map.update(
+        self._ignored_is_instance_types(['tensorflow.__internal__.FuncGraph'])
+    )
 
     self._checkBackwardsCompatibility(
         tf,
-        golden_file_pattern,
+        golden_file_patterns,
         api_version,
         # Skip compat.v1 and compat.v2 since they are validated
         # in separate tests.
         additional_private_map={'tf.compat': ['v1', 'v2']},
         omit_golden_symbols_map=omit_golden_symbols_map)
 
-    # Also check that V1 API has contrib
-    self.assertTrue(
-        'tensorflow.python.util.lazy_loader.LazyLoader'
-        in str(type(tf.contrib)))
+    # Check that V2 API does not have contrib
+    self.assertTrue(api_version == 1 or not hasattr(tf, 'contrib'))
 
-  @test_util.run_v1_only('b/120545219')
   def testAPIBackwardsCompatibilityV1(self):
     api_version = 1
-    golden_file_pattern = os.path.join(
+    golden_file_patterns = os.path.join(
         resource_loader.get_root_dir_with_all_resources(),
         _KeyToFilePath('*', api_version))
+    omit_golden_symbols_map = {'tensorflow': ['pywrap_tensorflow']}
+    omit_golden_symbols_map.update(
+        self._ignored_is_instance_types(['tensorflow.python_io.TFRecordWriter'])
+    )
+    # In OSS we have a different version of ABSL.
+    omit_golden_symbols_map['tensorflow.logging'] = ['log_if']
     self._checkBackwardsCompatibility(
-        tf.compat.v1, golden_file_pattern, api_version,
-        additional_private_map={'tf': ['pywrap_tensorflow']},
-        omit_golden_symbols_map={'tensorflow': ['pywrap_tensorflow']})
+        tf.compat.v1,
+        golden_file_patterns,
+        api_version,
+        additional_private_map={
+            'tf': ['pywrap_tensorflow'],
+            'tf.compat': ['v1', 'v2'],
+        },
+        omit_golden_symbols_map=omit_golden_symbols_map)
 
   def testAPIBackwardsCompatibilityV2(self):
     api_version = 2
-    golden_file_pattern = os.path.join(
-        resource_loader.get_root_dir_with_all_resources(),
-        _KeyToFilePath('*', api_version))
+    golden_file_patterns = [
+        os.path.join(resource_loader.get_root_dir_with_all_resources(),
+                     _KeyToFilePath('*', api_version)),
+        _GetTFNumpyGoldenPattern(api_version)]
     omit_golden_symbols_map = {}
-    if FLAGS.only_test_core_api:
+    if FLAGS.only_test_core_api and not _TENSORBOARD_AVAILABLE:
       # In TF 2.0 these summary symbols are imported from TensorBoard.
       omit_golden_symbols_map['tensorflow.summary'] = [
-          'audio', 'histogram', 'image', 'scalar', 'text']
+          'audio', 'histogram', 'image', 'scalar', 'text'
+      ]
+    omit_golden_symbols_map.update(
+        self._ignored_is_instance_types(['tensorflow.__internal__.FuncGraph'])
+    )
+
     self._checkBackwardsCompatibility(
         tf.compat.v2,
-        golden_file_pattern,
+        golden_file_patterns,
         api_version,
         additional_private_map={'tf.compat': ['v1', 'v2']},
         omit_golden_symbols_map=omit_golden_symbols_map)
+
+  def _ignored_is_instance_types(self, extra_types=None):
+    # In case a new type is defined within a pywrap_<module_name>.so library,
+    # it will end up having proper type and location in distributed OSS wheel
+    # package eventually, but that conversion happens after this test is ran.
+    #
+    # Making this test depend on wheel itself also breaks because wheels use
+    # _upb as underlying protobuf implementation while internal TF uses cpp
+    # implementation (resulting in different is_instance values for protobuf
+    # metadata types in golden pbtxt depending on which protobuf implementation
+    # is being used during test execution). The cpp implementation is not  even
+    # included anymore in protobuf oss wheels.
+    #
+    # We end up in a situation when we cannot make this test pass internally and
+    # externally on the same set of golden expected .pbtxt inputs. It is rare
+    # and minor discrepancy, so just ignore the is_instance checks for the few
+    # problematic types, they are guaraneed to have proper types in final wheel
+    # anyway.
+    ignored_is_instance_types = [
+        'tensorflow.DType',
+        'tensorflow.dtypes.DType',
+        'tensorflow.__internal__.SymbolicTensor',
+        'tensorflow.Graph',
+        'tensorflow.Operation',
+        'tensorflow.io.TFRecordWriter'
+    ] + extra_types if extra_types else []
+    return {k: 'is_instance' for k in ignored_is_instance_types}
 
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
   parser.add_argument(
       '--update_goldens', type=bool, default=False, help=_UPDATE_GOLDENS_HELP)
-  # TODO(mikecase): Create Estimator's own API compatibility test or
-  # a more general API compatibility test for use for TF components.
   parser.add_argument(
       '--only_test_core_api',
       type=bool,
@@ -424,6 +546,7 @@ if __name__ == '__main__':
   parser.add_argument(
       '--verbose_diffs', type=bool, default=True, help=_VERBOSE_DIFFS_HELP)
   FLAGS, unparsed = parser.parse_known_args()
+  _InitPathConstants()
 
   # Now update argv, so that unittest library does not get confused.
   sys.argv = [sys.argv[0]] + unparsed

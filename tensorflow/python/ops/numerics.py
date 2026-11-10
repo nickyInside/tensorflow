@@ -15,20 +15,18 @@
 
 """Connects all half, float and double tensors to CheckNumericsOp."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.util import deprecation
+from tensorflow.python.util import dispatch
 from tensorflow.python.util.tf_export import tf_export
 
 
 @tf_export(v1=["debugging.assert_all_finite", "verify_tensor_all_finite"])
+@dispatch.add_dispatch_support
 @deprecation.deprecated_endpoints("verify_tensor_all_finite")
 def verify_tensor_all_finite(t=None, msg=None, name=None, x=None, message=None):
   """Assert that the tensor does not contain any NaN's or Inf's.
@@ -50,8 +48,22 @@ def verify_tensor_all_finite(t=None, msg=None, name=None, x=None, message=None):
 
 
 @tf_export("debugging.assert_all_finite", v1=[])
+@dispatch.add_dispatch_support
 def verify_tensor_all_finite_v2(x, message, name=None):
   """Assert that the tensor does not contain any NaN's or Inf's.
+
+  >>> @tf.function
+  ... def f(x):
+  ...   x = tf.debugging.assert_all_finite(x, 'Input x must be all finite')
+  ...   return x + 1
+
+  >>> f(tf.constant([np.inf, 1, 2]))
+  Traceback (most recent call last):
+     ...
+  InvalidArgumentError: ...
+
+  Note: Under XLA compilation (e.g. `tf.function(jit_compile=True)`), this
+  check is a no-op and does not check for `NaN` or `Inf` values at runtime.
 
   Args:
     x: Tensor to check.
@@ -92,15 +104,15 @@ def add_check_numerics_ops():
 
   @compatibility(eager)
   Not compatible with eager execution. To check for `Inf`s and `NaN`s under
-  eager execution, call `tfe.seterr(inf_or_nan='raise')` once before executing
-  the checked operations.
+  eager execution, call `tf.debugging.enable_check_numerics()` once before
+  executing the checked operations.
   @end_compatibility
   """
   if context.executing_eagerly():
     raise RuntimeError(
         "add_check_numerics_ops() is not compatible with eager execution. "
         "To check for Inf's and NaN's under eager execution, call "
-        "tfe.seterr(inf_or_nan='raise') once before executing the "
+        "tf.debugging.enable_check_numerics() once before executing the "
         "checked operations.")
 
   check_op = []

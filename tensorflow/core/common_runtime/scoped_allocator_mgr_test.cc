@@ -36,7 +36,7 @@ class ScopedAllocatorMgrTest : public ::testing::Test {
                                        &fields_);
   }
 
-  Status AddScopedAllocator(int expected_use_count, int scope_id) {
+  absl::Status AddScopedAllocator(int expected_use_count, int scope_id) {
     VLOG(2) << "Adding ScopedAllocator step_id " << step_id_ << " scope_id "
             << scope_id_ << " #fields " << fields_.size()
             << " expected_use_count " << expected_use_count;
@@ -45,7 +45,7 @@ class ScopedAllocatorMgrTest : public ::testing::Test {
                                    expected_use_count);
   }
 
-  Status PrepScopedAllocatorMgr(int expected_use_count) {
+  absl::Status PrepScopedAllocatorMgr(int expected_use_count) {
     InitTensor();
     PopulateFields();
     return AddScopedAllocator(expected_use_count, scope_id_);
@@ -110,20 +110,20 @@ TEST_F(ScopedAllocatorMgrTest, PopulateFields) {
   InitTensor();
   PopulateFields();
   EXPECT_EQ(0, fields_[0].offset);
-  EXPECT_EQ(512 * sizeof(float), fields_[0].bytes);
+  EXPECT_EQ(512 * sizeof(float), fields_[0].bytes_requested);
   EXPECT_EQ(scope_id_ + 1, fields_[0].scope_id);
   EXPECT_EQ(512 * sizeof(float), fields_[1].offset);
-  EXPECT_EQ(9 * sizeof(float), fields_[1].bytes);
+  EXPECT_EQ(9 * sizeof(float), fields_[1].bytes_requested);
   EXPECT_EQ(scope_id_ + 2, fields_[1].scope_id);
   EXPECT_EQ(521 * sizeof(float) + AlignmentPadding(), fields_[2].offset);
-  EXPECT_EQ(512 * sizeof(float), fields_[2].bytes);
+  EXPECT_EQ(512 * sizeof(float), fields_[2].bytes_requested);
   EXPECT_EQ(scope_id_ + 3, fields_[2].scope_id);
 }
 
 TEST_F(ScopedAllocatorMgrTest, ContainerAddAllocator) {
   backing_tensor_shape_ = TensorShape({1024});
   fields_shapes_ = std::vector<TensorShape>({{512}, {512}});
-  Status s = PrepScopedAllocatorMgr(2);
+  absl::Status s = PrepScopedAllocatorMgr(2);
   EXPECT_TRUE(s.ok());
   // Need to call Allocate and Deallocate in order to use up the expected uses
   // for this allocator.  Save the instances for now.
@@ -150,7 +150,7 @@ TEST_F(ScopedAllocatorMgrTest, AllocatorSuccess) {
   EXPECT_EQ(other, nullptr);
   backing_tensor_shape_ = TensorShape({512 + 9 + 512 + 16});
   fields_shapes_ = std::vector<TensorShape>({{512}, {3, 3}, {2, 256}});
-  Status s = PrepScopedAllocatorMgr(3);
+  absl::Status s = PrepScopedAllocatorMgr(3);
   other = sac->GetAllocator(scope_id_);
 
   ScopedAllocatorInstance* inst0 = sac->GetInstance(scope_id_ + 1);
@@ -185,10 +185,11 @@ TEST_F(ScopedAllocatorMgrTest, AllocatorInitFail) {
   fields_.resize(1);
   fields_[0].scope_id = scope_id_ + 1;
   fields_[0].offset = 0;
-  fields_[0].bytes = backing_tensor_shape_.num_elements() * 2 * sizeof(float);
-  // fields[0].offset + fields[0].bytes is larger than the size of the backing
-  // tensor, so this check should fail
-  EXPECT_DEATH(Status s = AddScopedAllocator(1, scope_id_), "");
+  fields_[0].bytes_requested =
+      backing_tensor_shape_.num_elements() * 2 * sizeof(float);
+  // fields[0].offset + fields[0].bytes_requested is larger than the size of the
+  // backing tensor, so this check should fail
+  EXPECT_DEATH(absl::Status s = AddScopedAllocator(1, scope_id_), "");
 }
 
 // ScopedAllocator allocation should fail because we called more times than
@@ -197,7 +198,7 @@ TEST_F(ScopedAllocatorMgrTest, AllocatorInitFail) {
 TEST_F(ScopedAllocatorMgrTest, AllocatorFail) {
   backing_tensor_shape_ = TensorShape({1024});
   fields_shapes_ = std::vector<TensorShape>({{512}, {512}});
-  Status s = PrepScopedAllocatorMgr(2);
+  absl::Status s = PrepScopedAllocatorMgr(2);
   EXPECT_TRUE(s.ok());
   // Save instances so that we can explicitly delete later on.  In normal
   // operation the instances will be automatically deleted after single use, but

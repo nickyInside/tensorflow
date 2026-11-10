@@ -13,16 +13,15 @@
 # limitations under the License.
 # ==============================================================================
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
+from tensorflow.python.eager import backprop
+from tensorflow.python.framework import config
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import variables as variables_module
 from tensorflow.python.ops.linalg import linalg as linalg_lib
 from tensorflow.python.ops.linalg import linear_operator_kronecker as kronecker
 from tensorflow.python.ops.linalg import linear_operator_lower_triangular as lower_triangular
@@ -53,9 +52,9 @@ def _kronecker_dense(factors):
 
 
 class KroneckerDenseTest(test.TestCase):
+  """Test of `_kronecker_dense` function."""
 
-  @test_util.run_deprecated_v1
-  def testKroneckerDenseMatrix(self):
+  def test_kronecker_dense_matrix(self):
     x = ops.convert_to_tensor([[2., 3.], [1., 2.]], dtype=dtypes.float32)
     y = ops.convert_to_tensor([[1., 2.], [5., -1.]], dtype=dtypes.float32)
     # From explicitly writing out the kronecker product of x and y.
@@ -71,16 +70,23 @@ class KroneckerDenseTest(test.TestCase):
         [10., 15., -2., -3.],
         [5., 10., -1., -2.]], dtype=dtypes.float32)
 
-    with self.cached_session():
-      self.assertAllClose(_kronecker_dense([x, y]).eval(), self.evaluate(z))
-      self.assertAllClose(_kronecker_dense([y, x]).eval(), self.evaluate(w))
+    self.assertAllClose(
+        self.evaluate(_kronecker_dense([x, y])), self.evaluate(z))
+    self.assertAllClose(
+        self.evaluate(_kronecker_dense([y, x])), self.evaluate(w))
 
 
+@test_util.run_all_in_graph_and_eager_modes
 class SquareLinearOperatorKroneckerTest(
     linear_operator_test_util.SquareLinearOperatorDerivedClassTest):
   """Most tests done in the base class LinearOperatorDerivedClassTest."""
 
+  def tearDown(self):
+    config.enable_tensor_float_32_execution(self.tf32_keep_)
+
   def setUp(self):
+    self.tf32_keep_ = config.tensor_float_32_execution_enabled()
+    config.enable_tensor_float_32_execution(False)
     # Increase from 1e-6 to 1e-4
     self._atol[dtypes.float32] = 1e-4
     self._atol[dtypes.complex64] = 1e-4
@@ -163,7 +169,7 @@ class SquareLinearOperatorKroneckerTest(
     self.assertFalse(operator.is_positive_definite)
     self.assertTrue(operator.is_non_singular)
 
-    with self.assertRaisesRegexp(ValueError, "always non-singular"):
+    with self.assertRaisesRegex(ValueError, "always non-singular"):
       kronecker.LinearOperatorKronecker(
           [operator_1, operator_2], is_non_singular=False)
 
@@ -181,11 +187,11 @@ class SquareLinearOperatorKroneckerTest(
         linalg.LinearOperatorFullMatrix(rng.rand(2, 3, 3)),
         linalg.LinearOperatorFullMatrix(rng.rand(2, 3, 3).astype(np.float32))
     ]
-    with self.assertRaisesRegexp(TypeError, "same dtype"):
+    with self.assertRaisesRegex(TypeError, "same dtype"):
       kronecker.LinearOperatorKronecker(operators)
 
   def test_empty_or_one_operators_raises(self):
-    with self.assertRaisesRegexp(ValueError, ">=1 operators"):
+    with self.assertRaisesRegex(ValueError, ">=1 operators"):
       kronecker.LinearOperatorKronecker([])
 
   def test_kronecker_adjoint_type(self):
@@ -251,6 +257,58 @@ class SquareLinearOperatorKroneckerTest(
         inverse,
         kronecker.LinearOperatorKronecker)
     self.assertEqual(2, len(inverse.operators))
+
+  def test_tape_safe(self):
+    matrix_1 = variables_module.Variable([[1., 0.], [0., 1.]])
+    matrix_2 = variables_module.Variable([[2., 0.], [0., 2.]])
+    operator = kronecker.LinearOperatorKronecker(
+        [
+            linalg.LinearOperatorFullMatrix(
+                matrix_1, is_non_singular=True),
+            linalg.LinearOperatorFullMatrix(
+                matrix_2, is_non_singular=True),
+        ],
+        is_non_singular=True,
+    )
+    self.check_tape_safe(operator)
+
+  def test_convert_variables_to_tensors(self):
+    matrix_1 = variables_module.Variable([[1., 0.], [0., 1.]])
+    matrix_2 = variables_module.Variable([[2., 0.], [0., 2.]])
+    operator = kronecker.LinearOperatorKronecker(
+        [
+            linalg.LinearOperatorFullMatrix(
+                matrix_1, is_non_singular=True),
+            linalg.LinearOperatorFullMatrix(
+                matrix_2, is_non_singular=True),
+        ],
+        is_non_singular=True,
+    )
+    with self.cached_session() as sess:
+      sess.run([x.initializer for x in operator.variables])
+      self.check_convert_variables_to_tensors(operator)
+
+  def test_composite_gradients(self):
+    with backprop.GradientTape() as tape:
+      op1 = linalg.LinearOperatorFullMatrix(
+          [[1., 0.], [0., 1.]], is_non_singular=True)
+      op2 = linalg.LinearOperatorFullMatrix(
+          [[2., 0.], [0., 2.]], is_non_singular=True)
+      tape.watch([op1, op2])
+      operator = kronecker.LinearOperatorKronecker(
+          [op1, op2], is_non_singular=True)
+
+      x = self.make_x(op1, adjoint=False)
+      y = op1.matmul(x)
+      connected_grad, disconnected_grad, composite_grad = tape.gradient(
+          y, [op1, op2, operator])
+
+    disconnected_component_grad = composite_grad.operators[1].to_dense()
+    self.assertAllClose(connected_grad.to_dense(),
+                        composite_grad.operators[0].to_dense())
+    self.assertAllClose(disconnected_component_grad,
+                        array_ops.zeros_like(disconnected_component_grad))
+    self.assertIsNone(disconnected_grad)
 
 
 if __name__ == "__main__":

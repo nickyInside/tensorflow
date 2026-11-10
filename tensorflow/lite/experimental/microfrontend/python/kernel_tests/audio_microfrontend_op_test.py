@@ -14,14 +14,10 @@
 # ==============================================================================
 """Tests for AudioMicrofrontend."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import tensorflow as tf
 
 from tensorflow.lite.experimental.microfrontend.python.ops import audio_microfrontend_op as frontend_op
-from tensorflow.python.framework import test_util
+from tensorflow.python.framework import ops
 
 SAMPLE_RATE = 1000
 WINDOW_SIZE = 25
@@ -34,7 +30,10 @@ SMOOTHING_BITS = 10
 
 class AudioFeatureGenerationTest(tf.test.TestCase):
 
-  @test_util.run_v1_only("b/120545219")
+  def setUp(self):
+    super(AudioFeatureGenerationTest, self).setUp()
+    ops.disable_eager_execution()
+
   def testSimple(self):
     with self.test_session():
       audio = tf.constant(
@@ -50,10 +49,10 @@ class AudioFeatureGenerationTest(tf.test.TestCase):
           lower_band_limit=LOWER_BAND_LIMIT,
           smoothing_bits=SMOOTHING_BITS,
           enable_pcan=True)
-      self.assertAllEqual(filterbanks.eval(),
-                          [[479, 425], [436, 378], [410, 350], [391, 325]])
+      self.assertAllEqual(
+          self.evaluate(filterbanks),
+          [[479, 425], [436, 378], [410, 350], [391, 325]])
 
-  @test_util.run_v1_only("b/120545219")
   def testSimpleFloatScaled(self):
     with self.test_session():
       audio = tf.constant(
@@ -71,11 +70,11 @@ class AudioFeatureGenerationTest(tf.test.TestCase):
           enable_pcan=True,
           out_scale=64,
           out_type=tf.float32)
-      self.assertAllEqual(filterbanks.eval(),
-                          [[7.484375, 6.640625], [6.8125, 5.90625],
-                           [6.40625, 5.46875], [6.109375, 5.078125]])
+      self.assertAllEqual(
+          self.evaluate(filterbanks),
+          [[7.484375, 6.640625], [6.8125, 5.90625], [6.40625, 5.46875],
+           [6.109375, 5.078125]])
 
-  @test_util.run_v1_only("b/120545219")
   def testStacking(self):
     with self.test_session():
       audio = tf.constant(
@@ -93,8 +92,9 @@ class AudioFeatureGenerationTest(tf.test.TestCase):
           enable_pcan=True,
           right_context=1,
           frame_stride=2)
-      self.assertAllEqual(filterbanks.eval(),
-                          [[479, 425, 436, 378], [410, 350, 391, 325]])
+      self.assertAllEqual(
+          self.evaluate(filterbanks),
+          [[479, 425, 436, 378], [410, 350, 391, 325]])
 
   def testStackingWithOverlap(self):
     with self.test_session():
@@ -118,7 +118,6 @@ class AudioFeatureGenerationTest(tf.test.TestCase):
           [[479, 425, 479, 425, 436, 378], [479, 425, 436, 378, 410, 350],
            [436, 378, 410, 350, 391, 325], [410, 350, 391, 325, 391, 325]])
 
-  @test_util.run_v1_only("b/120545219")
   def testStackingDropFrame(self):
     with self.test_session():
       audio = tf.constant(
@@ -136,8 +135,9 @@ class AudioFeatureGenerationTest(tf.test.TestCase):
           enable_pcan=True,
           left_context=1,
           frame_stride=2)
-      self.assertAllEqual(filterbanks.eval(),
-                          [[479, 425, 479, 425], [436, 378, 410, 350]])
+      self.assertAllEqual(
+          self.evaluate(filterbanks),
+          [[479, 425, 479, 425], [436, 378, 410, 350]])
 
   def testZeroPadding(self):
     with self.test_session():

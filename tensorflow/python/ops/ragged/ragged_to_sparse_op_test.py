@@ -14,26 +14,22 @@
 # ==============================================================================
 """Tests for ragged.to_sparse op."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.eager import context
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gen_ragged_conversion_ops
 from tensorflow.python.ops import gradients_impl
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops.ragged import ragged_factory_ops
 from tensorflow.python.ops.ragged import ragged_functional_ops
 from tensorflow.python.ops.ragged import ragged_tensor
-from tensorflow.python.ops.ragged import ragged_test_util
 from tensorflow.python.platform import googletest
 
 
 @test_util.run_all_in_graph_and_eager_modes
-class RaggedTensorToSparseOpTest(ragged_test_util.RaggedTensorTestCase):
+class RaggedTensorToSparseOpTest(test_util.TensorFlowTestCase):
 
   def testDocStringExample(self):
     rt = ragged_factory_ops.constant([[1, 2, 3], [4], [], [5, 6]])
@@ -147,7 +143,7 @@ class RaggedTensorToSparseOpTest(ragged_test_util.RaggedTensorTestCase):
     bad_rt1 = ragged_tensor.RaggedTensor.from_row_splits(
         row_splits=[2, 3], values=[1, 2, 3], validate=False)
     bad_split0 = r'First value of ragged splits must be 0.*'
-    with self.assertRaisesRegexp(errors.InvalidArgumentError, bad_split0):
+    with self.assertRaisesRegex(errors.InvalidArgumentError, bad_split0):
       self.evaluate(bad_rt1.to_sparse())
 
     bad_rt2 = ragged_tensor.RaggedTensor.from_row_splits(
@@ -159,8 +155,8 @@ class RaggedTensorToSparseOpTest(ragged_test_util.RaggedTensorTestCase):
         validate=False)
     split_mismatch1_error = r'Final value of ragged splits must match.*'
     for rt in [bad_rt2, bad_rt3]:
-      with self.assertRaisesRegexp(errors.InvalidArgumentError,
-                                   split_mismatch1_error):
+      with self.assertRaisesRegex(errors.InvalidArgumentError,
+                                  split_mismatch1_error):
         self.evaluate(rt.to_sparse())
 
     bad_rt4 = ragged_tensor.RaggedTensor.from_row_splits(
@@ -169,16 +165,38 @@ class RaggedTensorToSparseOpTest(ragged_test_util.RaggedTensorTestCase):
             row_splits=[0], values=empty_vector, validate=False),
         validate=False)
     split_mismatch2_error = r'Final value of ragged splits must match.*'
-    with self.assertRaisesRegexp(errors.InvalidArgumentError,
-                                 split_mismatch2_error):
+    with self.assertRaisesRegex(errors.InvalidArgumentError,
+                                split_mismatch2_error):
       self.evaluate(bad_rt4.to_sparse())
 
     bad_rt5 = ragged_tensor.RaggedTensor.from_row_splits(
         row_splits=empty_vector, values=[], validate=False)
     empty_splits_error = (r'ragged splits may not be empty.*')
-    with self.assertRaisesRegexp(errors.InvalidArgumentError,
-                                 empty_splits_error):
+    with self.assertRaisesRegex(errors.InvalidArgumentError,
+                                empty_splits_error):
       self.evaluate(bad_rt5.to_sparse())
+
+  def testRejectsScalarValues(self):
+    for splits_dtype in (dtypes.int32, dtypes.int64):
+      with self.subTest(splits_dtype=splits_dtype):
+        values = array_ops.zeros([], dtype=dtypes.int32)
+        splits = [math_ops.cast([0, 1], splits_dtype)]
+        if not context.executing_eagerly():
+          with self.assertRaisesRegex(
+              ValueError, 'Shape must be at least rank 1'
+          ):
+            gen_ragged_conversion_ops.ragged_tensor_to_sparse(
+                rt_nested_splits=splits, rt_dense_values=values
+            )
+          values = array_ops.placeholder_with_default(values, shape=None)
+        with self.assertRaisesRegex(
+            errors.InvalidArgumentError, 'rt_dense_values must have rank >= 1'
+        ):
+          self.evaluate(
+              gen_ragged_conversion_ops.ragged_tensor_to_sparse(
+                  rt_nested_splits=splits, rt_dense_values=values
+              )
+          )
 
   def testGradient(self):
     if context.executing_eagerly():
@@ -193,8 +211,8 @@ class RaggedTensorToSparseOpTest(ragged_test_util.RaggedTensorTestCase):
 
     g1, g2 = gradients_impl.gradients(st.values,
                                       [rt1.flat_values, rt2.flat_values])
-    self.assertRaggedEqual(g1, [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]])
-    self.assertRaggedEqual(g2, [[2.0, 2.0], [2.0, 2.0], [2.0, 2.0]])
+    self.assertAllEqual(g1, [[1.0, 1.0], [1.0, 1.0], [1.0, 1.0]])
+    self.assertAllEqual(g2, [[2.0, 2.0], [2.0, 2.0], [2.0, 2.0]])
 
 
 if __name__ == '__main__':

@@ -15,9 +15,18 @@ limitations under the License.
 
 #include "tensorflow/lite/core/api/op_resolver.h"
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 
 #include <gtest/gtest.h>
+#include "flatbuffers/buffer.h"  // from @flatbuffers
+#include "flatbuffers/flatbuffer_builder.h"  // from @flatbuffers
+#include "tensorflow/compiler/mlir/lite/core/api/error_reporter.h"
+#include "tensorflow/compiler/mlir/lite/schema/schema_conversion_utils.h"
+#include "tensorflow/lite/c/c_api_types.h"
+#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/schema/schema_generated.h"
 
 namespace tflite {
 namespace {
@@ -186,12 +195,9 @@ TEST(OpResolver, TestGetRegistrationFromOpCodeNonexistentCustom) {
   EXPECT_EQ(kTfLiteError, GetRegistrationFromOpCode(conv_code, *resolver,
                                                     reporter, &registration));
   EXPECT_EQ(nullptr, registration);
-  EXPECT_NE(0, mock_reporter.GetBufferSize());
+  // There is no error, since unresolved custom ops are checked while preparing
+  // nodes.
+  EXPECT_EQ(0, mock_reporter.GetBufferSize());
 }
 
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

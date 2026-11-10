@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #define EIGEN_USE_GPU
 
@@ -29,10 +29,10 @@ namespace tensorflow {
 
 namespace functor {
 
-template struct SwapDimension1And2InTensor3<Eigen::GpuDevice, uint16>;
-template struct SwapDimension0And2InTensor3<Eigen::GpuDevice, uint16>;
+template struct SwapDimension1And2InTensor3<Eigen::GpuDevice, uint16_t>;
+template struct SwapDimension0And2InTensor3<Eigen::GpuDevice, uint16_t>;
 
 }  // namespace functor
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

@@ -15,8 +15,8 @@ limitations under the License.
 #include "tensorflow/lite/testing/kernel_test/diff_analyzer.h"
 
 #include <fstream>
+#include <string>
 
-#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "tensorflow/core/lib/io/path.h"
 
@@ -27,18 +27,19 @@ namespace {
 
 TEST(DiffAnalyzerTest, ZeroDiff) {
   DiffAnalyzer diff_analyzer;
-  string filename = "tensorflow/lite/testdata/test_input.csv";
+  string filename =
+      "tensorflow/lite/testing/kernel_test/testdata/test_input.csv";
   ASSERT_EQ(diff_analyzer.ReadFiles(filename, filename), kTfLiteOk);
 
   string output_file =
-      tensorflow::io::JoinPath(FLAGS_test_tmpdir + "diff_report.csv");
+      tensorflow::io::JoinPath(::testing::TempDir(), "diff_report.csv");
   ASSERT_EQ(diff_analyzer.WriteReport(output_file), kTfLiteOk);
 
   std::string content;
   std::ifstream file(output_file);
   std::getline(file, content);
   std::getline(file, content);
-  ASSERT_EQ(content, "0,0");
+  ASSERT_EQ(content, "a:0,0");
 }
 
 }  // namespace

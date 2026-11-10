@@ -17,6 +17,7 @@ limitations under the License.
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/shape_inference_testutil.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
+#include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 
@@ -44,7 +45,7 @@ TEST(ImageOpsTest, Resize_ShapeFn) {
     // When the size tensor is not a constant, the middle dims are unknown.
     INFER_OK(op, "[1,?,3,?];[2]", "[d0_0,?,?,d0_3]");
 
-    Tensor size_tensor = test::AsTensor<int32>({20, 30});
+    Tensor size_tensor = test::AsTensor<int32_t>({20, 30});
     op.input_tensors[1] = &size_tensor;
     INFER_OK(op, "[1,?,3,?];[2]", "[d0_0,20,30,d0_3]");
   }
@@ -59,6 +60,34 @@ TEST(ImageOpsTest, DecodeGif) {
   // Output is always ?,?,?,3.
   INFER_OK(op, "?", "[?,?,?,3]");
   INFER_OK(op, "[]", "[?,?,?,3]");
+}
+
+TEST(ImageOpTest, DecodeImage) {
+  ShapeInferenceTestOp op("DecodeImage");
+
+  // Rank check.
+  INFER_ERROR("Shape must be rank 0 but is rank 1", op, "[1]");
+
+  // Set `expand_animations` to false. Output is always ?,?,?.
+  TF_ASSERT_OK(NodeDefBuilder("test", "DecodeImage")
+                   .Input({"img", 0, DT_STRING})
+                   .Attr("expand_animations", false)
+                   .Finalize(&op.node_def));
+  INFER_OK(op, "[]", "[?,?,?]");
+
+  // Set `expand_animations` to false. Output shape is not known (3D or 4D).
+  TF_ASSERT_OK(NodeDefBuilder("test", "DecodeImage")
+                   .Input({"img", 0, DT_STRING})
+                   .Attr("expand_animations", true)
+                   .Finalize(&op.node_def));
+  INFER_OK(op, "[]", "?");
+
+  // Negative channel value is rejected.
+  TF_ASSERT_OK(NodeDefBuilder("test", "DecodeImage")
+                   .Input({"img", 0, DT_STRING})
+                   .Attr("channels", -1)
+                   .Finalize(&op.node_def));
+  INFER_ERROR("channels must be non-negative, got -1", op, "[]");
 }
 
 TEST(ImageOpsTest, DecodeImage_ShapeFn) {
@@ -143,13 +172,27 @@ TEST(ImageOpsTest, DecodeAndCropJpeg_InvalidCropWindow) {
 }
 
 TEST(ImageOpsTest, EncodeImage_ShapeFn) {
-  for (const char* op_name : {"EncodeJpeg", "EncodePng"}) {
+  for (const char* op_name : {"EncodeJpeg"}) {
     ShapeInferenceTestOp op(op_name);
 
     // Rank check.
     INFER_ERROR("Shape must be rank 3 but is rank 2", op, "[1,2]");
 
-    INFER_OK(op, "[1,?,3]", "[]");  // output is always scalar.
+    INFER_OK(op, "[1,?,3]", "[]");  // Output is always scalar.
+  }
+}
+
+TEST(ImageOpsTest, BatchedEncodeImage_ShapeFn) {
+  for (const char* op_name : {"EncodePng"}) {
+    ShapeInferenceTestOp op(op_name);
+
+    // Rank check.
+    INFER_ERROR("Shape must be at least rank 3 but is rank 2", op, "[1,2]");
+
+    // Batch dimensions are forwarded.
+    INFER_OK(op, "[1,?,3]", "[]");
+    INFER_OK(op, "[?,1,?,3]", "[d0_0]");
+    INFER_OK(op, "[4,5,1,?,3]", "[d0_0,d0_1]");
   }
 }
 
@@ -201,7 +244,7 @@ TEST(ImageOpsTest, ExtractGlimpse_ShapeFn) {
   // When the size tensor is not a constant, the middle dims are unknown.
   INFER_OK(op, "[1,?,3,?];[2];?", "[d0_0,?,?,d0_3]");
 
-  Tensor size_tensor = test::AsTensor<int32>({20, 30});
+  Tensor size_tensor = test::AsTensor<int32_t>({20, 30});
   op.input_tensors[1] = &size_tensor;
   INFER_OK(op, "[1,?,3,?];[2];?", "[d0_0,20,30,d0_3]");
 
@@ -229,7 +272,7 @@ TEST(ImageOpsTest, CropAndResize_ShapeFn) {
   // When the size tensor is not a constant, the middle dims are unknown.
   INFER_OK(op, "[1,?,3,?];?;?;[2]", "[?,?,?,d0_3]");
 
-  Tensor size_tensor = test::AsTensor<int32>({20, 30});
+  Tensor size_tensor = test::AsTensor<int32_t>({20, 30});
   op.input_tensors[3] = &size_tensor;
   INFER_OK(op, "[1,?,3,?];?;?;[2]", "[?,20,30,d0_3]");
 
@@ -255,9 +298,21 @@ TEST(ImageOpsTest, ResizeNearestNeighborGrad_ShapeFn) {
   // When the size tensor is not a constant, the middle dims are unknown.
   INFER_OK(op, "[1,?,3,?];[2]", "[d0_0,?,?,d0_3]");
 
-  Tensor size_tensor = test::AsTensor<int32>({20, 30});
+  Tensor size_tensor = test::AsTensor<int32_t>({20, 30});
   op.input_tensors[1] = &size_tensor;
   INFER_OK(op, "[1,?,3,?];[2]", "[d0_0,20,30,d0_3]");
+
+  size_tensor = test::AsTensor<int32_t>({0, 3});
+  INFER_ERROR("shape_t's elements must be positive for non-empty grads", op,
+              "[1,2,3,1];[2]");
+  INFER_OK(op, "[1,0,3,1];[2]", "[d0_0,0,3,d0_3]");
+  INFER_OK(op, "[?,2,3,1];[2]", "[d0_0,0,3,d0_3]");
+
+  size_tensor = test::AsTensor<int32_t>({2, 0});
+  INFER_ERROR("shape_t's elements must be positive for non-empty grads", op,
+              "[1,2,3,1];[2]");
+  INFER_OK(op, "[1,2,0,1];[2]", "[d0_0,2,0,d0_3]");
+  INFER_OK(op, "[1,2,3,?];[2]", "[d0_0,2,0,d0_3]");
 }
 
 TEST(ImageOpsTest, CropAndResizeGradImage_ShapeFn) {
@@ -271,7 +326,7 @@ TEST(ImageOpsTest, CropAndResizeGradImage_ShapeFn) {
   INFER_OK(op, "?;?;?;?", "[?,?,?,?]");
 
   // Known image_size should result in full shape information.
-  Tensor image_size = test::AsTensor<int32>({10, 20, 30, 40});
+  Tensor image_size = test::AsTensor<int32_t>({10, 20, 30, 40});
   op.input_tensors[3] = &image_size;
   INFER_OK(op, "?;?;?;[1]", "[10, 20, 30, 40]");
 }
@@ -289,7 +344,7 @@ TEST(ImageOpsTest, RandomCrop_ShapeFn) {
   INFER_OK(op, "[?,?,?];[2]", "[?,?,d0_2]");
 
   // Known size should result in full shape information.
-  Tensor size = test::AsTensor<int64>({10, 20});
+  Tensor size = test::AsTensor<int64_t>({10, 20});
   op.input_tensors[1] = &size;
   INFER_OK(op, "[?,?,?];[2]", "[10,20,d0_2]");
 }
@@ -314,7 +369,7 @@ TEST(ImageOpsTest, QuantizedResizeBilinear_ShapeFn) {
   INFER_ERROR("must be rank 0", op, "[1,?,3,?];[2];[?];[]");
   INFER_ERROR("must be rank 0", op, "[1,?,3,?];[2];[];[?]");
 
-  const Tensor size_tensor = test::AsTensor<int32>({20, 30});
+  const Tensor size_tensor = test::AsTensor<int32_t>({20, 30});
   op.input_tensors.at(1) = &size_tensor;
   INFER_OK(op, "[1,?,3,?];[2];[];[]", "[d0_0,20,30,d0_3];[];[]");
 }
@@ -325,8 +380,8 @@ TEST(ImageOpsTest, DrawBoundingBoxes_ShapeFn) {
 
   // Check images.
   INFER_ERROR("must be rank 4", op, "[1,?,3];?");
-  INFER_ERROR("should be either 1 (GRY), 3 (RGB), or 4 (RGBA)",
-      op, "[1,?,?,5];?");
+  INFER_ERROR("should be either 1 (GRY), 3 (RGB), or 4 (RGBA)", op,
+              "[1,?,?,5];?");
 
   // Check boxes.
   INFER_ERROR("must be rank 3", op, "[1,?,?,4];[1,4]");

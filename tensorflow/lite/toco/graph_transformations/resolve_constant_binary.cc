@@ -14,16 +14,19 @@ limitations under the License.
 ==============================================================================*/
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <memory>
-#include <string>
-#include <unordered_map>
 #include <vector>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/lite/toco/graph_transformations/graph_transformations.h"
 #include "tensorflow/lite/toco/model.h"
 #include "tensorflow/lite/toco/runtime/types.h"
 #include "tensorflow/lite/toco/tooling_util.h"
-#include "tensorflow/core/platform/logging.h"
 
 namespace toco {
 
@@ -165,7 +168,7 @@ void EvaluateBinaryOperatorOnConstantInputs(Model* model,
   }
 }
 
-void EvaluateBinaryOperatorOnConstantInputs(Model* model,
+bool EvaluateBinaryOperatorOnConstantInputs(Model* model,
                                             const Operator* binary_op) {
   const auto inputs_data_type = model->GetArray(binary_op->inputs[0]).data_type;
   const auto output_data_type =
@@ -175,7 +178,7 @@ void EvaluateBinaryOperatorOnConstantInputs(Model* model,
       output_data_type == OutputDataType) {                                 \
     EvaluateBinaryOperatorOnConstantInputs<InputsDataType, OutputDataType>( \
         model, binary_op);                                                  \
-    return;                                                                 \
+    return true;                                                            \
   }
   TOCO_HANDLE_CASE(ArrayDataType::kFloat, ArrayDataType::kFloat)
   TOCO_HANDLE_CASE(ArrayDataType::kFloat, ArrayDataType::kBool)
@@ -183,15 +186,14 @@ void EvaluateBinaryOperatorOnConstantInputs(Model* model,
   TOCO_HANDLE_CASE(ArrayDataType::kInt32, ArrayDataType::kBool)
   TOCO_HANDLE_CASE(ArrayDataType::kInt64, ArrayDataType::kInt64)
   TOCO_HANDLE_CASE(ArrayDataType::kInt64, ArrayDataType::kBool)
-  LOG(FATAL) << "Unimplemented: don't know how to resolve a constant "
-             << "binary operator for these data types.";
+  return false;
 #undef TOCO_HANDLE_CASE
 }
 }  // namespace
 
-::tensorflow::Status ResolveConstantBinaryOperator::Run(Model* model,
-                                                        std::size_t op_index,
-                                                        bool* modified) {
+absl::Status ResolveConstantBinaryOperator::Run(Model* model,
+                                                std::size_t op_index,
+                                                bool* modified) {
   *modified = false;
   const auto binary_it = model->operators.begin() + op_index;
   const auto* binary_op = binary_it->get();
@@ -208,7 +210,7 @@ void EvaluateBinaryOperatorOnConstantInputs(Model* model,
       binary_op->type != OperatorType::kLessEqual &&
       binary_op->type != OperatorType::kGreater &&
       binary_op->type != OperatorType::kGreaterEqual) {
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
   CHECK_EQ(binary_op->inputs.size(), 2);
 
@@ -216,13 +218,13 @@ void EvaluateBinaryOperatorOnConstantInputs(Model* model,
   const auto& input1_array = model->GetArray(binary_op->inputs[1]);
   // Check if both inputs are constant parameters.
   if (!input0_array.buffer || !input1_array.buffer) {
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   auto& output_array = model->GetArray(binary_op->outputs[0]);
   // Yield until the output array dims have been resolved.
   if (!output_array.has_shape()) {
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   // At the moment we don't want to care about fused activation functions.
@@ -233,7 +235,7 @@ void EvaluateBinaryOperatorOnConstantInputs(Model* model,
     AddMessageF(
         "Not resolving constant %s because it has a fused activation function",
         LogName(*binary_op));
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   // Check that input data types agree.
@@ -245,20 +247,13 @@ void EvaluateBinaryOperatorOnConstantInputs(Model* model,
       << static_cast<int>(input1_array.data_type) << ").";
 
   // Do the actual constants propagation
-  EvaluateBinaryOperatorOnConstantInputs(model, binary_op);
+  if (!EvaluateBinaryOperatorOnConstantInputs(model, binary_op)) {
+    return absl::OkStatus();
+  }
 
-  // Remove the binary operator and its inputs
-  if (CountOpsWithInput(*model, binary_op->inputs[0]) == 1) {
-    model->EraseArray(binary_op->inputs[0]);
-  }
-  if (CountOpsWithInput(*model, binary_op->inputs[1]) == 1) {
-    model->EraseArray(binary_op->inputs[1]);
-  }
-  AddMessageF("Resolved constant %s to the equivalent constant array",
-              LogName(*binary_op));
-  model->operators.erase(binary_it);
+  DeleteOpAndArrays(model, binary_op);
   *modified = true;
-  return ::tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace toco

@@ -12,16 +12,25 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "tensorflow/core/data/dataset_utils.h"
 #include "tensorflow/core/framework/dataset.h"
+#include "tensorflow/core/framework/dataset_options.pb.h"
 #include "tensorflow/core/framework/partial_tensor_shape.h"
 #include "tensorflow/core/framework/tensor.h"
 
 namespace tensorflow {
 namespace data {
+namespace experimental {
 namespace {
-
-// See documentation in ../ops/dataset_ops.cc for a high-level
-// description of the following op.
 
 class SleepDatasetOp : public UnaryDatasetOpKernel {
  public:
@@ -29,12 +38,13 @@ class SleepDatasetOp : public UnaryDatasetOpKernel {
 
   void MakeDataset(OpKernelContext* ctx, DatasetBase* input,
                    DatasetBase** output) override {
-    int64 sleep_microseconds;
-    OP_REQUIRES_OK(ctx, ParseScalarArgument<int64>(ctx, "sleep_microseconds",
-                                                   &sleep_microseconds));
+    int64_t sleep_microseconds;
+    OP_REQUIRES_OK(ctx, ParseScalarArgument<int64_t>(ctx, "sleep_microseconds",
+                                                     &sleep_microseconds));
 
-    OP_REQUIRES(ctx, sleep_microseconds >= 0,
-                errors::InvalidArgument("`sleep_microseconds` must be >= 0"));
+    OP_REQUIRES(
+        ctx, sleep_microseconds >= 0,
+        absl::InvalidArgumentError("`sleep_microseconds` must be >= 0"));
 
     *output = new Dataset(ctx, input, sleep_microseconds);
   }
@@ -43,7 +53,7 @@ class SleepDatasetOp : public UnaryDatasetOpKernel {
   class Dataset : public DatasetBase {
    public:
     Dataset(OpKernelContext* ctx, const DatasetBase* input,
-            int64 sleep_microseconds)
+            int64_t sleep_microseconds)
         : DatasetBase(DatasetContext(ctx)),
           input_(input),
           sleep_microseconds_(sleep_microseconds) {
@@ -53,9 +63,9 @@ class SleepDatasetOp : public UnaryDatasetOpKernel {
     ~Dataset() override { input_->Unref(); }
 
     std::unique_ptr<IteratorBase> MakeIteratorInternal(
-        const string& prefix) const override {
-      return absl::make_unique<Iterator>(
-          Iterator::Params{this, strings::StrCat(prefix, "::Sleep")});
+        const std::string& prefix) const override {
+      return std::make_unique<Iterator>(
+          Iterator::Params{this, absl::StrCat(prefix, "::Sleep")});
     }
 
     const DataTypeVector& output_dtypes() const override {
@@ -65,14 +75,28 @@ class SleepDatasetOp : public UnaryDatasetOpKernel {
       return input_->output_shapes();
     }
 
-    string DebugString() const override { return "SleepDatasetOp::Dataset"; }
+    std::string DebugString() const override {
+      return "SleepDatasetOp::Dataset";
+    }
 
-    int64 Cardinality() const override { return input_->Cardinality(); }
+    int64_t CardinalityInternal(CardinalityOptions options) const override {
+      return input_->Cardinality(options);
+    }
+
+    absl::Status InputDatasets(
+        std::vector<const DatasetBase*>* inputs) const override {
+      inputs->push_back(input_);
+      return absl::OkStatus();
+    }
+
+    absl::Status CheckExternalState() const override {
+      return input_->CheckExternalState();
+    }
 
    protected:
-    Status AsGraphDefInternal(SerializationContext* ctx,
-                              DatasetGraphDefBuilder* b,
-                              Node** output) const override {
+    absl::Status AsGraphDefInternal(SerializationContext* ctx,
+                                    DatasetGraphDefBuilder* b,
+                                    Node** output) const override {
       Node* input_graph_node = nullptr;
       TF_RETURN_IF_ERROR(b->AddInputDataset(ctx, input_, &input_graph_node));
 
@@ -94,16 +118,41 @@ class SleepDatasetOp : public UnaryDatasetOpKernel {
       explicit Iterator(const Params& params)
           : DatasetIterator<Dataset>(params) {}
 
-      Status Initialize(IteratorContext* ctx) override {
-        return dataset()->input_->MakeIterator(ctx, prefix(), &input_impl_);
+      ~Iterator() override {
+        {
+          mutex_lock l(mu_);
+          cancelled_ = true;
+        }
+        if (deregister_fn_) {
+          deregister_fn_();
+        }
       }
 
-      Status GetNextInternal(IteratorContext* ctx,
-                             std::vector<Tensor>* out_tensors,
-                             bool* end_of_sequence) override {
+      absl::Status Initialize(IteratorContext* ctx) override {
+        TF_RETURN_IF_ERROR(RegisterCancellationCallback(
+            ctx->cancellation_manager(),
+            [this]() {
+              mutex_lock l(mu_);
+              cancelled_ = true;
+            },
+            &deregister_fn_));
+        return dataset()->input_->MakeIterator(ctx, this, prefix(),
+                                               &input_impl_);
+      }
+
+      absl::Status GetNextInternal(IteratorContext* ctx,
+                                   std::vector<Tensor>* out_tensors,
+                                   bool* end_of_sequence) override {
+        mutex_lock l(mu_);
         RecordStop(ctx);
-        ctx->env()->SleepForMicroseconds(dataset()->sleep_microseconds_);
+        bool cancelled = mu_.AwaitWithDeadline(
+            Condition(&cancelled_),
+            EnvTime::NowNanos() +
+                dataset()->sleep_microseconds_ * EnvTime::kMicrosToNanos);
         RecordStart(ctx);
+        if (cancelled) {
+          return absl::CancelledError("Operation was cancelled");
+        }
         return input_impl_->GetNext(ctx, out_tensors, end_of_sequence);
       }
 
@@ -114,26 +163,38 @@ class SleepDatasetOp : public UnaryDatasetOpKernel {
                                          /*ratio=*/1);
       }
 
-      Status SaveInternal(IteratorStateWriter* writer) override {
-        return SaveInput(writer, input_impl_);
+      absl::Status SaveInternal(SerializationContext* ctx,
+                                IteratorStateWriter* writer) override {
+        return SaveInput(ctx, writer, input_impl_);
       }
 
-      Status RestoreInternal(IteratorContext* ctx,
-                             IteratorStateReader* reader) override {
+      absl::Status RestoreInternal(IteratorContext* ctx,
+                                   IteratorStateReader* reader) override {
         return RestoreInput(ctx, reader, input_impl_);
       }
 
-     private:
-      std::unique_ptr<IteratorBase> input_impl_;
+      mutex mu_;
+      std::unique_ptr<IteratorBase> input_impl_ TF_GUARDED_BY(mu_);
+      bool cancelled_ TF_GUARDED_BY(mu_) = false;
+      std::function<void()> deregister_fn_;
     };
 
     const DatasetBase* const input_;
     // TODO(b/117612213): Investigate autotuning for this value.
-    const int64 sleep_microseconds_;
+    const int64_t sleep_microseconds_;
   };
 };
 
+REGISTER_KERNEL_BUILDER(Name("SleepDataset").Device(DEVICE_CPU),
+                        SleepDatasetOp);
 REGISTER_KERNEL_BUILDER(Name("ExperimentalSleepDataset").Device(DEVICE_CPU),
+                        SleepDatasetOp);
+
+REGISTER_KERNEL_BUILDER(Name("SleepDataset")
+                            .Device(DEVICE_GPU)
+                            .HostMemory("sleep_microseconds")
+                            .HostMemory("input_dataset")
+                            .HostMemory("handle"),
                         SleepDatasetOp);
 REGISTER_KERNEL_BUILDER(Name("ExperimentalSleepDataset")
                             .Device(DEVICE_GPU)
@@ -143,5 +204,6 @@ REGISTER_KERNEL_BUILDER(Name("ExperimentalSleepDataset")
                         SleepDatasetOp);
 
 }  // namespace
+}  // namespace experimental
 }  // namespace data
 }  // namespace tensorflow

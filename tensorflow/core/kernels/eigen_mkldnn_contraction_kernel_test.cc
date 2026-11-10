@@ -13,8 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/FixedPoint"
-#include "tensorflow/core/kernels/eigen_contraction_kernel.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
+#include "xla/tsl/framework/contraction/eigen_contraction_kernel.h"
+#include "xla/tsl/framework/fixedpoint/FixedPoint.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace Eigen {
@@ -107,14 +108,15 @@ TEST(EigenMkldnnTest, MkldnnGemm) {
   // Compute matmul with mkldnn gemm kernel.
   using OutputMapper = blas_data_mapper<Scalar, Index, ColMajor>;
   using MkldnnGemmKernel =
-      mkldnn_gemm_kernel<Scalar, Index, OutputMapper, ColMajor>;
+      dnnl_gemm_kernel<Scalar, Index, OutputMapper, ColMajor>;
 
   Tensor2d mkldnn_result(m, n);
-  mkldnn_result.setZero();
+  mkldnn_result.setRandom();
   OutputMapper output_mapper(mkldnn_result.data(), m);
 
   MkldnnGemmKernel gemm_kernel;
-  gemm_kernel(output_mapper, lhs.data(), rhs.data(), m, k, n, /*alpha=*/1.0);
+  gemm_kernel(output_mapper, lhs.data(), rhs.data(), m, k, n, /*alpha=*/1.0,
+              /*beta=*/0.0);
 
   // Compute matmul with Eigen::Matrix.
   using Matrix = Eigen::Matrix<Scalar, Dynamic, Dynamic, ColMajor>;
@@ -146,12 +148,13 @@ TEST(EigenMkldnnTest, MkldnnGemm) {
   }
 }
 
-TEST(EigenMkldnnTest, MkldnnGemmQInt8) {
+TEST(EigenMkldnnTest, MkldnnGemmQInt8xQUInt8) {
   // Mkldnn pack and gemm are used only in Tensor contractions, and it's
   // guaranteed that Tensors will have ColMajor layout.
   static const int Options = ColMajor;
 
   using Tensor2dQInt8 = Eigen::Tensor<Eigen::QInt8, 2, Options, Index>;
+  using Tensor2dQUInt8 = Eigen::Tensor<Eigen::QUInt8, 2, Options, Index>;
   using Tensor2dQInt32 = Eigen::Tensor<Eigen::QInt32, 2, Options, Index>;
 
   int m = internal::random<int>(1, 1000);
@@ -161,8 +164,11 @@ TEST(EigenMkldnnTest, MkldnnGemmQInt8) {
   Tensor2dQInt8 lhs(m, k);
   lhs.setRandom();
 
-  Tensor2dQInt8 rhs(k, n);
+  Tensor2dQUInt8 rhs(k, n);
   rhs.setRandom();
+  // NOTE: 's8*u8 + s8*u8 -> s16' saturation might lead to incorrect results. In
+  // practice in FusedConv2DBiasActivationKernel we use 7 bit inputs.
+  rhs = rhs.clip(0, 127);
 
   Eigen::array<Eigen::IndexPair<Eigen::DenseIndex>, 1> contract_dims;
   contract_dims[0].first = 1;

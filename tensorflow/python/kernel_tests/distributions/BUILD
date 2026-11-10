@@ -1,312 +1,356 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Tests of TensorFlow kernels written using the Python API.
 
+load("//tensorflow:tensorflow.default.bzl", "cuda_py_strict_test")
+
 package(
-    default_visibility = ["//tensorflow:internal"],
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    licenses = ["notice"],
 )
 
-licenses(["notice"])  # Apache 2.0
-
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")
-
-cuda_py_test(
+cuda_py_strict_test(
     name = "bijector_test",
     size = "small",
     srcs = ["bijector_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    deps = [
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops/distributions:bijector",
+        "//tensorflow/python/platform:client_testlib",
         "//third_party/py/numpy",
-        "@six_archive//:six",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "util_test",
     size = "medium",
     srcs = ["util_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
-        "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:gradients",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-    ],
     shard_count = 3,
-    xla_enable_strict_auto_jit = True,
+    deps = [
+        "//tensorflow/python/eager:context",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:gradient_checker",
+        "//tensorflow/python/ops:gradients_impl",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_grad",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops/distributions:util",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
+        "//third_party/py/numpy",
+    ],
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "kullback_leibler_test",
     size = "small",
     srcs = ["kullback_leibler_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:platform_test",
+    deps = [
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops/distributions:kullback_leibler",
+        "//tensorflow/python/ops/distributions:normal",
+        "//tensorflow/python/platform:client_testlib",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "beta_test",
     size = "small",
     srcs = ["beta_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
-        "//third_party/py/numpy",
-        "//tensorflow/python:client",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:platform_test",
+    tags = [
+        "no_oss",  # b/205574093, and because tf.distributions is deprecated
+        "nomac",  # b/191763315
     ],
-    xla_enable_strict_auto_jit = True,
+    xla_tags = [
+        "no_cuda_asan",  # times out
+    ],
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:random_seed",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops/distributions:beta",
+        "//tensorflow/python/ops/distributions:kullback_leibler",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
+        "//third_party/py/numpy",
+    ],
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "bernoulli_test",
-    size = "small",
+    size = "medium",
     srcs = ["bernoulli_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops/distributions:bernoulli",
+        "//tensorflow/python/ops/distributions:kullback_leibler",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
         "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "categorical_test",
     size = "small",
     srcs = ["categorical_test.py"],
-    additional_deps = [
-        "@absl_py//absl/testing:parameterized",
-        "//tensorflow/python/ops/distributions",
-        "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:random_ops",
+    xla_tags = [
+        "no_cuda_asan",  # times out
     ],
-    xla_enable_strict_auto_jit = True,
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:tensor_util",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:gradients_impl",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops:random_ops",
+        "//tensorflow/python/ops/distributions:categorical",
+        "//tensorflow/python/ops/distributions:kullback_leibler",
+        "//tensorflow/python/ops/distributions:normal",
+        "//tensorflow/python/platform:client_testlib",
+        "//third_party/py/numpy",
+        "@absl_py//absl/testing:parameterized",
+    ],
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "dirichlet_test",
     size = "small",
     srcs = ["dirichlet_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
-        "//third_party/py/numpy",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:platform_test",
+    xla_tags = [
+        "no_cuda_asan",  # times out
     ],
-    xla_enable_strict_auto_jit = True,
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops/distributions:dirichlet",
+        "//tensorflow/python/ops/distributions:kullback_leibler",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
+        "//third_party/py/numpy",
+    ],
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "dirichlet_multinomial_test",
     size = "medium",
     srcs = ["dirichlet_multinomial_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
-        "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
-    ],
     tags = [
         "noguitar",  # b/110489471
         "notap",  # b/110489471
     ],
-    xla_enable_strict_auto_jit = True,
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops/distributions:dirichlet_multinomial",
+        "//tensorflow/python/platform:client_testlib",
+        "//third_party/py/numpy",
+    ],
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "exponential_test",
     srcs = ["exponential_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops/distributions:exponential",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
         "//third_party/py/numpy",
-        "//tensorflow/python:client",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:platform_test",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "gamma_test",
     srcs = ["gamma_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops/distributions:gamma",
+        "//tensorflow/python/ops/distributions:kullback_leibler",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
         "//third_party/py/numpy",
-        "//tensorflow/python:client",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:platform_test",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "laplace_test",
     srcs = ["laplace_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops/distributions:laplace",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
         "//third_party/py/numpy",
-        "//tensorflow/python:client",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:platform_test",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "multinomial_test",
     srcs = ["multinomial_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops/distributions:multinomial",
+        "//tensorflow/python/platform:client_testlib",
         "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
     ],
-    tags = ["manual"],  # b/69001419
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "student_t_test",
     size = "small",
     srcs = ["student_t_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
-        "//third_party/py/numpy",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:platform_test",
-    ],
     tags = [
         # TODO(b/121223043): Re-enable this test after fixing "mean not defined"
         # errors.
         "no_mac",
         "no_oss",
-        # disable to avoid false positives from scipy.
-        "nomsan",
     ],
-    xla_enable_strict_auto_jit = True,
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:random_seed",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops/distributions:student_t",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
+        "//third_party/py/numpy",
+    ],
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "uniform_test",
     size = "small",
     srcs = ["uniform_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:errors",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops_stack",
+        "//tensorflow/python/ops:math_ops",
+        "//tensorflow/python/ops/distributions:uniform",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
         "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:errors",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:math_ops",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "normal_test",
     size = "medium",
     srcs = ["normal_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:gradients_impl",
+        "//tensorflow/python/ops:nn_ops",
+        "//tensorflow/python/ops:variables",
+        "//tensorflow/python/ops/distributions:kullback_leibler",
+        "//tensorflow/python/ops/distributions:normal",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
         "//third_party/py/numpy",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:gradients",
-        "//tensorflow/python:nn_ops",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:variables",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "special_math_test",
     size = "medium",
     srcs = ["special_math_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
+    env = {
+        "TF_FORCE_GPU_ALLOW_GROWTH": "true",
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+    },
+    shard_count = 5,
+    xla_enable_strict_auto_jit = False,
+    deps = [
+        "//tensorflow/python/eager:backprop",
+        "//tensorflow/python/eager:context",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:for_generated_wrappers",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops:array_ops",
+        "//tensorflow/python/ops:gradient_checker",
+        "//tensorflow/python/ops:gradients_impl",
+        "//tensorflow/python/ops/distributions:special_math",
+        "//tensorflow/python/platform:client_testlib",
+        "//tensorflow/python/platform:tf_logging",
         "//third_party/py/numpy",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:gradients",
-        "//tensorflow/python:platform_test",
-        "//tensorflow/python:variables",
     ],
-    xla_enable_strict_auto_jit = True,
 )
 
-cuda_py_test(
+cuda_py_strict_test(
     name = "identity_bijector_test",
     size = "small",
     srcs = ["identity_bijector_test.py"],
-    additional_deps = [
-        "//tensorflow/python/ops/distributions",
-        "//third_party/py/numpy",
-        "@six_archive//:six",
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:framework_for_generated_wrappers",
-        "//tensorflow/python:framework_test_lib",
-        "//tensorflow/python:math_ops",
-        "//tensorflow/python:platform_test",
+    deps = [
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/ops/distributions:bijector_test_util",
+        "//tensorflow/python/ops/distributions:identity_bijector",
+        "//tensorflow/python/platform:client_testlib",
     ],
-    xla_enable_strict_auto_jit = True,
 )

@@ -18,6 +18,7 @@ limitations under the License.
 #include <iostream>
 
 #include "tensorflow/core/lib/strings/str_util.h"
+#include "tensorflow/core/lib/strings/strcat.h"
 
 namespace tensorflow {
 
@@ -35,13 +36,13 @@ bool RegisterListener(void (*listener)(const char*)) {
   return true;
 }
 
-bool LogToListeners(string msg, string end) {
+bool LogToListeners(std::string msg, std::string end) {
   auto listeners = logging::GetListeners();
   if (listeners->empty()) {
     return false;
   }
 
-  string ended_msg = strings::StrCat(msg, end);
+  std::string ended_msg = absl::StrCat(msg, end);
 
   for (auto& listener : *listeners) {
     listener(ended_msg.c_str());

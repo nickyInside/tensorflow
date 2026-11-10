@@ -18,6 +18,9 @@ def _get_python_bin(repository_ctx):
     python_bin = repository_ctx.os.environ.get(_PYTHON_BIN_PATH)
     if python_bin != None:
         return python_bin
+    python_bin_path = repository_ctx.which("python3")
+    if python_bin_path != None:
+        return str(python_bin_path)
     python_bin_path = repository_ctx.which("python")
     if python_bin_path != None:
         return str(python_bin_path)
@@ -35,10 +38,10 @@ def _git_conf_impl(repository_ctx):
     )
 
     tensorflow_root_path = str(repository_ctx.path(
-        Label("@org_tensorflow//:BUILD"),
+        Label("//:BUILD"),
     ))[:-len("BUILD")]
     python_script_path = repository_ctx.path(
-        Label("@org_tensorflow//tensorflow/tools/git:gen_git_source.py"),
+        Label("//tensorflow/tools/git:gen_git_source.py"),
     )
     generated_files_path = repository_ctx.path("gen")
 

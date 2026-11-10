@@ -14,44 +14,30 @@
 # ==============================================================================
 """Bring in all of the public TensorFlow interface into this module."""
 
-from __future__ import absolute_import as _absolute_import
-from __future__ import division as _division
-from __future__ import print_function as _print_function
+# pylint: disable=g-bad-import-order,g-import-not-at-top,protected-access
 
-import logging as _logging
 import os as _os
 import sys as _sys
 
 from tensorflow.python.tools import module_util as _module_util
-
-# pylint: disable=g-bad-import-order
+from tensorflow.python.util.lazy_loader import KerasLazyLoader as _KerasLazyLoader
 
 # API IMPORTS PLACEHOLDER
 
+# WRAPPER_PLACEHOLDER
+
 # Hook external TensorFlow modules.
 _current_module = _sys.modules[__name__]
-try:
-  from tensorboard.summary._tf import summary
-  _current_module.__path__ = (
-      [_module_util.get_parent_dir(summary)] + _current_module.__path__)
-except ImportError:
-  _logging.warning(
-      "Limited tf.compat.v2.summary API due to missing TensorBoard "
-      "installation.")
 
-try:
-  from tensorflow_estimator.python.estimator.api._v2 import estimator
-  _current_module.__path__ = (
-      [_module_util.get_parent_dir(estimator)] + _current_module.__path__)
-except ImportError:
-  pass
-
-try:
-  from tensorflow.python.keras.api._v2 import keras
-  _current_module.__path__ = (
-      [_module_util.get_parent_dir(keras)] + _current_module.__path__)
-except ImportError:
-  pass
+# Lazy load Keras v2
+_tf_uses_legacy_keras = (
+    _os.environ.get("TF_USE_LEGACY_KERAS", None) in ("true", "True", "1"))
+setattr(_current_module, "keras", _KerasLazyLoader(globals(), mode="v2"))
+if _tf_uses_legacy_keras:
+  _module_dir = _module_util.get_parent_dir_for_name("tf_keras.api._v2.keras")
+else:
+  _module_dir = _module_util.get_parent_dir_for_name("keras.api._v2.keras")
+_current_module.__path__ = [_module_dir] + _current_module.__path__
 
 
 # We would like the following to work for fully enabling 2.0 in a 1.0 install:
@@ -61,11 +47,18 @@ except ImportError:
 #
 # This make this one symbol available directly.
 from tensorflow.python.compat.v2_compat import enable_v2_behavior  # pylint: disable=g-import-not-at-top
+setattr(_current_module, "enable_v2_behavior", enable_v2_behavior)
 
 # Add module aliases
-_current_module = _sys.modules[__name__]
-if hasattr(_current_module, 'keras'):
-  losses = keras.losses
-  metrics = keras.metrics
-  optimizers = keras.optimizers
-  initializers = keras.initializers
+_losses = _KerasLazyLoader(
+    globals(), submodule="losses", name="losses", mode="v2")
+_metrics = _KerasLazyLoader(
+    globals(), submodule="metrics", name="metrics", mode="v2")
+_optimizers = _KerasLazyLoader(
+    globals(), submodule="optimizers", name="optimizers", mode="v2")
+_initializers = _KerasLazyLoader(
+    globals(), submodule="initializers", name="initializers", mode="v2")
+setattr(_current_module, "losses", _losses)
+setattr(_current_module, "metrics", _metrics)
+setattr(_current_module, "optimizers", _optimizers)
+setattr(_current_module, "initializers", _initializers)

@@ -27,19 +27,27 @@ REGISTER_OP("Error")
     .Output("out: T")
     .Attr("T: type")
     .Attr("message: string")
+    .Attr("log_error: bool = false")
     .SetShapeFn(shape_inference::UnknownShape);
 class ErrorOp : public OpKernel {
  public:
   explicit ErrorOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("message", &errmsg_));
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("log_error", &log_error_));
   }
 
   void Compute(OpKernelContext* ctx) override {
-    ctx->SetStatus(errors::Internal(errmsg_));
+    // Log only when CancellationManager is set to skip logging when Compute()
+    // is called during the optimization phase.
+    if (ctx->cancellation_manager() && log_error_) {
+      LOG(ERROR) << "ErrorOp: " << errmsg_;
+    }
+    ctx->SetStatus(absl::InternalError(errmsg_));
   }
 
  private:
-  string errmsg_;
+  std::string errmsg_;
+  bool log_error_ = false;
 };
 REGISTER_KERNEL_BUILDER(Name("Error").Device(DEVICE_CPU), ErrorOp);
 
@@ -87,7 +95,7 @@ class DelayOp : public AsyncOpKernel {
   }
 
  private:
-  int64 micros_;
+  int64_t micros_;
 };
 REGISTER_KERNEL_BUILDER(Name("Delay").Device(DEVICE_CPU), DelayOp);
 

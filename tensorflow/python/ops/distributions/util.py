@@ -14,12 +14,10 @@
 # ==============================================================================
 """Utilities for probability distributions."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
 import hashlib
+import sys
+
 import numpy as np
 
 from tensorflow.python.framework import constant_op
@@ -28,7 +26,9 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import check_ops
+from tensorflow.python.ops import cond as tf_cond
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import linalg_ops
 from tensorflow.python.ops import math_ops
@@ -130,7 +130,7 @@ def same_dynamic_shape(a, b):
 
   # One of the shapes isn't fully defined, so we need to use the dynamic
   # shape.
-  return control_flow_ops.cond(
+  return tf_cond.cond(
       math_ops.equal(array_ops.rank(a), array_ops.rank(b)),
       all_shapes_equal, lambda: constant_op.constant(False))
 
@@ -647,8 +647,9 @@ def rotate_transpose(x, shift, name="rotate_transpose"):
       # Finally, we transform shift by modulo length so it can be specified
       # independently from the array upon which it operates (like python).
       ndims = array_ops.rank(x)
-      shift = array_ops.where(
-          math_ops.less(shift, 0), math_ops.mod(-shift, ndims),
+      shift = array_ops.where_v2(
+          math_ops.less(shift, 0),
+          math_ops.mod(-shift, ndims),  # pylint: disable=invalid-unary-operand-type
           ndims - math_ops.mod(shift, ndims))
       first = math_ops.range(0, shift)
       last = math_ops.range(shift, ndims)
@@ -699,7 +700,7 @@ def pick_vector(cond, true_vector, false_vector, name="pick_vector"):
     n = array_ops.shape(true_vector)[0]
     return array_ops.slice(
         array_ops.concat([true_vector, false_vector], 0),
-        [array_ops.where(cond, 0, n)], [array_ops.where(cond, n, -1)])
+        [array_ops.where_v2(cond, 0, n)], [array_ops.where(cond, n, -1)])
 
 
 def prefer_static_broadcast_shape(shape1,
@@ -1125,7 +1126,7 @@ def reduce_weighted_logsumexp(logx,
     # off the max. We do this because otherwise we'd get `inf - inf = NaN`. That
     # this is ok follows from the fact that we're actually free to subtract any
     # value we like, so long as we add it back after taking the `log(sum(...))`.
-    max_log_absw_x = array_ops.where(
+    max_log_absw_x = array_ops.where_v2(
         math_ops.is_inf(max_log_absw_x), array_ops.zeros_like(max_log_absw_x),
         max_log_absw_x)
     wx_over_max_absw_x = (
@@ -1191,12 +1192,13 @@ def softplus_inverse(x, name=None):
     too_large_value = x
     # This `where` will ultimately be a NOP because we won't select this
     # codepath whenever we used the surrogate `ones_like`.
-    x = array_ops.where(
+    x = array_ops.where_v2(
         math_ops.logical_or(is_too_small, is_too_large), array_ops.ones_like(x),
         x)
     y = x + math_ops.log(-math_ops.expm1(-x))  # == log(expm1(x))
-    return array_ops.where(is_too_small, too_small_value,
-                           array_ops.where(is_too_large, too_large_value, y))
+    return array_ops.where_v2(
+        is_too_small, too_small_value,
+        array_ops.where_v2(is_too_large, too_large_value, y))
 
 
 # TODO(b/35290280): Add unit-tests.
@@ -1332,12 +1334,12 @@ def pad(x, axis, front=False, back=False, value=0, count=1, name=None):
       else:
         final_shape = None
     else:
-      axis = array_ops.where(axis < 0, ndims + axis, axis)
+      axis = array_ops.where_v2(axis < 0, ndims + axis, axis)
       final_shape = None
     x = array_ops.pad(
         x,
         paddings=array_ops.one_hot(
-            indices=array_ops.stack(
+            indices=array_ops_stack.stack(
                 [axis if front else -1, axis if back else -1]),
             depth=ndims,
             axis=0,
@@ -1372,21 +1374,27 @@ def parent_frame_arguments():
 
   # Remove the *varargs, and flatten the **kwargs. Both are
   # nested lists.
-  local_vars.pop(variable_arg_name, {})
-  keyword_args = local_vars.pop(keyword_arg_name, {})
+  if sys.version_info >= (3, 13):
+    keyword_args = local_vars.get(keyword_arg_name, {})
+  else:
+    local_vars.pop(variable_arg_name, {})
+    keyword_args = local_vars.pop(keyword_arg_name, {})
 
   final_args = {}
   # Copy over arguments and their values. In general, local_vars
   # may contain more than just the arguments, since this method
   # can be called anywhere in a function.
   for arg_name in arg_names:
-    final_args[arg_name] = local_vars.pop(arg_name)
+    if sys.version_info >= (3, 13):
+      final_args[arg_name] = local_vars[arg_name]
+    else:
+      final_args[arg_name] = local_vars.pop(arg_name)
   final_args.update(keyword_args)
 
   return final_args
 
 
-class AppendDocstring(object):
+class AppendDocstring:
   """Helper class to promote private subclass docstring to public counterpart.
 
   Example:

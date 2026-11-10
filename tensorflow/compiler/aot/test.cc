@@ -34,7 +34,7 @@ limitations under the License.
 #include "{{TFCOMPILE_HEADER}}"  // NOLINT(whitespace/braces)
 // clang-format on
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/platform/test.h"
@@ -59,7 +59,7 @@ void zero_buffers(XlaCompiledCpuFunction* computation) {
 
 // Trivial test that runs the generated function to ensure it doesn't crash.
 TEST(TEST_NAME, NoCrash) {
-  Eigen::ThreadPool pool(port::NumSchedulableCPUs());
+  Eigen::ThreadPool pool(port::MaxParallelism());
   Eigen::ThreadPoolDevice device(&pool, pool.NumThreads());
 
   CPP_CLASS computation;
@@ -70,21 +70,17 @@ TEST(TEST_NAME, NoCrash) {
 }
 
 // Simple benchmark that repeatedly runs the generated function.
-void BM_NAME(int iters) {
-  testing::StopTiming();
-
-  Eigen::ThreadPool pool(port::NumSchedulableCPUs());
+void BM_NAME(benchmark::State& state) {
+  Eigen::ThreadPool pool(port::MaxParallelism());
   Eigen::ThreadPoolDevice device(&pool, pool.NumThreads());
 
   CPP_CLASS computation;
   computation.set_thread_pool(&device);
   zero_buffers(&computation);
 
-  testing::StartTiming();
-  while (--iters) {
+  for (auto s : state) {
     computation.Run();
   }
-  testing::StopTiming();
 }
 BENCHMARK(BM_NAME);
 

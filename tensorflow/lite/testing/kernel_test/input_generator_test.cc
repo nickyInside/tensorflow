@@ -15,10 +15,10 @@ limitations under the License.
 #include "tensorflow/lite/testing/kernel_test/input_generator.h"
 
 #include <fstream>
-#include <map>
+#include <string>
+#include <utility>
+#include <vector>
 
-#include <gmock/gmock.h>
-#include "testing/base/public/googletest.h"
 #include <gtest/gtest.h>
 
 namespace tflite {
@@ -35,25 +35,27 @@ TEST(InputGeneratorTest, LoadModel) {
 
 TEST(InputGeneratorTest, ReadWriteSimpleFile) {
   InputGenerator input_generator;
-  ASSERT_EQ(input_generator.ReadInputsFromFile(
-                "tensorflow/lite/testdata/test_input.csv"),
-            kTfLiteOk);
+  ASSERT_EQ(
+      input_generator.ReadInputsFromFile("tensorflow/lite/testing/"
+                                         "kernel_test/testdata/test_input.csv"),
+      kTfLiteOk);
 
-  std::vector<string> inputs;
   std::string content = "1";
   for (int i = 0; i < 1 * 8 * 8 * 3 - 1; i++) {
     content.append(",1");
   }
-  inputs.push_back(content);
+  std::vector<std::pair<string, string>> inputs = {{"a", content}};
   ASSERT_EQ(input_generator.GetInputs(), inputs);
 
-  auto output_filename = FLAGS_test_tmpdir + "/out.csv";
+  auto output_filename = ::testing::TempDir() + "/out.csv";
   ASSERT_EQ(input_generator.WriteInputsToFile(output_filename), kTfLiteOk);
 
   std::ifstream in(output_filename);
   std::string out;
   std::getline(in, out, '\n');
-  ASSERT_EQ(out, content);
+  std::string expected_out = "a:";
+  expected_out.append(content);
+  ASSERT_EQ(out, expected_out);
 }
 
 TEST(InputGeneratorTest, GenerateUniformInput) {

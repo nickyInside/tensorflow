@@ -15,7 +15,10 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOCO_TFLITE_BUILTIN_OPERATOR_H_
 #define TENSORFLOW_LITE_TOCO_TFLITE_BUILTIN_OPERATOR_H_
 
+#include <memory>
+
 #include "absl/memory/memory.h"
+#include "tensorflow/compiler/mlir/lite/tools/versioning/op_version.h"
 #include "tensorflow/lite/toco/tflite/operator.h"
 
 namespace toco {
@@ -36,7 +39,8 @@ class BuiltinOperator : public BaseOperator {
   using TfLiteOptions = T2;
 
   BuiltinOperator(::tflite::BuiltinOperator op, OperatorType type)
-      : BaseOperator(::tflite::EnumNameBuiltinOperator(op), type) {}
+      : BaseOperator(::tflite::EnumNameBuiltinOperator(op), type),
+        builtin_op_(op) {}
 
   // Build the configuration object in the given flatbuffer builder. Return
   // its offset.
@@ -58,13 +62,23 @@ class BuiltinOperator : public BaseOperator {
   std::unique_ptr<Operator> Deserialize(
       const BuiltinOptions* builtin_options,
       const CustomOptions* custom_options) const override {
-    auto op = absl::make_unique<TocoOperator>();
+    auto op = std::make_unique<TocoOperator>();
     auto* options = static_cast<const TfLiteOptions*>(builtin_options);
     if (options) {
       ReadOptions(*options, op.get());
     }
     return std::unique_ptr<Operator>(op.release());
   }
+
+  int GetVersion(const OperatorSignature& op_signature) const override {
+    return ::tflite::GetBuiltinOperatorVersion(
+        GetVersioningOpSig(builtin_op_, op_signature));
+  }
+
+  ::tflite::BuiltinOperator builtin_op() const { return builtin_op_; }
+
+ private:
+  const ::tflite::BuiltinOperator builtin_op_;
 };
 
 }  // namespace tflite

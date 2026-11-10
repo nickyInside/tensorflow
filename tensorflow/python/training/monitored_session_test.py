@@ -15,10 +15,6 @@
 # ==============================================================================
 """Tests for monitored_session."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import glob
 import os
@@ -27,10 +23,9 @@ import threading
 import time
 import traceback
 
-from tensorflow.contrib.framework.python.ops import variables as variables_lib
-from tensorflow.contrib.testing.python.framework import util_test
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.protobuf import debug_pb2
+from tensorflow.python.checkpoint import checkpoint_management
 from tensorflow.python.client import session as session_lib
 from tensorflow.python.distribute import collective_all_reduce_strategy
 from tensorflow.python.distribute import distribute_coordinator
@@ -38,21 +33,33 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors_impl
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import control_flow_assert
 from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import state_ops
+from tensorflow.python.ops import variable_v1
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
+from tensorflow.python.saved_model import builder as saved_model_builder
+from tensorflow.python.saved_model import load as saved_model_load
 from tensorflow.python.summary import summary
 from tensorflow.python.training import basic_session_run_hooks
-from tensorflow.python.training import checkpoint_management
 from tensorflow.python.training import coordinator
 from tensorflow.python.training import monitored_session
 from tensorflow.python.training import saver as saver_lib
 from tensorflow.python.training import session_run_hook
+from tensorflow.python.training import summary_io
+from tensorflow.python.training import training_util
 
+
+def latest_summaries(base_dir):
+  """Parse summary events from latest event file in base_dir."""
+  file_paths = glob.glob(os.path.join(base_dir, 'events.*'))
+  file_path = sorted(file_paths)[-1] if file_paths else None
+  latest_events = summary_io.summary_iterator(file_path) if file_path else []
+  return [e for e in latest_events if e.HasField('summary')]
 
 class ScaffoldTest(test.TestCase):
   """Scaffold tests."""
@@ -71,16 +78,18 @@ class ScaffoldTest(test.TestCase):
   def test_defaults_empty_graph(self):
     with ops.Graph().as_default():
       scaffold = monitored_session.Scaffold()
-      variables.VariableV1(1, name='my_var')
-      variables.VariableV1(
+      variable_v1.VariableV1(1, name='my_var')
+      variable_v1.VariableV1(
           2, name='my_local_var', collections=[ops.GraphKeys.LOCAL_VARIABLES])
       scaffold.finalize()
       self.assertTrue(isinstance(scaffold.init_op, ops.Operation))
       self.assertEqual(None, scaffold.init_feed_dict)
       self.assertEqual(None, scaffold.init_fn)
-      self.assertTrue(isinstance(scaffold.ready_op, ops.Tensor))
-      self.assertTrue(isinstance(scaffold.ready_for_local_init_op, ops.Tensor))
+      self.assertTrue(isinstance(scaffold.ready_op, tensor.Tensor))
+      self.assertTrue(isinstance(
+          scaffold.ready_for_local_init_op, tensor.Tensor))
       self.assertTrue(isinstance(scaffold.local_init_op, ops.Operation))
+      self.assertEqual(None, scaffold.local_init_feed_dict)
       self.assertTrue(isinstance(scaffold.saver, saver_lib.Saver))
       with self.cached_session() as sess:
         self.assertItemsEqual([b'my_var', b'my_local_var'],
@@ -100,14 +109,16 @@ class ScaffoldTest(test.TestCase):
       self.assertTrue(isinstance(scaffold.init_op, ops.Operation))
       self.assertEqual(None, scaffold.init_feed_dict)
       self.assertEqual(None, scaffold.init_fn)
-      self.assertTrue(isinstance(scaffold.ready_op, ops.Tensor))
-      self.assertTrue(isinstance(scaffold.ready_for_local_init_op, ops.Tensor))
+      self.assertTrue(isinstance(scaffold.ready_op, tensor.Tensor))
+      self.assertTrue(isinstance(
+          scaffold.ready_for_local_init_op, tensor.Tensor))
       self.assertTrue(isinstance(scaffold.local_init_op, ops.Operation))
+      self.assertEqual(None, scaffold.local_init_feed_dict)
       self.assertTrue(isinstance(scaffold.saver, saver_lib.Saver))
 
   def test_caches_values(self):
     with ops.Graph().as_default():
-      variables.VariableV1([1])
+      variable_v1.VariableV1([1])
       scaffold1 = monitored_session.Scaffold()
       scaffold1.finalize()
       scaffold2 = monitored_session.Scaffold()
@@ -121,15 +132,15 @@ class ScaffoldTest(test.TestCase):
 
   def test_raise_error_if_more_than_one_cached_item(self):
     with ops.Graph().as_default():
-      variables.VariableV1([1])
+      variable_v1.VariableV1([1])
       ops.add_to_collection(ops.GraphKeys.SAVERS, saver_lib.Saver())
       ops.add_to_collection(ops.GraphKeys.SAVERS, saver_lib.Saver())
-      with self.assertRaisesRegexp(RuntimeError, 'More than one item'):
+      with self.assertRaisesRegex(RuntimeError, 'More than one item'):
         monitored_session.Scaffold().finalize()
 
   def test_uses_passed_values(self):
     with ops.Graph().as_default():
-      variables.VariableV1([1])
+      variable_v1.VariableV1([1])
       saver = saver_lib.Saver()
       scaffold = monitored_session.Scaffold(
           init_op=2,
@@ -138,6 +149,7 @@ class ScaffoldTest(test.TestCase):
           ready_op=5,
           ready_for_local_init_op=6,
           local_init_op=7,
+          local_init_feed_dict=8,
           saver=saver)
       scaffold.finalize()
       self.assertEqual(2, scaffold.init_op)
@@ -146,20 +158,21 @@ class ScaffoldTest(test.TestCase):
       self.assertEqual(5, scaffold.ready_op)
       self.assertEqual(6, scaffold.ready_for_local_init_op)
       self.assertEqual(7, scaffold.local_init_op)
+      self.assertEqual(8, scaffold.local_init_feed_dict)
       self.assertEqual(saver, scaffold.saver)
 
   def test_graph_is_finalized(self):
     with ops.Graph().as_default():
-      variables.VariableV1([1])
+      variable_v1.VariableV1([1])
       monitored_session.Scaffold().finalize()
-      with self.assertRaisesRegexp(RuntimeError,
-                                   'Graph is finalized and cannot be modified'):
+      with self.assertRaisesRegex(RuntimeError,
+                                  'Graph is finalized and cannot be modified'):
         constant_op.constant([0])
 
   def test_new_scaffold_from_default_scaffold(self):
     scaffold1 = monitored_session.Scaffold()
     with ops.Graph().as_default():
-      variables.VariableV1([1])
+      variable_v1.VariableV1([1])
       saver = saver_lib.Saver()
       scaffold2 = monitored_session.Scaffold(
           init_op=2,
@@ -168,6 +181,7 @@ class ScaffoldTest(test.TestCase):
           ready_op=5,
           ready_for_local_init_op=6,
           local_init_op=7,
+          local_init_feed_dict=8,
           saver=saver,
           copy_from_scaffold=scaffold1)
 
@@ -178,11 +192,12 @@ class ScaffoldTest(test.TestCase):
       self.assertEqual(5, scaffold2.ready_op)
       self.assertEqual(6, scaffold2.ready_for_local_init_op)
       self.assertEqual(7, scaffold2.local_init_op)
+      self.assertEqual(8, scaffold2.local_init_feed_dict)
       self.assertEqual(saver, scaffold2.saver)
 
   def test_new_scaffold_from_existing_scaffold(self):
     with ops.Graph().as_default():
-      variables.VariableV1([1])
+      variable_v1.VariableV1([1])
       saver = saver_lib.Saver()
       scaffold1 = monitored_session.Scaffold(
           init_op=2,
@@ -191,6 +206,7 @@ class ScaffoldTest(test.TestCase):
           ready_op=5,
           ready_for_local_init_op=6,
           local_init_op=7,
+          local_init_feed_dict=8,
           saver=saver)
 
       scaffold2 = monitored_session.Scaffold(
@@ -200,6 +216,7 @@ class ScaffoldTest(test.TestCase):
           ready_op=10,
           ready_for_local_init_op=12,
           local_init_op=14,
+          local_init_feed_dict=15,
           saver=saver,
           copy_from_scaffold=scaffold1)
 
@@ -210,11 +227,12 @@ class ScaffoldTest(test.TestCase):
       self.assertEqual(10, scaffold2.ready_op)
       self.assertEqual(12, scaffold2.ready_for_local_init_op)
       self.assertEqual(14, scaffold2.local_init_op)
+      self.assertEqual(15, scaffold2.local_init_feed_dict)
       self.assertEqual(saver, scaffold2.saver)
 
   def test_copy_from_scaffold_is_scaffold(self):
     with ops.Graph().as_default():
-      with self.assertRaisesRegexp(
+      with self.assertRaisesRegex(
           TypeError, 'copy_from_scaffold is not a Scaffold instance'):
         monitored_session.Scaffold(copy_from_scaffold=1)
 
@@ -274,7 +292,7 @@ class MonitoredTrainingSessionTest(test.TestCase):
   def test_saving_restoring_checkpoint(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_saving_restoring_checkpoint')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       with monitored_session.MonitoredTrainingSession(
           is_chief=True, checkpoint_dir=logdir) as session:
@@ -289,7 +307,7 @@ class MonitoredTrainingSessionTest(test.TestCase):
   def test_save_checkpoint_steps(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_save_checkpoint_steps')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       with monitored_session.MonitoredTrainingSession(
           is_chief=True,
@@ -306,7 +324,7 @@ class MonitoredTrainingSessionTest(test.TestCase):
   def test_save_checkpoint_secs(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_save_checkpoint_secs')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       with monitored_session.MonitoredTrainingSession(
           is_chief=True,
@@ -322,10 +340,49 @@ class MonitoredTrainingSessionTest(test.TestCase):
           is_chief=True, checkpoint_dir=logdir) as session:
         self.assertEqual(11, session.run(gstep))
 
+  def test_save_restore_checkpoint_v1_saved_model(self):
+
+    def _write_v1_simple_saved_model(export_dir):
+      # Create v1 Saved Model with single variable `w0` with value 5.0.
+      builder = saved_model_builder.SavedModelBuilder(export_dir)
+      with ops.Graph().as_default():
+        _ = resource_variable_ops.ResourceVariable(5.0)
+        with self.cached_session() as session:
+          session.run(variables.global_variables_initializer())
+          builder.add_meta_graph_and_variables(session, ['foo'])
+      builder.save()
+
+    test_dir = _test_dir(self.get_temp_dir(), 'saved_model')
+    _write_v1_simple_saved_model(test_dir)
+
+    with ops.Graph().as_default():
+      # Load saved model with `load_v1_in_v2`.
+      model = saved_model_load.load(test_dir)
+      w0 = model.variables[0]
+      # Define operation that increments `w0`.
+      w_add = w0.assign_add(1.)
+      gstep = training_util.get_or_create_global_step()
+      new_gstep = state_ops.assign_add(gstep, 1)
+
+      with monitored_session.MonitoredTrainingSession(
+          checkpoint_dir=test_dir) as session:
+        w1 = session.run(w_add)
+        self.assertEqual(w1, 6.)
+        session.run(new_gstep)
+        w2 = session.run(w_add)
+        self.assertEqual(w2, 7.)
+
+      # Stop and resume training.
+      with monitored_session.MonitoredTrainingSession(
+          checkpoint_dir=test_dir) as session:
+        # `w0` saves its value of 7.
+        w3 = session.run(w_add)
+        self.assertEqual(w3, 8.)
+
   def test_summaries_steps(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_summaries_steps')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       summary.scalar('my_summary_tag', new_gstep * 2)
       with monitored_session.MonitoredTrainingSession(
@@ -335,7 +392,7 @@ class MonitoredTrainingSessionTest(test.TestCase):
           log_step_count_steps=10) as session:
         for _ in range(101):
           session.run(new_gstep)
-    summaries = util_test.latest_summaries(logdir)
+    summaries = latest_summaries(logdir)
     tags = [s.summary.value[0].tag for s in summaries]
     self.assertIn('my_summary_tag', tags)
     self.assertIn('global_step/sec', tags)
@@ -343,7 +400,7 @@ class MonitoredTrainingSessionTest(test.TestCase):
   def test_summaries_secs(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_summaries_secs')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       summary.scalar('my_summary_tag', new_gstep * 2)
       with monitored_session.MonitoredTrainingSession(
@@ -356,7 +413,7 @@ class MonitoredTrainingSessionTest(test.TestCase):
         time.sleep(0.2)
         for _ in range(101):
           session.run(new_gstep)
-    summaries = util_test.latest_summaries(logdir)
+    summaries = latest_summaries(logdir)
     tags = [s.summary.value[0].tag for s in summaries]
     self.assertIn('my_summary_tag', tags)
     self.assertIn('global_step/sec', tags)
@@ -365,7 +422,7 @@ class MonitoredTrainingSessionTest(test.TestCase):
     logdir = _test_dir(self.get_temp_dir(), 'test_saving_restoring_checkpoint')
     fake_hook = FakeHook()
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       with monitored_session.MonitoredTrainingSession(
           is_chief=True,
@@ -383,8 +440,38 @@ class MonitoredTrainingSessionTest(test.TestCase):
           is_chief=True, checkpoint_dir=logdir) as session:
         self.assertEqual(0, session.run(gstep))
 
+  def test_save_graph_def(self):
+    logdir = _test_dir(self.get_temp_dir(), 'test_save_graph_def')
+    with ops.Graph().as_default():
+      gstep = training_util.get_or_create_global_step()
+      new_gstep = state_ops.assign_add(gstep, 1)
+      with monitored_session.MonitoredTrainingSession(
+          is_chief=True,
+          checkpoint_dir=logdir,
+          save_checkpoint_steps=1,
+          save_graph_def=True) as session:
+        self.assertIn('graph.pbtxt', os.listdir(logdir))
+        self.assertLen(glob.glob(os.path.join(logdir, '*.meta')), 1)
+        session.run(new_gstep)
+        self.assertLen(glob.glob(os.path.join(logdir, '*.meta')), 2)
 
-class MockExtended(object):
+  def test_save_graph_def_false(self):
+    logdir = _test_dir(self.get_temp_dir(), 'test_save_graph_def')
+    with ops.Graph().as_default():
+      gstep = training_util.get_or_create_global_step()
+      new_gstep = state_ops.assign_add(gstep, 1)
+      with monitored_session.MonitoredTrainingSession(
+          is_chief=True,
+          checkpoint_dir=logdir,
+          save_checkpoint_steps=1,
+          save_graph_def=False) as session:
+        self.assertNotIn('graph.pbtxt', os.listdir(logdir))
+        self.assertEmpty(glob.glob(os.path.join(logdir, '*.meta')))
+        session.run(new_gstep)
+        self.assertEmpty(glob.glob(os.path.join(logdir, '*.meta')))
+
+
+class MockExtended:
 
   def __init__(self, between_graph, should_init, should_checkpoint,
                should_save_summary):
@@ -394,7 +481,7 @@ class MockExtended(object):
     self.should_save_summary = should_save_summary
 
 
-class MockStrategy(object):
+class MockStrategy:
 
   def __init__(self,
                between_graph=False,
@@ -414,7 +501,7 @@ class MonitoredTrainingSessionWithDistributeCoordinatorTest(test.TestCase):
 
     logdir = _test_dir(self.get_temp_dir(), 'test_summaries_enabled')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       summary.scalar('my_summary_tag', new_gstep * 2)
       with context, monitored_session.MonitoredTrainingSession(
@@ -424,7 +511,7 @@ class MonitoredTrainingSessionWithDistributeCoordinatorTest(test.TestCase):
         for _ in range(101):
           session.run(new_gstep)
 
-    summaries = util_test.latest_summaries(logdir)
+    summaries = latest_summaries(logdir)
     tags = [s.summary.value[0].tag for s in summaries]
     self.assertIn('my_summary_tag', tags)
     self.assertIn('global_step/sec', tags)
@@ -435,7 +522,7 @@ class MonitoredTrainingSessionWithDistributeCoordinatorTest(test.TestCase):
 
     logdir = _test_dir(self.get_temp_dir(), 'test_summaries_disabled')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       summary.scalar('my_summary_tag', new_gstep * 2)
       with context, monitored_session.MonitoredTrainingSession(
@@ -446,7 +533,7 @@ class MonitoredTrainingSessionWithDistributeCoordinatorTest(test.TestCase):
           session.run(new_gstep)
 
     # No summary is saved.
-    summaries = util_test.latest_summaries(logdir)
+    summaries = latest_summaries(logdir)
     self.assertEqual(len(summaries), 0)
 
   def test_checkpoint_hook_enabled(self):
@@ -455,7 +542,7 @@ class MonitoredTrainingSessionWithDistributeCoordinatorTest(test.TestCase):
 
     logdir = _test_dir(self.get_temp_dir(), 'test_save_checkpoint_enabled')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       with context, monitored_session.MonitoredTrainingSession(
           checkpoint_dir=logdir,
@@ -475,7 +562,7 @@ class MonitoredTrainingSessionWithDistributeCoordinatorTest(test.TestCase):
 
     logdir = _test_dir(self.get_temp_dir(), 'test_save_checkpoint_disabled')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       with context, monitored_session.MonitoredTrainingSession(
           checkpoint_dir=logdir,
@@ -496,7 +583,7 @@ class MonitoredTrainingSessionWithDistributeCoordinatorTest(test.TestCase):
 
     logdir = _test_dir(self.get_temp_dir(), 'test_save_checkpoint_disabled')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       new_gstep = state_ops.assign_add(gstep, 1)
       with context, monitored_session.MonitoredTrainingSession(
           checkpoint_dir=logdir,
@@ -537,8 +624,8 @@ class WrappedSessionTest(test.TestCase):
     with self.cached_session() as sess:
       constant_op.constant(0.0)
       wrapped_sess = monitored_session._WrappedSession(sess)
-      self.assertEquals(sess.graph, wrapped_sess.graph)
-      self.assertEquals(sess.sess_str, wrapped_sess.sess_str)
+      self.assertEqual(sess.graph, wrapped_sess.graph)
+      self.assertEqual(sess.sess_str, wrapped_sess.sess_str)
 
   @test_util.run_deprecated_v1
   def test_should_stop_on_close(self):
@@ -601,8 +688,8 @@ class CoordinatedSessionTest(test.TestCase):
       constant_op.constant(0.0)
       coord = coordinator.Coordinator()
       coord_sess = monitored_session._CoordinatedSession(sess, coord)
-      self.assertEquals(sess.graph, coord_sess.graph)
-      self.assertEquals(sess.sess_str, coord_sess.sess_str)
+      self.assertEqual(sess.graph, coord_sess.graph)
+      self.assertEqual(sess.sess_str, coord_sess.sess_str)
 
   @test_util.run_deprecated_v1
   def test_run(self):
@@ -641,7 +728,7 @@ class CoordinatedSessionTest(test.TestCase):
       self.assertFalse(coord_sess.should_stop())
       self.assertEqual(0, coord_sess.run(c))
       self.assertEqual(1, coord_sess.run(v, feed_dict={c: 1}))
-      with self.assertRaisesRegexp(TypeError, 'None has invalid type'):
+      with self.assertRaisesRegex(TypeError, 'None has invalid type'):
         coord_sess.run([None], feed_dict={c: 2})
       self.assertFalse(coord.should_stop())
       self.assertFalse(coord_sess.should_stop())
@@ -669,7 +756,7 @@ class CoordinatedSessionTest(test.TestCase):
       self.assertEqual(1, coord_sess.run(v, feed_dict={c: 1}))
       for t in threads:
         self.assertTrue(t.is_alive())
-      with self.assertRaisesRegexp(TypeError, 'None has invalid type'):
+      with self.assertRaisesRegex(TypeError, 'None has invalid type'):
         coord_sess.run([None], feed_dict={c: 2})
       coord_sess.close()
       for t in threads:
@@ -696,7 +783,7 @@ class CoordinatedSessionTest(test.TestCase):
 
   @test_util.run_deprecated_v1
   def test_propagates_exception_trace(self):
-    assertion = control_flow_ops.Assert(False, ['This should fail.'])
+    assertion = control_flow_assert.Assert(False, ['This should fail.'])
     with self.cached_session() as sess:
       coord = coordinator.Coordinator(clean_stop_exception_types=())
       coord_sess = monitored_session._CoordinatedSession(sess, coord)
@@ -721,7 +808,7 @@ class CoordinatedSessionTest(test.TestCase):
             'Traceback:\n%s' % tb)
 
 
-class AbortAtNSession(object):
+class AbortAtNSession:
   """A mock session that aborts at the N-th run call."""
 
   def __init__(self, sess, n):
@@ -812,7 +899,7 @@ class FailTrainingAfterCoordinatorStopped(StopCoordinatorWithException):
                                        'Session got garbage-collected.')
 
 
-class CountingSessionCreator(object):
+class CountingSessionCreator:
   """A creator that counts the number of created sessions."""
 
   def __init__(self, session):
@@ -834,7 +921,7 @@ class CountingSessionCreator(object):
 class RecoverableSessionTest(test.TestCase):
   """_RecoverableSession tests."""
 
-  class _SessionReturner(object):
+  class _SessionReturner:
 
     def __init__(self, sess):
       self._sess = sess
@@ -848,8 +935,8 @@ class RecoverableSessionTest(test.TestCase):
       constant_op.constant(0.0)
       recoverable_sess = monitored_session._RecoverableSession(
           self._SessionReturner(sess))
-      self.assertEquals(sess.graph, recoverable_sess.graph)
-      self.assertEquals(sess.sess_str, recoverable_sess.sess_str)
+      self.assertEqual(sess.graph, recoverable_sess.graph)
+      self.assertEqual(sess.sess_str, recoverable_sess.sess_str)
 
   @test_util.run_deprecated_v1
   def test_run(self):
@@ -864,7 +951,7 @@ class RecoverableSessionTest(test.TestCase):
   def test_recovery(self):
     with self.cached_session() as sess:
 
-      class StackSessionCreator(object):
+      class StackSessionCreator:
 
         def __init__(self, sess):
           self.sessions_to_use = [
@@ -904,7 +991,7 @@ class RecoverableSessionTest(test.TestCase):
       self.assertEqual(11, recoverable_sess.run(v, feed_dict={c: 11}))
       self.assertEqual(0, recoverable_sess.run(v, feed_dict={c: 0}))
       # This will fail and throw a real error as the pop() will fail.
-      with self.assertRaisesRegexp(IndexError, 'pop from empty list'):
+      with self.assertRaisesRegex(IndexError, 'pop from empty list'):
         recoverable_sess.run(v, feed_dict={c: -12})
 
   @test_util.run_deprecated_v1
@@ -1348,7 +1435,7 @@ class HookedSessionTest(test.TestCase):
           None, feed_dict={a_tensor: [10]})
       self.evaluate(variables.global_variables_initializer())
 
-      with self.assertRaisesRegexp(RuntimeError, 'Same tensor is fed'):
+      with self.assertRaisesRegex(RuntimeError, 'Same tensor is fed'):
         mon_sess.run(fetches=add_tensor)
 
   def testHooksAndUserFeedConflicts(self):
@@ -1366,7 +1453,7 @@ class HookedSessionTest(test.TestCase):
           None, feed_dict={b_tensor: [10]})
       self.evaluate(variables.global_variables_initializer())
 
-      with self.assertRaisesRegexp(RuntimeError, 'Same tensor is fed'):
+      with self.assertRaisesRegex(RuntimeError, 'Same tensor is fed'):
         mon_sess.run(fetches=add_tensor, feed_dict={b_tensor: [10]})
 
 
@@ -1423,14 +1510,14 @@ class MonitoredSessionTest(test.TestCase):
 
   def test_defaults(self):
     with ops.Graph().as_default():
-      a_var = variables.VariableV1(0)
+      a_var = variable_v1.VariableV1(0)
       with monitored_session.MonitoredSession() as session:
         self.assertEqual(0, session.run(a_var))
 
   def test_last_step(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_last_step')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       # Run till step 3 and save.
       hooks = [basic_session_run_hooks.StopAtStepHook(last_step=3)]
@@ -1465,7 +1552,7 @@ class MonitoredSessionTest(test.TestCase):
   def test_num_steps(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_num_steps')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       # Do 3 steps and save.
       hooks = [basic_session_run_hooks.StopAtStepHook(num_steps=3)]
@@ -1504,7 +1591,7 @@ class MonitoredSessionTest(test.TestCase):
   def test_recovery(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_recovery')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       scaffold = monitored_session.Scaffold()
       # Use a hook to save the model every 100 steps.  It also saves it at
@@ -1536,7 +1623,7 @@ class MonitoredSessionTest(test.TestCase):
   def test_retry_initialization_on_aborted_error(self):
     # Tests that we silently retry on abort during initialization.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       self.init_raised_aborted_error = False
 
       def _init_fn(scaffold, session):
@@ -1557,7 +1644,7 @@ class MonitoredSessionTest(test.TestCase):
     # Tests that we silently retry on error.  Note that this does not test
     # recovery as we do not use a CheckpointSaver in this test.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       hook = RaiseOnceAtCountN(4, ex)
       with monitored_session.MonitoredSession(hooks=[hook]) as session:
@@ -1587,7 +1674,7 @@ class MonitoredSessionTest(test.TestCase):
     logdir = _test_dir(self.get_temp_dir(),
                        'test_recover_and_retry_on_aborted_error')
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       scaffold = monitored_session.Scaffold()
       abort_hook = RaiseOnceAtCountN(
@@ -1615,7 +1702,7 @@ class MonitoredSessionTest(test.TestCase):
   def test_exit_cleanly_on_out_of_range_exception(self):
     # Tests that we stop cleanly when OutOfRange is raised.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       hook = RaiseOnceAtCountN(2, errors_impl.OutOfRangeError(None, None,
                                                               'EOI'))
@@ -1634,7 +1721,7 @@ class MonitoredSessionTest(test.TestCase):
   def test_exit_cleanly_on_stop_iteration_exception(self):
     # Tests that we stop cleanly when OutOfRange is raised.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       hook = RaiseOnceAtCountN(2, StopIteration)
       session = monitored_session.MonitoredSession(hooks=[hook])
@@ -1653,11 +1740,11 @@ class MonitoredSessionTest(test.TestCase):
     # Tests that regular exceptions just pass through a "with
     # MonitoredSession" block and set the session in stop mode.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       hook = RaiseOnceAtCountN(4, RuntimeError('regular exception'))
       session = monitored_session.MonitoredSession(hooks=[hook])
-      with self.assertRaisesRegexp(RuntimeError, 'regular exception'):
+      with self.assertRaisesRegex(RuntimeError, 'regular exception'):
         with session:
           self.assertEqual(0, session.run(gstep))
           self.assertEqual(1, session.run(do_step))
@@ -1675,10 +1762,10 @@ class MonitoredSessionTest(test.TestCase):
     # passes through a "run()" call within a "with MonitoredSession" block and
     # set the session in stop mode.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       session = monitored_session.MonitoredSession()
       run_performed_without_error = False
-      with self.assertRaisesRegexp(RuntimeError, 'a thread wants to stop'):
+      with self.assertRaisesRegex(RuntimeError, 'a thread wants to stop'):
         with session:
           self.assertEqual(0, session.run(gstep))
           # Report an exception through the coordinator.
@@ -1696,9 +1783,9 @@ class MonitoredSessionTest(test.TestCase):
     # passes through returning from a "with MonitoredSession" block and
     # set the session in stop mode.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       session = monitored_session.MonitoredSession()
-      with self.assertRaisesRegexp(RuntimeError, 'a thread wants to stop'):
+      with self.assertRaisesRegex(RuntimeError, 'a thread wants to stop'):
         with session:
           self.assertEqual(0, session.run(gstep))
           # Report an exception through the coordinator.
@@ -1714,7 +1801,7 @@ class MonitoredSessionTest(test.TestCase):
   def test_stop_cleanly_when_no_exception_in_with_body(self):
     # Tests that regular exceptions pass through
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       session = monitored_session.MonitoredSession()
       with session:
@@ -1728,11 +1815,11 @@ class MonitoredSessionTest(test.TestCase):
   def test_raises_regular_exceptions_in_with_body(self):
     # Tests that regular exceptions in "with body" are seen outside.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       session = monitored_session.MonitoredSession()
       # We should see that exception.
-      with self.assertRaisesRegexp(RuntimeError, 'regular exception'):
+      with self.assertRaisesRegex(RuntimeError, 'regular exception'):
         with session:
           self.assertEqual(1, session.run(do_step))
           self.assertEqual(2, session.run(do_step))
@@ -1750,7 +1837,7 @@ class MonitoredSessionTest(test.TestCase):
 
   def test_graph_finalized_during_run_unfinalized_after_exit(self):
     with ops.Graph().as_default() as g:
-      a_var = variables.VariableV1(0)
+      a_var = variable_v1.VariableV1(0)
       with monitored_session.MonitoredSession() as session:
         self.assertEqual(0, session.run(a_var))
         self.assertTrue(g.finalized)
@@ -1758,7 +1845,7 @@ class MonitoredSessionTest(test.TestCase):
 
   def test_keep_finalized_graph_as_finalized(self):
     with ops.Graph().as_default() as g:
-      a_var = variables.VariableV1(0)
+      a_var = variable_v1.VariableV1(0)
       monitored_session.Scaffold().finalize()
       with monitored_session.MonitoredSession() as session:
         self.assertEqual(0, session.run(a_var))
@@ -1858,7 +1945,7 @@ class MonitoredSessionTest(test.TestCase):
   def test_with_statement_and_close(self):
     # Test case for https://github.com/tensorflow/tensorflow/issues/12224
     # where close() inside the with should have a better error message.
-    with self.assertRaisesRegexp(RuntimeError, 'Session is already closed'):
+    with self.assertRaisesRegex(RuntimeError, 'Session is already closed'):
       with monitored_session.MonitoredSession() as session:
         session.close()
 
@@ -1927,7 +2014,7 @@ class MonitoredSessionTest(test.TestCase):
         del step_context, extra_foo
 
       with monitored_session.MonitoredSession() as session:
-        with self.assertRaisesRegexp(
+        with self.assertRaisesRegex(
             ValueError,
             '`step_fn` may either have one `step_context` argument'):
           self.assertEqual(None, session.run_step_fn(step_fn))
@@ -1937,7 +2024,7 @@ class MonitoredSessionTest(test.TestCase):
       c = array_ops.placeholder(dtypes.float32)
       v = array_ops.identity(c)
 
-      class Model(object):
+      class Model:
 
         def step_fn(self, step_context):
           return step_context.run_with_hooks(fetches=v, feed_dict={c: 3.2})
@@ -1949,13 +2036,13 @@ class MonitoredSessionTest(test.TestCase):
   def test_step_fn_belongs_to_a_class_and_has_extra_methods(self):
     with ops.Graph().as_default():
 
-      class Model(object):
+      class Model:
 
         def step_fn(self, step_context, extra_foo):
           del step_context, extra_foo
 
       with monitored_session.MonitoredSession() as session:
-        with self.assertRaisesRegexp(
+        with self.assertRaisesRegex(
             ValueError,
             '`step_fn` may either have one `step_context` argument'):
           model = Model()
@@ -1965,7 +2052,7 @@ class MonitoredSessionTest(test.TestCase):
     with ops.Graph().as_default():
       var = resource_variable_ops.ResourceVariable(0.0)
 
-      # This test higlights the interaction of hooks with
+      # This test highlights the interaction of hooks with
       # `Monitoredsession.run_step_fn`.  The order of execution of operations
       # below is:
       #   0.  stage_0
@@ -1979,7 +2066,7 @@ class MonitoredSessionTest(test.TestCase):
       # are complete.  To obtain a consistent result of adding two different
       # constants to `var`, we rely on a control dependency and
       # `ResourceVariable`.  Otherwise, it is possible that one of the
-      # additions overwites the result of the other addition.
+      # additions overwrites the result of the other addition.
       with ops.control_dependencies([stage_1_0]):
         stage_1_1 = state_ops.assign_add(var, 0.5)
       stage_2 = state_ops.assign_add(var, 1.1)
@@ -2084,7 +2171,7 @@ class MonitoredSessionTest(test.TestCase):
     with ops.Graph().as_default():
       c = array_ops.placeholder(dtypes.float32)
       v = array_ops.identity(c)
-      graph_state = variables.VariableV1(0.0)
+      graph_state = variable_v1.VariableV1(0.0)
       graph_side_effect = state_ops.assign_add(graph_state, 0.31)
 
       def step_fn(step_context):
@@ -2127,7 +2214,7 @@ class MonitoredSessionTest(test.TestCase):
         return value
 
       with monitored_session.SingularMonitoredSession() as session:
-        with self.assertRaisesRegexp(errors_impl.AbortedError, 'Abort'):
+        with self.assertRaisesRegex(errors_impl.AbortedError, 'Abort'):
           self.assertNear(3.2, session.run_step_fn(step_fn), 0.1)
           self.fail()
 
@@ -2140,7 +2227,7 @@ class MonitoredSessionTest(test.TestCase):
       c = array_ops.placeholder(dtypes.float32)
       v = array_ops.identity(c)
       vv = constant_op.constant(3.2)
-      graph_state = variables.VariableV1(0.0)
+      graph_state = variable_v1.VariableV1(0.0)
       graph_side_effect = state_ops.assign_add(graph_state, 0.31)
 
       class Hook(session_run_hook.SessionRunHook):
@@ -2177,14 +2264,14 @@ class SingularMonitoredSessionTest(test.TestCase):
 
   def test_handles_initialization(self):
     with ops.Graph().as_default():
-      a_var = variables.VariableV1(0)
+      a_var = variable_v1.VariableV1(0)
       with monitored_session.SingularMonitoredSession() as session:
         # If it's not initialized, following statement raises an error.
         self.assertEqual(0, session.run(a_var))
 
   def test_do_not_handle_aborted_error(self):
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
 
       class _RaiseAbortedHook(session_run_hook.SessionRunHook):
 
@@ -2204,7 +2291,7 @@ class SingularMonitoredSessionTest(test.TestCase):
   def test_exit_cleanly_on_out_of_range_exception(self):
     # Tests that we stop cleanly when OutOfRange is raised.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       hook = RaiseOnceAtCountN(2, errors_impl.OutOfRangeError(None, None,
                                                               'EOI'))
@@ -2225,10 +2312,10 @@ class SingularMonitoredSessionTest(test.TestCase):
     # passes through a "run()" call within a "with MonitoredSession" block and
     # set the session in stop mode.
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       session = monitored_session.SingularMonitoredSession()
       run_performed_without_error = False
-      with self.assertRaisesRegexp(RuntimeError, 'a thread wants to stop'):
+      with self.assertRaisesRegex(RuntimeError, 'a thread wants to stop'):
         with session:
           self.assertEqual(0, session.run(gstep))
           # Report an exception through the coordinator.
@@ -2244,7 +2331,7 @@ class SingularMonitoredSessionTest(test.TestCase):
   def test_stop_cleanly_when_no_exception_in_with_body(self):
     # Tests that regular exceptions pass through
     with ops.Graph().as_default():
-      gstep = variables_lib.get_or_create_global_step()
+      gstep = training_util.get_or_create_global_step()
       do_step = state_ops.assign_add(gstep, 1)
       session = monitored_session.SingularMonitoredSession()
       with session:

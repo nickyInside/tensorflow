@@ -14,19 +14,17 @@
 # ==============================================================================
 """Tests for tensorflow.python.framework.function_def_to_graph."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-from tensorflow.python.eager import function
+from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import function_def_to_graph
 from tensorflow.python.framework import graph_to_function_def
+from tensorflow.python.framework import op_def_library
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
-from tensorflow.python.framework import test_util
+from tensorflow.python.framework import tensor_spec
 from tensorflow.python.framework import test_ops
+from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import variables
@@ -75,15 +73,18 @@ class FunctionDefToGraphTest(test.TestCase):
     self.assertIsNone(g.outputs[1].shape.dims)  # Unknown dims.
 
     g = function_def_to_graph.function_def_to_graph(
-        fdef, input_shapes=[tensor_shape.vector(5),
-                            tensor_shape.vector(5)])
+        fdef,
+        input_shapes=[
+            tensor_shape.TensorShape([5]),
+            tensor_shape.TensorShape([5])
+        ])
     self.assertSequenceEqual(g.inputs[0].shape.dims, [5])
     self.assertSequenceEqual(g.inputs[1].shape.dims, [5])
     self.assertSequenceEqual(g.outputs[0].shape.dims, [5])
     self.assertSequenceEqual(g.outputs[1].shape.dims, [5])
 
     g = function_def_to_graph.function_def_to_graph(
-        fdef, input_shapes=[None, tensor_shape.matrix(5, 7)])
+        fdef, input_shapes=[None, tensor_shape.TensorShape([5, 7])])
     self.assertIsNone(g.inputs[0].shape.dims)
     self.assertSequenceEqual(g.inputs[1].shape.dims, [5, 7])
     self.assertSequenceEqual(g.outputs[0].shape.dims, [5, 7])
@@ -93,7 +94,98 @@ class FunctionDefToGraphTest(test.TestCase):
     # the number of input args in FunctionDef.signature.input_arg.
     with self.assertRaises(ValueError):
       g = function_def_to_graph.function_def_to_graph(
-          fdef, input_shapes=[tensor_shape.matrix(5, 7)])
+          fdef, input_shapes=[tensor_shape.TensorShape([5, 7])])
+
+  def testResourceHandleInputShapes(self):
+    # Test that shape inference and validation with resource handles works as
+    # expected.
+
+    # Create a graph to generate the input and handle shape attributes in the
+    # FunctionDef.
+    with ops.Graph().as_default() as g:
+      v = variables.Variable(array_ops.ones((2, 3), dtype=dtypes.float32))
+
+      @def_function.function(
+          input_signature=[tensor_spec.TensorSpec((None, 2, 2), dtypes.int32)])
+      def lookup(inp):
+        return {
+            # gather_nd expects a nonscalar shape for `v`, otherwise raises
+            # error when doing shape inference.
+            "shape inference": array_ops.gather_nd(v, inp),
+            # Triggers output shape validation. Expected shape must be [].
+            "handle": v.handle}
+
+      lookup.get_concrete_function().add_to_graph()
+      fdef = g.as_graph_def(add_shapes=True).library.function[0]
+
+    fg = function_def_to_graph.function_def_to_graph(fdef)
+    self.assertSequenceEqual(fg.inputs[0].shape.as_list(), [None, 2, 2])
+    self.assertSequenceEqual(fg.inputs[1].shape.as_list(), [])
+
+  def testIncludeLibraryFunctions(self):
+    @def_function.function
+    def g(x):
+      return x + 1
+
+    @def_function.function
+    def f(x):
+      return g(x)
+
+    cfg = g.get_concrete_function(1.0)
+    cfg.add_to_graph()
+    gname = cfg.function_def.signature.name
+    function_def = f.get_concrete_function(1.0).function_def
+    func_graph = function_def_to_graph.function_def_to_graph(
+        function_def, include_library_functions=True)
+    graph_def = func_graph.as_graph_def()
+    self.assertLen(graph_def.library.function, 1)
+    self.assertEqual(graph_def.library.function[0].signature.name, gname)
+
+  def testCopyFunctionDefToGraphDefRecursively(self):
+    @def_function.function
+    def inner(x):
+      return x + 1
+
+    @def_function.function
+    def middle(x):
+      return inner(x) + 1
+
+    @def_function.function
+    def outer(x):
+      return middle(x) + 1
+
+    @def_function.function
+    def target_func(x):
+      return x
+
+    target_graph_def = target_func.get_concrete_function(1).graph.as_graph_def()
+
+    self.assertEmpty(target_graph_def.library.function)
+
+    concrete_outer = outer.get_concrete_function(1)
+    default_graph = ops.get_default_graph()
+    # Copy FunctionDefs in `outer` to the default graph.
+    concrete_outer.add_to_graph(default_graph)
+    outer_function_name = concrete_outer.function_def.signature.name
+    copied_functions = set()
+    # Copy all FunctionDefs from `outer` to `target_func`.
+    function_def_to_graph.copy_function_def_to_graph_def_recursively(
+        outer_function_name, target_graph_def, copied_functions, default_graph
+    )
+
+    outer_graph_def = concrete_outer.graph.as_graph_def()
+    nested_function_names = {
+        f.signature.name for f in outer_graph_def.library.function
+    }
+    expected_function_names = {outer_function_name} | nested_function_names
+
+    self.assertEqual(copied_functions, expected_function_names)
+
+    target_function_names = {
+        f.signature.name for f in target_graph_def.library.function
+    }
+
+    self.assertEqual(target_function_names, expected_function_names)
 
 
 class FunctionDefToGraphDefTest(test.TestCase):
@@ -116,8 +208,7 @@ class FunctionDefToGraphDefTest(test.TestCase):
       y = array_ops.placeholder(dtypes.int32, name="y")
       z = array_ops.placeholder(dtypes.int32, name="z")
 
-      d_1, e_1 = test_ops._op_def_lib.apply_op(
-          "Foo1", name="foo_1", a=x, b=y, c=z)
+      d_1, e_1 = op_def_library.apply_op("Foo1", name="foo_1", a=x, b=y, c=z)
 
       list_output0, list_output1 = test_ops.list_output(
           T=[dtypes.int32, dtypes.int32], name="list_output")
@@ -177,8 +268,10 @@ class FunctionDefToGraphDefTest(test.TestCase):
     fdef = self._build_function_def()
     g, _ = function_def_to_graph.function_def_to_graph_def(
         fdef,
-        input_shapes=[tensor_shape.scalar(),
-                      tensor_shape.vector(5), None])
+        input_shapes=[
+            tensor_shape.TensorShape([]),
+            tensor_shape.TensorShape([5]), None
+        ])
     self.assertEqual("shape" in g.node[0].attr, True)
     self.assertSequenceEqual(
         tensor_shape.TensorShape(g.node[0].attr["shape"].shape).as_list(), [])
@@ -189,46 +282,11 @@ class FunctionDefToGraphDefTest(test.TestCase):
     self.assertEqual(g.node[0].attr["shape"].shape.unknown_rank, False)
     self.assertFalse("shape" in g.node[2].attr)
 
-  @test_util.run_deprecated_v1
-  def testFunctionCallsFromFunction(self):
-    x = constant_op.constant(5.0)
-    y = constant_op.constant(10.0)
-
-    @function.defun
-    def fn():
-
-      @function.defun
-      def inner_fn():
-        return x + y
-
-      return inner_fn()
-
-    @function.defun
-    def fn2():
-      return 2 * fn()
-
-    fn2_defun = fn2.get_concrete_function()
-
-    # Call `fn2` to make sure `fn` is correctly instantiated so
-    # `function_def_to_graph` can find it.
-    fn2_defun()
-
-    fdef = fn2_defun._inference_function.definition
-    func_graph = function_def_to_graph.function_def_to_graph(fdef)
-    with func_graph.as_default():
-      x_ph, y_ph = func_graph.inputs
-      with self.session(graph=func_graph) as sess:
-        self.assertEqual(
-            sess.run(func_graph.outputs[0], feed_dict={
-                x_ph: 5.0,
-                y_ph: 10.0
-            }), 30.0)
-
   def testControlDependencies(self):
 
     v = variables.Variable(1)
 
-    @function.defun
+    @def_function.function
     def fn(inp):
       assign = v.assign(3, name="assign", read_value=False)
       x = constant_op.constant(2.0, name="x")
@@ -250,7 +308,7 @@ class FunctionDefToGraphDefTest(test.TestCase):
 
   def testAttributesForArgDef(self):
 
-    @function.defun
+    @def_function.function
     def fn(x):
       return x
 

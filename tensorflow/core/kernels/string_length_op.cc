@@ -12,6 +12,10 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <cstdint>
+#include <string>
+
+#include "Eigen/Core"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/string_util.h"
@@ -22,7 +26,7 @@ namespace {
 class StringLengthOp : public OpKernel {
  public:
   explicit StringLengthOp(OpKernelConstruction* ctx) : OpKernel(ctx) {
-    string unit;
+    std::string unit;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("unit", &unit));
     OP_REQUIRES_OK(ctx, ParseCharUnit(unit, &unit_));
   }
@@ -34,17 +38,17 @@ class StringLengthOp : public OpKernel {
     OP_REQUIRES_OK(context,
                    context->allocate_output(0, input.shape(), &output));
 
-    auto src = input.flat<string>();
-    auto dst = output->flat<int32>();
+    auto src = input.flat<tstring>();
+    auto dst = output->flat<int32_t>();
 
     switch (unit_) {
       case CharUnit::BYTE:
-        for (int n = 0; n < src.size(); ++n) {
+        for (Eigen::Index n = 0; n < src.size(); ++n) {
           dst(n) = src(n).size();
         }
         break;
       case CharUnit::UTF8_CHAR:
-        for (int n = 0; n < src.size(); ++n) {
+        for (Eigen::Index n = 0; n < src.size(); ++n) {
           dst(n) = UTF8StrLen(src(n));
         }
         break;

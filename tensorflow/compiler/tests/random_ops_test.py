@@ -14,12 +14,9 @@
 # ==============================================================================
 """Tests for random-number generation ops in the XLA JIT compiler."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import math
 
+from absl.testing import parameterized
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
@@ -31,7 +28,7 @@ from tensorflow.python.ops.distributions import special_math
 from tensorflow.python.platform import googletest
 
 
-class RandomOpsTest(xla_test.XLATestCase):
+class RandomOpsTest(xla_test.XLATestCase, parameterized.TestCase):
   """Test cases for random-number generating operators."""
 
   def _random_types(self):
@@ -40,7 +37,7 @@ class RandomOpsTest(xla_test.XLATestCase):
 
   def _testRngIsNotConstant(self, rng, dtype):
     # Tests that 'rng' does not always return the same value.
-    with self.cached_session() as sess:
+    with self.session():
       with self.test_scope():
         x = rng(dtype)
 
@@ -72,103 +69,195 @@ class RandomOpsTest(xla_test.XLATestCase):
     for dtype in self._random_types() & self.float_types:
       self._testRngIsNotConstant(rng, dtype)
 
-  def testRandomNormalMean(self):
+  @parameterized.parameters({
+      'mean': 1.4,
+      'stddev': 1.2
+  }, {
+      'mean': 2.3,
+      'stddev': 2.0
+  })
+  def testRandomNormal(self, mean, stddev):
+    num_elts = 1000000
     for dtype in self._random_types() & self.float_types:
-      with self.cached_session():
+      with self.session():
         with self.test_scope():
-          normal = random_ops.random_normal([1024],
+          normal = random_ops.random_normal([num_elts],
                                             dtype=dtype,
-                                            mean=1.4,
-                                            stddev=1.2)
-          mean = math_ops.reduce_mean(normal)
-          x = self.evaluate(mean)
-          self.assertAllClose(x, 1.4, rtol=1e-1, atol=1e-1)
-
-  def testRandomNormalVariance(self):
-    for dtype in self._random_types() & self.float_types:
-      with self.cached_session():
-        with self.test_scope():
-          normal = random_ops.random_normal([1024],
-                                            dtype=dtype,
-                                            mean=2.3,
-                                            stddev=2.0)
-          variance = math_ops.reduce_variance(normal)
-          x = self.evaluate(variance)
-          self.assertAllClose(x, 4.0, rtol=1e-1, atol=1e-1)
+                                            mean=mean,
+                                            stddev=stddev)
+          self._checkTruncatedNormalIsInRange(
+              normal,
+              a=normal.dtype.min,
+              b=normal.dtype.max,
+              mu=mean,
+              sigma=stddev,
+              count=num_elts,
+              stat_test=True)
 
   def testRandomUniformIsInRange(self):
     for dtype in self._random_types():
       # TODO (b/112272078): enable bfloat16 for CPU and GPU when the bug is
       # fixed.
-      if (self.device in ["XLA_GPU", "XLA_CPU"
+      if (self.device in ['XLA_GPU', 'XLA_CPU'
                          ]) and (dtype in [dtypes.bfloat16, dtypes.half]):
         continue
-      with self.cached_session() as sess:
+      with self.session():
         with self.test_scope():
           x = random_ops.random_uniform(
               shape=[1000], dtype=dtype, minval=-2, maxval=33)
         y = self.evaluate(x)
-        self.assertTrue((y >= -2).sum() == 1000)
-        self.assertTrue((y < 33).sum() == 1000)
+        msg = str(y) + str(dtype)
+        self.assertEqual((y >= -2).sum(), 1000, msg)
+        self.assertEqual((y < 33).sum(), 1000, msg)
 
   def testTruncatedNormalIsNotConstant(self):
 
     def rng(dtype):
       return random_ops.truncated_normal(shape=[2], dtype=dtype)
 
-    for dtype in self._random_types() & self.float_types:
+    # TODO(b/34339814): make this test work with 16 bit float types.
+    for dtype in self._random_types() & {np.float32, np.float64}:
       self._testRngIsNotConstant(rng, dtype)
+
+  def _checkTruncatedNormalIsInRange(self, x, a, b, mu, sigma, count,
+                                     stat_test):
+
+    def normal_cdf(x):
+      return .5 * math.erfc(-x / math.sqrt(2))
+
+    def normal_pdf(x):
+      return math.exp(-(x**2) / 2.) / math.sqrt(2 * math.pi)
+
+    def probit(x):
+      return self.evaluate(special_math.ndtri(x))
+
+    y = self.evaluate(x)
+
+    alpha = (a - mu) / sigma
+    beta = (b - mu) / sigma
+    z = normal_cdf(beta) - normal_cdf(alpha)
+
+    self.assertEqual((y >= a).sum(), count)
+    self.assertEqual((y <= b).sum(), count)
+
+    # Skip statistical test for low probability regions.
+    if not stat_test:
+      return
+
+    # For more information on these calculations, see:
+    # Burkardt, John. "The Truncated Normal Distribution".
+    # Department of Scientific Computing website. Florida State University.
+    expected_mean = mu + (normal_pdf(alpha) - normal_pdf(beta)) / z * sigma
+    actual_mean = np.mean(y, dtype=np.float64)
+    if x.dtype == dtypes.bfloat16:
+      atol = rtol = 1e-1
+    else:
+      atol = rtol = 2e-2
+    self.assertAllClose(actual_mean, expected_mean, atol=atol, rtol=rtol)
+
+    expected_median = mu + probit(
+        (normal_cdf(alpha) + normal_cdf(beta)) / 2.) * sigma
+    actual_median = np.median(y)
+    self.assertAllClose(actual_median, expected_median, atol=atol, rtol=rtol)
+
+    expected_variance = sigma**2 * (1 + (
+        (alpha * normal_pdf(alpha) - beta * normal_pdf(beta)) / z) - (
+            (normal_pdf(alpha) - normal_pdf(beta)) / z)**2)
+    actual_variance = np.var(y, dtype=np.float64)
+    self.assertAllClose(
+        actual_variance, expected_variance, atol=atol, rtol=rtol)
 
   def testTruncatedNormalIsInRange(self):
     count = 10000000
     # TODO(b/34339814): make this test work with 16 bit float types.
-    for dtype in self._random_types() & {dtypes.float32, dtypes.float64}:
-      with self.cached_session() as sess:
+    for dtype in self._random_types() & {np.float32, np.float64}:
+      with self.session():
         with self.test_scope():
           x = random_ops.truncated_normal(shape=[count], dtype=dtype)
-        y = self.evaluate(x)
+        self._checkTruncatedNormalIsInRange(
+            x, a=-2, b=2, mu=0, sigma=1, count=count, stat_test=True)
 
-        def normal_cdf(x):
-          return .5 * math.erfc(-x / math.sqrt(2))
+  def _implParameterizedTruncatedNormalIsInRange(self, a, b, mu, sigma, count,
+                                                 stat_test):
+    # TODO(b/34339814): make this test work with 16 bit float types.
+    for dtype in self._random_types() & {np.float32, np.float64}:
+      with self.session():
+        with self.test_scope():
+          x = random_ops.parameterized_truncated_normal(
+              shape=[count],
+              dtype=dtype,
+              means=mu,
+              stddevs=sigma,
+              minvals=a,
+              maxvals=b)
+        self._checkTruncatedNormalIsInRange(
+            x, a=a, b=b, mu=mu, sigma=sigma, count=count, stat_test=stat_test)
 
-        def normal_pdf(x):
-          return math.exp(-(x**2) / 2.) / math.sqrt(2 * math.pi)
+  def testParameterizedTruncatedNormalBroadcasting(self):
+    for dtype in self._random_types() & {np.float32, np.float64}:
+      with self.session():
+        with self.test_scope():
+          a = -1.
+          b = 1.
+          mu = 0.
+          sigma = 1.
+          count = 10000000
+          x = random_ops.parameterized_truncated_normal(
+              shape=[1, count],
+              dtype=dtype,
+              means=mu,
+              stddevs=sigma,
+              minvals=[a],
+              maxvals=[b])
+        self._checkTruncatedNormalIsInRange(
+            x, a=a, b=b, mu=mu, sigma=sigma, count=count, stat_test=True)
 
-        def probit(x, sess=sess):
-          return self.evaluate(special_math.ndtri(x))
+  def testParameterizedTruncatedNormalBatched(self):
+    # TODO(b/112289993): Make this test work with dtype np.float64.
+    for dtype in self._random_types() & {np.float32}:
+      with self.session():
+        with self.test_scope():
+          count = 10000000
+          a = -100.
+          b = 100.
+          mu0 = 0.
+          mu1 = 1.
+          sigma = .1
+          x = random_ops.parameterized_truncated_normal(
+              shape=[2, count],
+              dtype=dtype,
+              means=[mu0, mu1],
+              stddevs=sigma,
+              minvals=[a],
+              maxvals=[b])
+        self._checkTruncatedNormalIsInRange(
+            x[0], a=a, b=b, mu=mu0, sigma=sigma, count=count, stat_test=True)
+        self._checkTruncatedNormalIsInRange(
+            x[1], a=a, b=b, mu=mu1, sigma=sigma, count=count, stat_test=True)
 
-        a = -2.
-        b = 2.
-        mu = 0.
-        sigma = 1.
+  def testParameterizedTruncatedNormalIsInRangeCenter(self):
+    count = 10000000
+    self._implParameterizedTruncatedNormalIsInRange(
+        a=-10, b=20, mu=5, sigma=5, count=count, stat_test=True)
 
-        alpha = (a - mu) / sigma
-        beta = (b - mu) / sigma
-        z = normal_cdf(beta) - normal_cdf(alpha)
+  def testParameterizedTruncatedNormalIsInRangeLeft(self):
+    count = 10000000
+    # the region is on the left side of the parent normal distribution
+    self._implParameterizedTruncatedNormalIsInRange(
+        a=-10, b=-4, mu=0, sigma=1, count=count, stat_test=False)
+    self._implParameterizedTruncatedNormalIsInRange(
+        a=-np.inf, b=-4, mu=0, sigma=1, count=count, stat_test=False)
 
-        self.assertEqual((y >= a).sum(), count)
-        self.assertEqual((y <= b).sum(), count)
-
-        # For more information on these calculations, see:
-        # Burkardt, John. "The Truncated Normal Distribution".
-        # Department of Scientific Computing website. Florida State University.
-        expected_mean = mu + (normal_pdf(alpha) - normal_pdf(beta)) / z * sigma
-        actual_mean = np.mean(y)
-        self.assertAllClose(actual_mean, expected_mean, atol=2e-3)
-
-        expected_median = mu + probit(
-            (normal_cdf(alpha) + normal_cdf(beta)) / 2.) * sigma
-        actual_median = np.median(y)
-        self.assertAllClose(actual_median, expected_median, atol=1e-2)
-
-        expected_variance = sigma**2 * (1 + (
-            (alpha * normal_pdf(alpha) - beta * normal_pdf(beta)) / z) - (
-                (normal_pdf(alpha) - normal_pdf(beta)) / z)**2)
-        actual_variance = np.var(y)
-        self.assertAllClose(actual_variance, expected_variance, rtol=2*1e-3)
+  def testParameterizedTruncatedNormalIsInRangeRight(self):
+    count = 10000000
+    # the region is on the right side of the parent normal distribution
+    self._implParameterizedTruncatedNormalIsInRange(
+        a=4, b=10, mu=0, sigma=1, count=count, stat_test=False)
+    self._implParameterizedTruncatedNormalIsInRange(
+        a=4, b=np.inf, mu=0, sigma=1, count=count, stat_test=False)
 
   def testShuffle1d(self):
-    with self.cached_session() as sess:
+    with self.session():
       with self.test_scope():
         x = math_ops.range(1 << 16)
         shuffle = random_ops.random_shuffle(x)
@@ -179,7 +268,7 @@ class RandomOpsTest(xla_test.XLATestCase):
       self.assertAllEqual(set(result), set(expected))
 
   def testShuffle2d(self):
-    with self.cached_session() as sess:
+    with self.session():
       with self.test_scope():
         x = array_ops.diag(math_ops.range(20))
         shuffle = random_ops.random_shuffle(x)
@@ -189,6 +278,12 @@ class RandomOpsTest(xla_test.XLATestCase):
       # have all the values.
       self.assertAllEqual(len(result.flatten()), len(expected))
       self.assertAllEqual(set(result.flatten()), set(expected))
+
+  def testRandomShuffleInputRank0(self):
+    with self.session():
+      with self.test_scope():
+        shuffle = random_ops.random_shuffle(value=1e20)
+      self.evaluate(shuffle)
 
 
 if __name__ == '__main__':

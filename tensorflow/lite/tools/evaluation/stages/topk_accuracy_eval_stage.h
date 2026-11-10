@@ -15,8 +15,11 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOOLS_EVALUATION_STAGES_TOPK_ACCURACY_EVAL_STAGE_H_
 #define TENSORFLOW_LITE_TOOLS_EVALUATION_STAGES_TOPK_ACCURACY_EVAL_STAGE_H_
 
+#include <string>
 #include <vector>
 
+#include "tensorflow/lite/c/c_api_types.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/tools/evaluation/evaluation_stage.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_config.pb.h"
 
@@ -39,7 +42,7 @@ class TopkAccuracyEvalStage : public EvaluationStage {
 
   EvaluationStageMetrics LatestMetrics() override;
 
-  ~TopkAccuracyEvalStage() {}
+  ~TopkAccuracyEvalStage() override = default;
 
   // Call before Init().
   // model_output_shape is not owned, so this class does not free the
@@ -61,12 +64,10 @@ class TopkAccuracyEvalStage : public EvaluationStage {
   }
 
  private:
-  // Returns the index of label from ground_truth_labels_.
-  int GroundTruthIndex(const std::string& label) const;
-  // Updates accuracy_counts_ based on the top k indices & index of the ground
-  // truth.
-  void UpdateCounts(const std::vector<int>& topk_indices,
-                    int ground_truth_index);
+  // Updates accuracy_counts_ based on comparing top k labels and the
+  // groundtruth one. Using string comparison since there are some duplicate
+  // labels in the imagenet dataset.
+  void UpdateCounts(const std::vector<int>& topk_indices);
 
   std::vector<std::string> ground_truth_labels_;
   TfLiteType model_output_type_ = kTfLiteNoType;

@@ -16,11 +16,11 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_KERNELS_TILE_FUNCTOR_GPU_H_
 #define TENSORFLOW_CORE_KERNELS_TILE_FUNCTOR_GPU_H_
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #define EIGEN_USE_GPU
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/kernels/tile_functor.h"
@@ -30,14 +30,15 @@ namespace tensorflow {
 namespace internal {
 
 template <typename T>
-__global__ void TileKernel(int nthreads, const T* src, const int32* buf,
-                           const int32 ndims, T* dst) {
-  const int32* in_strides = buf;
-  const int32* out_strides = buf + ndims;
-  const int32* in_dim_sizes = buf + ndims * 2;
-  CUDA_1D_KERNEL_LOOP(o_idx, nthreads) {
-    int32 i_idx = 0;
-    int32 t = o_idx;
+__global__ void TileKernel(int nthreads, const T* __restrict__ src,
+                           const int32_t* __restrict__ buf, const int32_t ndims,
+                           T* __restrict__ dst) {
+  const int32_t* in_strides = buf;
+  const int32_t* out_strides = buf + ndims;
+  const int32_t* in_dim_sizes = buf + ndims * 2;
+  GPU_1D_KERNEL_LOOP(o_idx, nthreads) {
+    int32_t i_idx = 0;
+    int32_t t = o_idx;
     for (int i = 0; i < ndims; ++i) {
       i_idx += t / out_strides[i] % in_dim_sizes[i] * in_strides[i];
       t %= out_strides[i];
@@ -49,15 +50,19 @@ __global__ void TileKernel(int nthreads, const T* src, const int32* buf,
 template <typename T>
 void TileSimple(const Eigen::GpuDevice& d, Tensor* out, const Tensor& in) {
   // Ensures we can use 32-bit index.
-  const int64 in_nelem = in.NumElements();
-  CHECK_LT(in_nelem, kint32max) << "Tensor too large to transpose on GPU";
-  const int64 out_nelem = out->NumElements();
-  CHECK_LT(out_nelem, kint32max) << "Tensor too large to transpose on GPU";
+  const int64_t in_nelem = in.NumElements();
+  CHECK_LT(in_nelem, std::numeric_limits<int32_t>::max())
+      << "Tensor too large to transpose on GPU";
+  const int64_t out_nelem = out->NumElements();
+  CHECK_LT(out_nelem, std::numeric_limits<int32_t>::max())
+      << "Tensor too large to transpose on GPU";
   // Pack strides and input dimension sizes into one buffer.
-  const int32 ndims = in.dims();
-  gtl::InlinedVector<int32, 24> host_buf(ndims * 3);
-  gtl::InlinedVector<int32, 8> in_strides = ComputeStride<int32>(in.shape());
-  gtl::InlinedVector<int32, 8> out_strides = ComputeStride<int32>(out->shape());
+  const int32_t ndims = in.dims();
+  absl::InlinedVector<int32_t, 24UL> host_buf(ndims * 3);
+  absl::InlinedVector<int32_t, 8UL> in_strides =
+      ComputeStride<int32_t>(in.shape());
+  absl::InlinedVector<int32_t, 8UL> out_strides =
+      ComputeStride<int32_t>(out->shape());
   for (int i = 0; i < ndims; ++i) {
     host_buf[i] = in_strides[i];
     host_buf[ndims + i] = out_strides[i];
@@ -65,19 +70,19 @@ void TileSimple(const Eigen::GpuDevice& d, Tensor* out, const Tensor& in) {
   }
   // Copies the input strides, output strides and input dimension sizes to the
   // device.
-  auto num_bytes = sizeof(int64) * host_buf.size();
+  auto num_bytes = sizeof(int32_t) * host_buf.size();
   auto dev_buf = d.allocate(num_bytes);
-  // NOTE: host_buf is not allocated by CudaHostAllocator, and
+  // NOTE: host_buf is not allocated by GpuHostAllocator, and
   // therefore we are doing a sync copy effectively.
   d.memcpyHostToDevice(dev_buf, host_buf.data(), num_bytes);
   // Launch kernel to q[...] = p[...].
   const T* p = in.flat<T>().data();
   T* q = out->flat<T>().data();
-  CudaLaunchConfig cfg = GetCudaLaunchConfig(out_nelem, d);
+  GpuLaunchConfig cfg = GetGpuLaunchConfig(out_nelem, d);
   TF_CHECK_OK(
-      CudaLaunchKernel(TileKernel<T>, cfg.block_count, cfg.thread_per_block, 0,
-                       d.stream(), cfg.virtual_thread_count, p,
-                       reinterpret_cast<const int32*>(dev_buf), ndims, q));
+      GpuLaunchKernel(TileKernel<T>, cfg.block_count, cfg.thread_per_block, 0,
+                      d.stream(), cfg.virtual_thread_count, p,
+                      reinterpret_cast<const int32_t*>(dev_buf), ndims, q));
   // Safe to deallocate immediately after the kernel launch.
   d.deallocate(dev_buf);
 }
@@ -85,6 +90,6 @@ void TileSimple(const Eigen::GpuDevice& d, Tensor* out, const Tensor& in) {
 }  // end namespace internal
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #endif  // TENSORFLOW_CORE_KERNELS_TILE_FUNCTOR_GPU_H_

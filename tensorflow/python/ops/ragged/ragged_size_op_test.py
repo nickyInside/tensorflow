@@ -14,21 +14,16 @@
 # ==============================================================================
 """Tests for ragged.size."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops.ragged import ragged_array_ops
 from tensorflow.python.ops.ragged import ragged_factory_ops
-from tensorflow.python.ops.ragged import ragged_test_util
 from tensorflow.python.platform import googletest
 
 
 @test_util.run_all_in_graph_and_eager_modes
-class RaggedSizeOpTest(ragged_test_util.RaggedTensorTestCase,
+class RaggedSizeOpTest(test_util.TensorFlowTestCase,
                        parameterized.TestCase):
 
   @parameterized.parameters([

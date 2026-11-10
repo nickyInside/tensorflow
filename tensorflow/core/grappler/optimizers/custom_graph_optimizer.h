@@ -18,6 +18,7 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
 namespace tensorflow {
@@ -26,9 +27,19 @@ namespace grappler {
 // A custom optimizer that can be registered.
 class CustomGraphOptimizer : public GraphOptimizer {
  public:
-  virtual ~CustomGraphOptimizer() {}
-  virtual Status Init(const tensorflow::RewriterConfig_CustomGraphOptimizer*
-                          config = nullptr) = 0;
+  ~CustomGraphOptimizer() override = default;
+  virtual absl::Status Init(
+      const tensorflow::RewriterConfig_CustomGraphOptimizer* config =
+          nullptr) = 0;
+  // Populates ConfigProto on which the Session is run prior to running Init.
+  absl::Status InitWithConfig(
+      const ConfigProto& config_proto,
+      const tensorflow::RewriterConfig_CustomGraphOptimizer* config = nullptr) {
+    config_proto_ = config_proto;
+    return this->Init(config);
+  }
+
+  ConfigProto config_proto_;
 };
 
 }  // end namespace grappler

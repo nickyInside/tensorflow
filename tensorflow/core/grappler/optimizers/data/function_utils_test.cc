@@ -60,6 +60,18 @@ TEST(FunctionUtilsTest, AddFunctionOutputWithUniqueName) {
   EXPECT_EQ(function.ret().at("y/_1"), "two");
 }
 
+TEST(FunctionUtilsTest, AddFunctionInput) {
+  FunctionDef fdef;
+  auto arg0 = AddFunctionInput("arg0", &fdef, DT_INT32);
+  auto arg1 = AddFunctionInput("arg1", &fdef, DT_BOOL);
+  EXPECT_EQ(fdef.signature().input_arg().data()[0], arg0);
+  EXPECT_EQ(arg0->name(), "arg0");
+  EXPECT_EQ(arg0->type(), DT_INT32);
+  EXPECT_EQ(fdef.signature().input_arg().data()[1], arg1);
+  EXPECT_EQ(arg1->name(), "arg1");
+  EXPECT_EQ(arg1->type(), DT_BOOL);
+}
+
 TEST(FunctionUtilsTest, ContainsFunctionNodeWithName) {
   FunctionDef function = test::function::XTimesTwo();
   EXPECT_FALSE(ContainsFunctionNodeWithName(
@@ -133,7 +145,7 @@ TEST(FunctionUtilsTest, AddNodeToFunctionDef) {
   EXPECT_EQ(node1.input_size(), 0);
   EXPECT_EQ(node1.attr_size(), 0);
 
-  const std::vector<string> inputs({"input1", "input2"});
+  const std::vector<std::string> inputs({"input1", "input2"});
   AddNode("", op_name, inputs, {}, &func);
   const NodeDef& node2 =
       func.node_def(FindFunctionNodeWithName("xxx/_2", func));
@@ -147,7 +159,7 @@ TEST(FunctionUtilsTest, AddNodeToFunctionDef) {
   AttrValue a1, a2;
   a1.set_type(DT_INT32);
   a2.set_type(DT_INT64);
-  const std::vector<std::pair<string, AttrValue>> attrs(
+  const std::vector<std::pair<std::string, AttrValue>> attrs(
       {{"attr1", a1}, {"attr2", a2}});
   AddNode("", op_name, {}, attrs, &func);
   const NodeDef& node3 =
@@ -172,7 +184,7 @@ TEST(FunctionUtilsTest, AddNodeToFunctionDef) {
     def fn2():
       return control_flow_ops.Assert(False, ["Wrong branch!!!"])
 
-    return control_flow_ops.cond(pred, fn1, fn2)
+    return cond.cond(pred, fn1, fn2)
 
   r = test_function()
 */

@@ -13,12 +13,22 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #include <vector>
 
+#if GOOGLE_CUDA
 #include "third_party/nccl/nccl.h"
+#elif TENSORFLOW_USE_ROCM
+#include "rocm/rocm_config.h"
+#if (TF_ROCM_VERSION >= 50200)
+#include "rocm/include/rccl/rccl.h"
+#else
+#include "rocm/include/rccl.h"
+#endif
+#endif
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/tensor_util.h"
 #include "tensorflow/core/nccl/nccl_manager.h"
 
 namespace tensorflow {
@@ -43,7 +53,7 @@ class NcclAsyncOpBase : public AsyncOpKernel {
     OP_REQUIRES_OK(c, c->GetAttr("shared_name", &collective_prefix_));
   }
 
-  string GetCollectiveKey(OpKernelContext* c) {
+  std::string GetCollectiveKey(OpKernelContext* c) {
     return strings::StrCat(collective_prefix_, ";", c->step_id(), ";",
                            c->frame_iter().frame_id, ":",
                            c->frame_iter().iter_id);
@@ -53,15 +63,16 @@ class NcclAsyncOpBase : public AsyncOpKernel {
 
  private:
   int num_devices_;
-  string collective_prefix_;
+  std::string collective_prefix_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(NcclAsyncOpBase);
+  NcclAsyncOpBase(const NcclAsyncOpBase&) = delete;
+  void operator=(const NcclAsyncOpBase&) = delete;
 };
 
 class NcclReduceOpBase : public NcclAsyncOpBase {
  public:
   explicit NcclReduceOpBase(OpKernelConstruction* c) : NcclAsyncOpBase(c) {
-    string reduction;
+    std::string reduction;
     OP_REQUIRES_OK(c, c->GetAttr("reduction", &reduction));
     if (reduction == "min") {
       reduction_op_ = ncclMin;
@@ -72,8 +83,8 @@ class NcclReduceOpBase : public NcclAsyncOpBase {
     } else if (reduction == "prod") {
       reduction_op_ = ncclProd;
     } else {
-      OP_REQUIRES_OK(c,
-                     errors::InvalidArgument("Invalid reduction: ", reduction));
+      OP_REQUIRES_OK(c, absl::InvalidArgumentError(
+                            absl::StrCat("Invalid reduction: ", reduction)));
     }
   }
 
@@ -93,26 +104,25 @@ class NcclAllReduceOpKernel : public NcclReduceOpBase {
   void ComputeAsync(OpKernelContext* c, DoneCallback done) override {
     const Tensor* input = &c->input(0);
     Tensor* output;
-    OP_REQUIRES_OK_ASYNC(c, c->allocate_output(0, input->shape(), &output),
-                         done);
-
-    auto actual_done = [c, done](Status s) {
+    OP_REQUIRES_OK_ASYNC(
+        c, c->forward_input_or_allocate_output({0}, 0, input->shape(), &output),
+        done);
+    auto actual_done = [c, done](absl::Status s) {
       OP_REQUIRES_OK_ASYNC(c, s, done);
       done();
     };
 
     auto* compute_stream = c->op_device_context()->stream();
-    auto* gpu_info = c->device()->tensorflow_gpu_device_info();
-    auto participant = absl::make_unique<NcclManager::Participant>(
-        compute_stream->parent(), compute_stream, gpu_info->event_mgr,
-        gpu_info->gpu_id, input, output, /*global_rank=*/-1,
-        std::move(actual_done));
+    auto* gpu_info = c->device()->tensorflow_accelerator_device_info();
+    auto participant = std::make_unique<NcclManager::Participant>(
+        compute_stream->parent(), compute_stream, gpu_info, input, output,
+        /*global_rank=*/-1, std::move(actual_done));
     NcclManager::instance()->AddToAllReduce(
         std::move(participant),
         {GetCollectiveKey(c),
          /*num_local_devices=*/num_devices(),
          /*num_global_devices=*/num_devices(),
-         /*communicator_key=*/""},
+         /*communicator_key=*/"", /*source_rank=*/-1},
         reduction_op());
   }
 };
@@ -128,23 +138,22 @@ class NcclReduceSendKernel : public NcclReduceOpBase {
       : NcclReduceOpBase(c) {}
 
   void ComputeAsync(OpKernelContext* c, DoneCallback done) override {
-    auto actual_done = [c, done](Status s) {
+    auto actual_done = [c, done](absl::Status s) {
       OP_REQUIRES_OK_ASYNC(c, s, done);
       done();
     };
 
     auto* compute_stream = c->op_device_context()->stream();
-    auto* gpu_info = c->device()->tensorflow_gpu_device_info();
-    auto participant = absl::make_unique<NcclManager::Participant>(
-        compute_stream->parent(), compute_stream, gpu_info->event_mgr,
-        gpu_info->gpu_id, &c->input(0), /*output=*/nullptr, /*global_rank=*/-1,
-        std::move(actual_done));
+    auto* gpu_info = c->device()->tensorflow_accelerator_device_info();
+    auto participant = std::make_unique<NcclManager::Participant>(
+        compute_stream->parent(), compute_stream, gpu_info, &c->input(0),
+        /*output=*/nullptr, /*global_rank=*/-1, std::move(actual_done));
     NcclManager::instance()->AddReduceSend(
         std::move(participant),
         {GetCollectiveKey(c),
          /*num_local_devices=*/num_devices(),
          /*num_global_devices=*/num_devices(),
-         /*communicator_key=*/""},
+         /*communicator_key=*/"", /*source_rank=*/-1},
         reduction_op());
   }
 };
@@ -165,23 +174,22 @@ class NcclReduceRecvKernel : public NcclReduceOpBase {
     OP_REQUIRES_OK_ASYNC(c, c->allocate_output(0, input->shape(), &output),
                          done);
 
-    auto actual_done = [c, done](Status s) {
+    auto actual_done = [c, done](absl::Status s) {
       OP_REQUIRES_OK_ASYNC(c, s, done);
       done();
     };
 
     auto* compute_stream = c->op_device_context()->stream();
-    auto* gpu_info = c->device()->tensorflow_gpu_device_info();
-    auto participant = absl::make_unique<NcclManager::Participant>(
-        compute_stream->parent(), compute_stream, gpu_info->event_mgr,
-        gpu_info->gpu_id, input, output, /*global_rank=*/-1,
-        std::move(actual_done));
+    auto* gpu_info = c->device()->tensorflow_accelerator_device_info();
+    auto participant = std::make_unique<NcclManager::Participant>(
+        compute_stream->parent(), compute_stream, gpu_info, input, output,
+        /*global_rank=*/-1, std::move(actual_done));
     NcclManager::instance()->AddReduceRecv(
         std::move(participant),
         {GetCollectiveKey(c),
          /*num_local_devices=*/num_devices(),
          /*num_global_devices=*/num_devices(),
-         /*communicator_key=*/""},
+         /*communicator_key=*/"", /*source_rank=*/-1},
         reduction_op());
   }
 
@@ -200,22 +208,21 @@ class NcclBroadcastSendKernel : public NcclAsyncOpBase {
       : NcclAsyncOpBase(c) {}
 
   void ComputeAsync(OpKernelContext* c, DoneCallback done) override {
-    auto actual_done = [c, done](Status s) {
+    auto actual_done = [c, done](absl::Status s) {
       OP_REQUIRES_OK_ASYNC(c, s, done);
       done();
     };
 
     auto* compute_stream = c->op_device_context()->stream();
-    auto* gpu_info = c->device()->tensorflow_gpu_device_info();
-    auto participant = absl::make_unique<NcclManager::Participant>(
-        compute_stream->parent(), compute_stream, gpu_info->event_mgr,
-        gpu_info->gpu_id, &c->input(0), /*output=*/nullptr, /*global_rank=*/-1,
-        std::move(actual_done));
+    auto* gpu_info = c->device()->tensorflow_accelerator_device_info();
+    auto participant = std::make_unique<NcclManager::Participant>(
+        compute_stream->parent(), compute_stream, gpu_info, &c->input(0),
+        /*output=*/nullptr, /*global_rank=*/-1, std::move(actual_done));
     NcclManager::instance()->AddBroadcastSend(
         std::move(participant), {GetCollectiveKey(c),
                                  /*num_local_devices=*/num_devices(),
                                  /*num_global_devices=*/num_devices(),
-                                 /*communicator_key=*/""});
+                                 /*communicator_key=*/"", /*source_rank=*/-1});
   }
 };
 REGISTER_KERNEL_BUILDER(Name("_NcclBroadcastSend").Device(DEVICE_GPU),
@@ -232,27 +239,25 @@ class NcclBroadcastRecvKernel : public NcclAsyncOpBase {
   void ComputeAsync(OpKernelContext* c, DoneCallback done) override {
     const Tensor& shape_t = c->input(0);
     TensorShape shape;
-    OP_REQUIRES_OK_ASYNC(
-        c, TensorShapeUtils::MakeShape(shape_t.vec<int32>(), &shape), done);
+    OP_REQUIRES_OK_ASYNC(c, tensor::MakeShape(shape_t, &shape), done);
     Tensor* output;
     OP_REQUIRES_OK_ASYNC(c, c->allocate_output(0, shape, &output), done);
 
-    auto actual_done = [c, done](Status s) {
+    auto actual_done = [c, done](absl::Status s) {
       OP_REQUIRES_OK_ASYNC(c, s, done);
       done();
     };
 
     auto* compute_stream = c->op_device_context()->stream();
-    auto* gpu_info = c->device()->tensorflow_gpu_device_info();
-    auto participant = absl::make_unique<NcclManager::Participant>(
-        compute_stream->parent(), compute_stream, gpu_info->event_mgr,
-        gpu_info->gpu_id, /*input=*/nullptr, output, /*global_rank=*/-1,
-        std::move(actual_done));
-    NcclManager::instance()->AddBroadcastSend(
+    auto* gpu_info = c->device()->tensorflow_accelerator_device_info();
+    auto participant = std::make_unique<NcclManager::Participant>(
+        compute_stream->parent(), compute_stream, gpu_info,
+        /*input=*/nullptr, output, /*global_rank=*/-1, std::move(actual_done));
+    NcclManager::instance()->AddBroadcastRecv(
         std::move(participant), {GetCollectiveKey(c),
                                  /*num_local_devices=*/num_devices(),
                                  /*num_global_devices=*/num_devices(),
-                                 /*communicator_key=*/""});
+                                 /*communicator_key=*/"", /*source_rank=*/-1});
   }
 };
 REGISTER_KERNEL_BUILDER(
@@ -264,7 +269,7 @@ class NcclStubKernel : public AsyncOpKernel {
  public:
   explicit NcclStubKernel(OpKernelConstruction* c) : AsyncOpKernel(c) {}
   void ComputeAsync(OpKernelContext* c, DoneCallback done) override {
-    c->SetStatus(errors::Unimplemented(
+    c->SetStatus(absl::UnimplementedError(
         "This op should be replaced during graph optimization."));
     done();
   }
@@ -276,4 +281,4 @@ REGISTER_KERNEL_BUILDER(Name("NcclReduce").Device(DEVICE_GPU), NcclStubKernel);
 }  // namespace
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

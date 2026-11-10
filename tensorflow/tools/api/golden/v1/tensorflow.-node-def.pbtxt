@@ -40,6 +40,13 @@ tf_proto {
       type: TYPE_MESSAGE
       type_name: ".tensorflow.NodeDef.ExperimentalDebugInfo"
     }
+    field {
+      name: "experimental_type"
+      number: 7
+      label: LABEL_OPTIONAL
+      type: TYPE_MESSAGE
+      type_name: ".tensorflow.FullTypeDef"
+    }
     nested_type {
       name: "AttrEntry"
       field {
@@ -64,6 +71,12 @@ tf_proto {
       field {
         name: "original_node_names"
         number: 1
+        label: LABEL_REPEATED
+        type: TYPE_STRING
+      }
+      field {
+        name: "original_func_names"
+        number: 2
         label: LABEL_REPEATED
         type: TYPE_STRING
       }

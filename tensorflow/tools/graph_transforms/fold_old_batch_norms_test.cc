@@ -31,9 +31,9 @@ namespace tensorflow {
 namespace graph_transforms {
 
 // Declare here, so we don't need a public header.
-Status FoldOldBatchNorms(const GraphDef& input_graph_def,
-                         const TransformFuncContext& context,
-                         GraphDef* output_graph_def);
+absl::Status FoldOldBatchNorms(const GraphDef& input_graph_def,
+                               const TransformFuncContext& context,
+                               GraphDef* output_graph_def);
 
 class FoldOldBatchNormsTest : public ::testing::Test {
  protected:
@@ -346,7 +346,8 @@ class FoldOldBatchNormsTest : public ::testing::Test {
     std::vector<Tensor> fused_outputs;
     TF_ASSERT_OK(fused_session->Run({}, {"output"}, {}, &fused_outputs));
 
-    test::ExpectTensorNear<float>(original_outputs[0], fused_outputs[0], 2e-5);
+    test::ExpectClose(original_outputs[0], fused_outputs[0], /*atol=*/2e-5,
+                      /*rtol=*/2e-5);
 
     for (const NodeDef& node : fused_graph_def.node()) {
       EXPECT_NE("FusedBatchNorm", node.op());
@@ -389,8 +390,8 @@ class FoldOldBatchNormsTest : public ::testing::Test {
 
     Tensor shape_tensor(DT_INT32, TensorShape({}));
     // Concat at dim 3 if split; otherwise, concat at dim 2.
-    int32 concat_axis = split ? 3 : 2;
-    test::FillValues<int32>(&shape_tensor, {concat_axis});
+    int32_t concat_axis = split ? 3 : 2;
+    test::FillValues<int32_t>(&shape_tensor, {concat_axis});
     Output shape_op =
         Const(root.WithOpName("shape_op"), Input::Initializer(shape_tensor));
     Output concat_op =
@@ -475,12 +476,12 @@ void TestFoldFusedBatchNormsWithBatchToSpace() {
                           {1, 1, 1, 1}, "VALID");
 
   Tensor block_shape_data(DT_INT32, TensorShape({2}));
-  test::FillValues<int32>(&block_shape_data, {1, 2});
+  test::FillValues<int32_t>(&block_shape_data, {1, 2});
   Output block_shape_op = Const(root.WithOpName("block_shape_op"),
                                 Input::Initializer(block_shape_data));
 
   Tensor crops_data(DT_INT32, TensorShape({2, 2}));
-  test::FillValues<int32>(&crops_data, {0, 0, 0, 1});
+  test::FillValues<int32_t>(&crops_data, {0, 0, 0, 1});
   Output crops_op =
       Const(root.WithOpName("crops_op"), Input::Initializer(crops_data));
 

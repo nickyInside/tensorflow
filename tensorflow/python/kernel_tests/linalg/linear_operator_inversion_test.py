@@ -13,12 +13,11 @@
 # limitations under the License.
 # ==============================================================================
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+from tensorflow.python.framework import config
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import variables as variables_module
 from tensorflow.python.ops.linalg import linalg as linalg_lib
 from tensorflow.python.ops.linalg import linear_operator_inversion
 from tensorflow.python.ops.linalg import linear_operator_test_util
@@ -29,11 +28,24 @@ linalg = linalg_lib
 LinearOperatorInversion = linear_operator_inversion.LinearOperatorInversion  # pylint: disable=invalid-name
 
 
+@test_util.run_all_in_graph_and_eager_modes
 class LinearOperatorInversionTest(
     linear_operator_test_util.SquareLinearOperatorDerivedClassTest):
   """Most tests done in the base class LinearOperatorDerivedClassTest."""
 
+  # TODO: b/311343496 - Re-enable this test.
+  @staticmethod
+  def skip_these_tests() -> list[str]:
+    return [
+        "test_saved_model",
+    ]
+
+  def tearDown(self):
+    config.enable_tensor_float_32_execution(self.tf32_keep_)
+
   def setUp(self):
+    self.tf32_keep_ = config.tensor_float_32_execution_enabled()
+    config.enable_tensor_float_32_execution(False)
     self._atol[dtypes.complex64] = 1e-5
     self._rtol[dtypes.complex64] = 1e-5
 
@@ -92,16 +104,57 @@ class LinearOperatorInversionTest(
     self.assertTrue(operator_inv.is_non_singular)
     self.assertFalse(operator_inv.is_self_adjoint)
 
+  def test_solve_on_inverse(self):
+    # The matrix values do not effect auto-setting of the flags.
+    matrix = [[1., 0.], [1., 1.]]
+    operator = linalg.LinearOperatorFullMatrix(matrix)
+    operator_inv = operator.inverse()
+    solved_result = operator_inv.solve(operator)
+    self.assertIsInstance(
+        solved_result, linalg.LinearOperatorComposition)
+
+  def test_solve_operator_matches_solve_tensor(self):
+    operator_inv = LinearOperatorInversion(
+        linalg.LinearOperatorFullMatrix([[1.0, 2.0], [3.0, 4.0]])
+    )
+    rhs = [[5.0, 6.0], [7.0, 8.0]]
+    rhs_operator = linalg.LinearOperatorFullMatrix(rhs)
+    for adjoint in [False, True]:
+      for adjoint_arg in [False, True]:
+        self.assertAllClose(
+            self.evaluate(
+                operator_inv.solve(
+                    rhs_operator, adjoint=adjoint, adjoint_arg=adjoint_arg
+                ).to_dense()
+            ),
+            self.evaluate(
+                operator_inv.solve(
+                    rhs, adjoint=adjoint, adjoint_arg=adjoint_arg
+                )
+            ),
+            msg=f"adjoint={adjoint}, adjoint_arg={adjoint_arg}",
+        )
+
+  def test_inverse_of_inverse(self):
+    # The matrix values do not effect auto-setting of the flags.
+    matrix = [[1., 0.], [1., 1.]]
+    operator = linalg.LinearOperatorFullMatrix(matrix)
+    operator_inv = operator.inverse()
+    self.assertIsInstance(operator_inv, LinearOperatorInversion)
+    inverse_of_op_inverse = operator_inv.inverse()
+    self.assertIsInstance(
+        inverse_of_op_inverse, linalg.LinearOperatorFullMatrix)
+
   def test_contradicting_hints_raise(self):
     # The matrix values do not effect auto-setting of the flags.
     matrix = [[1., 0.], [1., 1.]]
     operator = linalg.LinearOperatorFullMatrix(
         matrix, is_positive_definite=False)
-    with self.assertRaisesRegexp(ValueError, "positive-definite"):
+    with self.assertRaisesRegex(ValueError, "positive-definite"):
       LinearOperatorInversion(operator, is_positive_definite=True)
 
     operator = linalg.LinearOperatorFullMatrix(matrix, is_self_adjoint=False)
-    with self.assertRaisesRegexp(ValueError, "self-adjoint"):
+    with self.assertRaisesRegex(ValueError, "self-adjoint"):
       LinearOperatorInversion(operator, is_self_adjoint=True)
 
   def test_singular_raises(self):
@@ -109,11 +162,11 @@ class LinearOperatorInversionTest(
     matrix = [[1., 1.], [1., 1.]]
 
     operator = linalg.LinearOperatorFullMatrix(matrix, is_non_singular=False)
-    with self.assertRaisesRegexp(ValueError, "is_non_singular"):
+    with self.assertRaisesRegex(ValueError, "is_non_singular"):
       LinearOperatorInversion(operator)
 
     operator = linalg.LinearOperatorFullMatrix(matrix)
-    with self.assertRaisesRegexp(ValueError, "is_non_singular"):
+    with self.assertRaisesRegex(ValueError, "is_non_singular"):
       LinearOperatorInversion(operator, is_non_singular=False)
 
   def test_name(self):
@@ -124,6 +177,11 @@ class LinearOperatorInversionTest(
     operator = LinearOperatorInversion(operator)
 
     self.assertEqual("my_operator_inv", operator.name)
+
+  def test_tape_safe(self):
+    matrix = variables_module.Variable([[1., 2.], [3., 4.]])
+    operator = LinearOperatorInversion(linalg.LinearOperatorFullMatrix(matrix))
+    self.check_tape_safe(operator)
 
 
 if __name__ == "__main__":

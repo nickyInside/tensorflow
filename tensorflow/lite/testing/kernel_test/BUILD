@@ -1,13 +1,32 @@
-package(default_visibility = [
-    "//visibility:public",
-])
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-licenses(["notice"])  # Apache 2.0
-
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_binary",
     "tf_cc_test",
+)
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    default_visibility = [
+        "//visibility:public",
+    ],
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -15,7 +34,7 @@ cc_library(
     hdrs = ["util.h"],
     deps = [
         ":input_generator",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/testing:split",
         "//tensorflow/lite/testing:tflite_driver",
     ] + select({
@@ -24,7 +43,7 @@ cc_library(
             "//tensorflow/core:lib",
         ],
         "//tensorflow:android": [
-            "//tensorflow/core:android_tensorflow_lib",
+            "//tensorflow/core:portable_tensorflow_lib",
         ],
     }),
 )
@@ -34,11 +53,8 @@ tf_cc_test(
     size = "small",
     srcs = ["util_test.cc"],
     data = [
+        ":testdata/test_input.csv",
         "//tensorflow/lite:testdata/add.bin",
-        "//tensorflow/lite:testdata/test_input.csv",
-    ],
-    tags = [
-        "no_oss",
     ],
     deps = [
         ":util",
@@ -71,8 +87,10 @@ cc_library(
     deps = [
         "//tensorflow/lite:framework",
         "//tensorflow/lite:string",
-        "//tensorflow/lite/c:c_api_internal",
-        "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite/core:framework",
+        "//tensorflow/lite/core/c:c_api_types",
+        "//tensorflow/lite/core/c:common",
+        "//tensorflow/lite/core/kernels:builtin_ops",
         "//tensorflow/lite/testing:join",
         "//tensorflow/lite/testing:split",
     ],
@@ -83,11 +101,8 @@ cc_test(
     size = "small",
     srcs = ["input_generator_test.cc"],
     data = [
+        ":testdata/test_input.csv",
         "//tensorflow/lite:testdata/multi_add.bin",
-        "//tensorflow/lite:testdata/test_input.csv",
-    ],
-    tags = [
-        "no_oss",
     ],
     deps = [
         ":input_generator",
@@ -101,7 +116,8 @@ cc_library(
     hdrs = ["diff_analyzer.h"],
     deps = [
         "//tensorflow/lite:string",
-        "//tensorflow/lite/c:c_api_internal",
+        "//tensorflow/lite/core/c:c_api_types",
+        "//tensorflow/lite/core/c:common",
         "//tensorflow/lite/testing:split",
     ],
 )
@@ -111,10 +127,7 @@ tf_cc_test(
     size = "small",
     srcs = ["diff_analyzer_test.cc"],
     data = [
-        "//tensorflow/lite:testdata/test_input.csv",
-    ],
-    tags = [
-        "no_oss",
+        ":testdata/test_input.csv",
     ],
     deps = [
         ":diff_analyzer",

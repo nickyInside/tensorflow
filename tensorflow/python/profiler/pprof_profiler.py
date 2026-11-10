@@ -35,10 +35,6 @@ Sample usage:
   For e.g.:
      pprof -png --nodecount=100 --sample_index=1 output_dir/profile_output.pb.gz
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from collections import defaultdict
 from collections import namedtuple
 import gzip
@@ -225,8 +221,7 @@ class Samples(object):
 
     Args:
       datum: `ProfileDatum` to add a sample for.
-      location_ids: List of numberic location ids for this
-        sample.
+      location_ids: List of numeric location ids for this sample.
     """
     node_name = datum.node_exec_stats.node_name
     if node_name in self._node_name_to_sample:
@@ -328,7 +323,7 @@ class PprofProfiler(object):
         # Call at current frame calls function at previous frame.
         prev_file_path = prev_stack_frame[0]
         prev_function = prev_stack_frame[2]
-        prev_function_start_line = prev_stack_frame[4]
+        prev_function_start_line = -1
         curr_file_path = stack_frame[0]
         curr_line_number = stack_frame[1]
 
@@ -371,7 +366,7 @@ class PprofProfiler(object):
     node_to_traceback = defaultdict(list)
     node_to_op_type = defaultdict(str)
     for op in self._graph.get_operations():
-      node_to_traceback[op.name] = op.traceback_with_start_lines
+      node_to_traceback[op.name] = op.traceback
       node_to_op_type[op.name] = op.type
 
     def profile_data_generator(device_step_stats):

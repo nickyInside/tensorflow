@@ -13,10 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 """Ops for boosted_trees."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gen_boosted_trees_ops
@@ -27,6 +23,7 @@ from tensorflow.python.ops import resources
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_aggregate_stats
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_bucketize
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_calculate_best_feature_split as calculate_best_feature_split
+from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_calculate_best_feature_split_v2 as calculate_best_feature_split_v2
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_calculate_best_gains_per_feature as calculate_best_gains_per_feature
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_center_bias as center_bias
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_create_quantile_stream_resource as create_quantile_stream_resource
@@ -39,16 +36,18 @@ from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_quantile_s
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_quantile_stream_resource_flush as quantile_flush
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_quantile_stream_resource_get_bucket_boundaries as get_bucket_boundaries
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_quantile_stream_resource_handle_op as quantile_resource_handle_op
+from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_sparse_aggregate_stats
+from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_sparse_calculate_best_feature_split as sparse_calculate_best_feature_split
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_training_predict as training_predict
 from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_update_ensemble as update_ensemble
+from tensorflow.python.ops.gen_boosted_trees_ops import boosted_trees_update_ensemble_v2 as update_ensemble_v2
 from tensorflow.python.ops.gen_boosted_trees_ops import is_boosted_trees_quantile_stream_resource_initialized as is_quantile_resource_initialized
 # pylint: enable=unused-import
 
 from tensorflow.python.training import saver
-from tensorflow.python.training.tracking import tracking
 
 
-class PruningMode(object):
+class PruningMode:
   """Class for working with Pruning modes."""
   NO_PRUNING, PRE_PRUNING, POST_PRUNING = range(0, 3)
 
@@ -59,18 +58,19 @@ class PruningMode(object):
     if mode in cls._map:
       return cls._map[mode]
     else:
-      raise ValueError('pruning_mode mode must be one of: {}'.format(', '.join(
-          sorted(cls._map))))
+      raise ValueError(
+          'pruning_mode mode must be one of: {}. Found: {}'.format(', '.join(
+              sorted(cls._map)), mode))
 
 
 class QuantileAccumulatorSaveable(saver.BaseSaverBuilder.SaveableObject):
   """SaveableObject implementation for QuantileAccumulator."""
 
   def __init__(self, resource_handle, create_op, num_streams, name):
-    self._resource_handle = resource_handle
+    self.resource_handle = resource_handle
     self._num_streams = num_streams
     self._create_op = create_op
-    bucket_boundaries = get_bucket_boundaries(self._resource_handle,
+    bucket_boundaries = get_bucket_boundaries(self.resource_handle,
                                               self._num_streams)
     slice_spec = ''
     specs = []
@@ -82,17 +82,17 @@ class QuantileAccumulatorSaveable(saver.BaseSaverBuilder.SaveableObject):
       specs += [
           make_save_spec(bucket_boundaries[i], '_bucket_boundaries_' + str(i))
       ]
-    super(QuantileAccumulatorSaveable, self).__init__(self._resource_handle,
+    super(QuantileAccumulatorSaveable, self).__init__(self.resource_handle,
                                                       specs, name)
 
   def restore(self, restored_tensors, unused_tensor_shapes):
     bucket_boundaries = restored_tensors
     with ops.control_dependencies([self._create_op]):
       return quantile_resource_deserialize(
-          self._resource_handle, bucket_boundaries=bucket_boundaries)
+          self.resource_handle, bucket_boundaries=bucket_boundaries)
 
 
-class QuantileAccumulator(tracking.TrackableResource):
+class QuantileAccumulator():
   """SaveableObject implementation for QuantileAccumulator.
 
      The bucket boundaries are serialized and deserialized from checkpointing.
@@ -104,22 +104,23 @@ class QuantileAccumulator(tracking.TrackableResource):
                num_quantiles,
                name=None,
                max_elements=None):
+    del max_elements  # Unused.
+
     self._eps = epsilon
     self._num_streams = num_streams
     self._num_quantiles = num_quantiles
-    super(QuantileAccumulator, self).__init__()
 
     with ops.name_scope(name, 'QuantileAccumulator') as name:
       self._name = name
-      self._resource_handle = self._create_resource()
+      self.resource_handle = self._create_resource()
       self._init_op = self._initialize()
       is_initialized_op = self.is_initialized()
     resources.register_resource(self.resource_handle, self._init_op,
                                 is_initialized_op)
-    self._saveable = QuantileAccumulatorSaveable(
-        self.resource_handle, self._init_op, self._num_streams,
-        self.resource_handle.name)
-    ops.add_to_collection(ops.GraphKeys.SAVEABLE_OBJECTS, self._saveable)
+    ops.add_to_collection(ops.GraphKeys.SAVEABLE_OBJECTS,
+                          QuantileAccumulatorSaveable(
+                              self.resource_handle, self._init_op,
+                              self._num_streams, self.resource_handle.name))
 
   def _create_resource(self):
     return quantile_resource_handle_op(
@@ -138,12 +139,15 @@ class QuantileAccumulator(tracking.TrackableResource):
   def is_initialized(self):
     return is_quantile_resource_initialized(self.resource_handle)
 
-  @property
-  def saveable(self):
-    return self._saveable
+  def _serialize_to_tensors(self):
+    raise NotImplementedError('When the need arises, TF2 compatibility can be '
+                              'added by implementing this method, along with '
+                              '_restore_from_tensors below.')
 
-  def _gather_saveables_for_checkpoint(self):
-    return {'quantile_accumulator', self._saveable}
+  def _restore_from_tensors(self, restored_tensors):
+    raise NotImplementedError('When the need arises, TF2 compatibility can be '
+                              'added by implementing this method, along with '
+                              '_serialize_to_tensors above.')
 
   def add_summaries(self, float_columns, example_weights):
     summaries = make_quantile_summaries(float_columns, example_weights,
@@ -182,7 +186,7 @@ class _TreeEnsembleSavable(saver.BaseSaverBuilder.SaveableObject):
                                         name + '_serialized'),
     ]
     super(_TreeEnsembleSavable, self).__init__(resource_handle, specs, name)
-    self._resource_handle = resource_handle
+    self.resource_handle = resource_handle
     self._create_op = create_op
 
   def restore(self, restored_tensors, unused_restored_shapes):
@@ -198,12 +202,12 @@ class _TreeEnsembleSavable(saver.BaseSaverBuilder.SaveableObject):
     """
     with ops.control_dependencies([self._create_op]):
       return gen_boosted_trees_ops.boosted_trees_deserialize_ensemble(
-          self._resource_handle,
+          self.resource_handle,
           stamp_token=restored_tensors[0],
           tree_ensemble_serialized=restored_tensors[1])
 
 
-class TreeEnsemble(tracking.TrackableResource):
+class TreeEnsemble():
   """Creates TreeEnsemble resource."""
 
   def __init__(self, name, stamp_token=0, is_local=False, serialized_proto=''):
@@ -212,14 +216,15 @@ class TreeEnsemble(tracking.TrackableResource):
     self._is_local = is_local
     with ops.name_scope(name, 'TreeEnsemble') as name:
       self._name = name
-      self._resource_handle = self._create_resource()
+      self.resource_handle = self._create_resource()
       self._init_op = self._initialize()
       is_initialized_op = self.is_initialized()
       # Adds the variable to the savable list.
       if not is_local:
-        self._saveable = _TreeEnsembleSavable(
-            self.resource_handle, self.initializer, self.resource_handle.name)
-        ops.add_to_collection(ops.GraphKeys.SAVEABLE_OBJECTS, self._saveable)
+        ops.add_to_collection(ops.GraphKeys.SAVEABLE_OBJECTS,
+                              _TreeEnsembleSavable(
+                                  self.resource_handle, self.initializer,
+                                  self.resource_handle.name))
       resources.register_resource(
           self.resource_handle,
           self.initializer,
@@ -246,9 +251,15 @@ class TreeEnsemble(tracking.TrackableResource):
     return gen_boosted_trees_ops.is_boosted_trees_ensemble_initialized(
         self.resource_handle)
 
-  def _gather_saveables_for_checkpoint(self):
-    if not self._is_local:
-      return {'tree_ensemble': self._saveable}
+  def _serialize_to_tensors(self):
+    raise NotImplementedError('When the need arises, TF2 compatibility can be '
+                              'added by implementing this method, along with '
+                              '_restore_from_tensors below.')
+
+  def _restore_from_tensors(self, restored_tensors):
+    raise NotImplementedError('When the need arises, TF2 compatibility can be '
+                              'added by implementing this method, along with '
+                              '_serialize_to_tensors above.')
 
   def get_stamp_token(self):
     """Returns the current stamp token of the resource."""

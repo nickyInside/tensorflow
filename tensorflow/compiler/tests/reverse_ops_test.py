@@ -14,11 +14,8 @@
 # ==============================================================================
 """Functional tests for XLA Reverse Ops."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import itertools
+
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
@@ -51,7 +48,7 @@ class ReverseOpsTest(xla_test.XLATestCase):
   def _AssertReverseEqual(self, revdims, shape):
     np.random.seed(120)
     pval = np.random.randint(0, 100, size=shape).astype(float)
-    with self.cached_session():
+    with self.session():
       with self.test_scope():
         p = array_ops.placeholder(dtypes.int32, shape=shape)
         axis = constant_op.constant(
@@ -60,11 +57,11 @@ class ReverseOpsTest(xla_test.XLATestCase):
             dtype=dtypes.int32)
         rval = array_ops.reverse(p, axis).eval({p: pval})
 
-        slices = [
+        slices = tuple(
             slice(-1, None, -1)
             if d in revdims or d - len(shape) in revdims else slice(None)
             for d in range(len(shape))
-        ]
+        )
       self.assertEqual(pval[slices].flatten().tolist(), rval.flatten().tolist())
 
 

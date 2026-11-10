@@ -15,7 +15,9 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_MEMORY_PLANNER_H_
 #define TENSORFLOW_LITE_MEMORY_PLANNER_H_
 
-#include "tensorflow/lite/c/c_api_internal.h"
+#include <vector>
+
+#include "tensorflow/lite/core/c/common.h"
 
 namespace tflite {
 
@@ -38,6 +40,35 @@ class MemoryPlanner {
   // have changed. All planned allocations remain, but can't be used until
   // ExecuteAllocations() is called.
   virtual TfLiteStatus ResetAllocations() = 0;
+
+  // Invalidates allocations after the given node execution.
+  virtual TfLiteStatus ResetAllocationsAfter(int node) = 0;
+
+  // NOTE: The following two methods modify the data pointers for all tensors on
+  // the non-persistent arena (inputs, outputs, intermediates). If the user has
+  // manually set the pointers for any of these, they would need to be set
+  // again.
+
+  // This releases memory allocated for non-persistent tensors.
+  // It does NOT clear the allocation plan, but the memory can't be used
+  // until AcquireNonPersistentMemory() is called.
+  // It is safe to call Reset/PlanAllocations after this method, without calling
+  // ReleaseTemporaryAllocations in case tensor sizes change.
+  virtual TfLiteStatus ReleaseNonPersistentMemory() = 0;
+
+  // Allocates the necessary memory to contain non-persistent tensors.
+  virtual TfLiteStatus AcquireNonPersistentMemory() = 0;
+
+  // Returns true if the non-persistent memory is available.
+  virtual bool HasNonPersistentMemory() = 0;
+
+  // Dumps the memory planning information against the specified op node
+  // execution plan (i.e. `execution_plan`) for the purpose of debugging.
+  virtual void DumpDebugInfo(const std::vector<int>& execution_plan) const = 0;
+
+  // Returns a map of allocation information. It's only used for debugging.
+  virtual void GetAllocInfo(size_t *arena_size,
+                            size_t *arena_persist_size) const = 0;
 };
 
 }  // namespace tflite

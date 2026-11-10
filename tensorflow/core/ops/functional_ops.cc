@@ -49,7 +49,7 @@ REGISTER_OP("SymbolicGradient")
           c->set_output(i, c->input(i));
         }
       }
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("RemoteCall")
@@ -90,6 +90,26 @@ else_branch: A function that takes 'inputs' and returns a list of
     tensors.  whose types are the same as what then_branch returns.
 )doc");
 
+absl::Status IfShapeInferenceFn(shape_inference::InferenceContext* c) {
+  std::vector<PartialTensorShape> output_shapes;
+  TF_RETURN_IF_ERROR(c->GetAttr("output_shapes", &output_shapes));
+  // If `output_shapes` attr is set use that as the shapes of the outputs
+  // else return unknown shapes.
+  if (output_shapes.empty()) return shape_inference::UnknownShape(c);
+  if (output_shapes.size() != c->num_outputs()) {
+    return errors::InvalidArgument(
+        "`output_shapes` must be the same length as num outputs (",
+        output_shapes.size(), " vs. ", c->num_outputs());
+  }
+  for (size_t i = 0; i < output_shapes.size(); ++i) {
+    shape_inference::ShapeHandle output_shape_handle;
+    TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(
+        output_shapes[i], &output_shape_handle));
+    c->set_output(static_cast<int>(i), output_shape_handle);
+  }
+  return absl::OkStatus();
+}
+
 REGISTER_OP("StatelessIf")
     .Input("cond: Tcond")
     .Input("input: Tin")
@@ -99,7 +119,8 @@ REGISTER_OP("StatelessIf")
     .Attr("Tout: list(type) >= 0")
     .Attr("then_branch: func")
     .Attr("else_branch: func")
-    .SetShapeFn(shape_inference::UnknownShape);
+    .Attr("output_shapes: list(shape) = []")
+    .SetShapeFn(IfShapeInferenceFn);
 
 REGISTER_OP("If")
     .Input("cond: Tcond")
@@ -112,25 +133,37 @@ REGISTER_OP("If")
     .Attr("else_branch: func")
     .Attr("output_shapes: list(shape) = []")
     .SetIsStateful()
-    .SetShapeFn([](shape_inference::InferenceContext* c) {
-      std::vector<PartialTensorShape> output_shapes;
-      TF_RETURN_IF_ERROR(c->GetAttr("output_shapes", &output_shapes));
-      // If `output_shapes` attr is set use that as the shapes of the outputs
-      // else return unknown shapes.
-      if (output_shapes.empty()) return shape_inference::UnknownShape(c);
-      if (output_shapes.size() != c->num_outputs()) {
-        return errors::InvalidArgument(
-            "`output_shapes` must be the same length as num outputs (",
-            output_shapes.size(), " vs. ", c->num_outputs());
-      }
-      for (size_t i = 0; i < output_shapes.size(); ++i) {
-        shape_inference::ShapeHandle output_shape_handle;
-        TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(
-            output_shapes[i], &output_shape_handle));
-        c->set_output(static_cast<int>(i), output_shape_handle);
-      }
-      return Status::OK();
-    });
+    .SetShapeFn(IfShapeInferenceFn);
+
+absl::Status CaseShapeInferenceFn(shape_inference::InferenceContext* c) {
+  std::vector<PartialTensorShape> output_shapes;
+  TF_RETURN_IF_ERROR(c->GetAttr("output_shapes", &output_shapes));
+  // If `output_shapes` attr is set use that as the shapes of the outputs
+  // else return unknown shapes.
+  if (output_shapes.empty()) return shape_inference::UnknownShape(c);
+  if (output_shapes.size() != c->num_outputs()) {
+    return errors::InvalidArgument(
+        "`output_shapes` must be the same length as num outputs (",
+        output_shapes.size(), " vs. ", c->num_outputs());
+  }
+  for (size_t i = 0; i < output_shapes.size(); ++i) {
+    shape_inference::ShapeHandle output_shape_handle;
+    TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(
+        output_shapes[i], &output_shape_handle));
+    c->set_output(static_cast<int>(i), output_shape_handle);
+  }
+  return absl::OkStatus();
+}
+
+REGISTER_OP("StatelessCase")
+    .Input("branch_index: int32")
+    .Input("input: Tin")
+    .Output("output: Tout")
+    .Attr("Tin: list(type) >= 0")
+    .Attr("Tout: list(type) >= 0")
+    .Attr("branches: list(func) >= 1")
+    .Attr("output_shapes: list(shape) = []")
+    .SetShapeFn(CaseShapeInferenceFn);
 
 REGISTER_OP("Case")
     .Input("branch_index: int32")
@@ -141,25 +174,7 @@ REGISTER_OP("Case")
     .Attr("branches: list(func) >= 1")
     .Attr("output_shapes: list(shape) = []")
     .SetIsStateful()
-    .SetShapeFn([](shape_inference::InferenceContext* c) {
-      std::vector<PartialTensorShape> output_shapes;
-      TF_RETURN_IF_ERROR(c->GetAttr("output_shapes", &output_shapes));
-      // If `output_shapes` attr is set use that as the shapes of the outputs
-      // else return unknown shapes.
-      if (output_shapes.empty()) return shape_inference::UnknownShape(c);
-      if (output_shapes.size() != c->num_outputs()) {
-        return errors::InvalidArgument(
-            "`output_shapes` must be the same length as num outputs (",
-            output_shapes.size(), " vs. ", c->num_outputs());
-      }
-      for (size_t i = 0; i < output_shapes.size(); ++i) {
-        shape_inference::ShapeHandle output_shape_handle;
-        TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(
-            output_shapes[i], &output_shape_handle));
-        c->set_output(static_cast<int>(i), output_shape_handle);
-      }
-      return Status::OK();
-    });
+    .SetShapeFn(CaseShapeInferenceFn);
 
 // TODO(drpng): remove this.
 REGISTER_OP("_While")
@@ -173,7 +188,7 @@ REGISTER_OP("_While")
       for (int i = 0; i < c->num_outputs(); ++i) {
         c->set_output(i, c->input(i));
       }
-      return Status::OK();
+      return absl::OkStatus();
     })
     .Doc(R"doc(
 output = input; While (Cond(output)) { output = Body(output) }
@@ -192,6 +207,31 @@ body: A function that takes a list of tensors and returns another
       by T.
 )doc");
 
+absl::Status WhileShapeInferenceFn(shape_inference::InferenceContext* c) {
+  std::vector<PartialTensorShape> output_shapes;
+  TF_RETURN_IF_ERROR(c->GetAttr("output_shapes", &output_shapes));
+  // If `output_shapes` attr is set use that as the shapes of the outputs
+  // else use the input shapes.
+  if (!output_shapes.empty()) {
+    if (output_shapes.size() != c->num_outputs()) {
+      return errors::InvalidArgument(
+          "`output_shapes` must be the same length as num outputs (",
+          output_shapes.size(), " vs. ", c->num_outputs());
+    }
+    for (size_t i = 0; i < output_shapes.size(); ++i) {
+      shape_inference::ShapeHandle output_shape_handle;
+      TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(
+          output_shapes[i], &output_shape_handle));
+      c->set_output(static_cast<int>(i), output_shape_handle);
+    }
+  } else {
+    for (int i = 0; i < c->num_outputs(); ++i) {
+      c->set_output(i, c->input(i));
+    }
+  }
+  return absl::OkStatus();
+}
+
 REGISTER_OP("While")
     .Input("input: T")
     .Output("output: T")
@@ -201,30 +241,7 @@ REGISTER_OP("While")
     .Attr("output_shapes: list(shape) = []")
     .Attr("parallel_iterations: int = 10")
     .SetIsStateful()
-    .SetShapeFn([](shape_inference::InferenceContext* c) {
-      std::vector<PartialTensorShape> output_shapes;
-      TF_RETURN_IF_ERROR(c->GetAttr("output_shapes", &output_shapes));
-      // If `output_shapes` attr is set use that as the shapes of the outputs
-      // else use the input shapes.
-      if (!output_shapes.empty()) {
-        if (output_shapes.size() != c->num_outputs()) {
-          return errors::InvalidArgument(
-              "`output_shapes` must be the same length as num outputs (",
-              output_shapes.size(), " vs. ", c->num_outputs());
-        }
-        for (size_t i = 0; i < output_shapes.size(); ++i) {
-          shape_inference::ShapeHandle output_shape_handle;
-          TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(
-              output_shapes[i], &output_shape_handle));
-          c->set_output(static_cast<int>(i), output_shape_handle);
-        }
-      } else {
-        for (int i = 0; i < c->num_outputs(); ++i) {
-          c->set_output(i, c->input(i));
-        }
-      }
-      return Status::OK();
-    });
+    .SetShapeFn(WhileShapeInferenceFn);
 
 REGISTER_OP("StatelessWhile")
     .Input("input: T")
@@ -232,12 +249,15 @@ REGISTER_OP("StatelessWhile")
     .Attr("T: list(type) >= 0")
     .Attr("cond: func")
     .Attr("body: func")
-    .SetShapeFn([](shape_inference::InferenceContext* c) {
-      for (int i = 0; i < c->num_outputs(); ++i) {
-        c->set_output(i, c->input(i));
-      }
-      return Status::OK();
-    });
+    .Attr("output_shapes: list(shape) = []")
+    .Attr("parallel_iterations: int = 10")
+    .SetShapeFn(WhileShapeInferenceFn);
+
+REGISTER_OP("ToBool")
+    .Input("input: T")
+    .Output("output: bool")
+    .Attr("T: type")
+    .SetShapeFn(shape_inference::ScalarShape);
 
 REGISTER_OP("For")
     .Input("start: int32")
@@ -272,6 +292,7 @@ REGISTER_OP("StatefulPartitionedCall")
     .Attr("config_proto: string = ''")
     .Attr("executor_type: string = ''")
     .SetIsStateful()
+    .SetIsDistributedCommunication()
     .SetShapeFn(shape_inference::UnknownShape);
 
 // This op is used as a placeholder in If branch functions. It doesn't provide a
@@ -288,7 +309,14 @@ REGISTER_OP("FakeParam")
       shape_inference::ShapeHandle out;
       TF_RETURN_IF_ERROR(c->MakeShapeFromPartialTensorShape(shape, &out));
       c->set_output(0, out);
-      return Status::OK();
+      return absl::OkStatus();
     });
+
+// Returns the device index.
+REGISTER_OP("DeviceIndex")
+    .Output("index: int32")
+    .Attr("device_names: list(string)")
+    .SetShapeFn(shape_inference::ScalarShape)
+    .SetDoNotOptimize();
 
 }  // end namespace tensorflow

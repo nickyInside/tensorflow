@@ -1,4 +1,4 @@
-/* Copyright 2016 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,14 +15,19 @@ limitations under the License.
 
 #include "tensorflow/core/profiler/internal/tfprof_tensor.h"
 
+#include <vector>
+
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+
 namespace tensorflow {
 namespace tfprof {
-void TFProfTensor::Display(string* formatted_str,
+void TFProfTensor::Display(std::string* formatted_str,
                            TFProfTensorProto* tfprof_tensor_pb) {
   if (formatted_str) {
     if (formatted_str_.length() >= kTFProfTenosrMaxDisplayLen) {
       *formatted_str =
-          strings::StrCat(formatted_str_, "...omitted from display\n\n");
+          absl::StrCat(formatted_str_, "...omitted from display\n\n");
     } else {
       *formatted_str = formatted_str_;
     }
@@ -51,24 +56,24 @@ void TFProfTensor::Build() {
     // Int64 for all integers.
     case DataType::DT_INT32:
     case DataType::DT_INT64: {
-      std::vector<int64> values_vec;
+      std::vector<int64_t> values_vec;
       if (tensor_->dtype() == DataType::DT_INT32) {
-        GetValueVec<int32, int64>(&values_vec);
+        GetValueVec<int32_t, int64_t>(&values_vec);
       } else if (tensor_->dtype() == DataType::DT_INT64) {
-        GetValueVec<int64, int64>(&values_vec);
+        GetValueVec<int64_t, int64_t>(&values_vec);
       }
-      BuildOutput<int64>(0, 0, values_vec, &tfprof_tensor_pb_);
+      BuildOutput<int64_t>(0, 0, values_vec, &tfprof_tensor_pb_);
       break;
     }
     case DataType::DT_STRING: {
       // Not supported by TensorFlow.
-      std::vector<string> values_vec;
-      GetValueVec<string, string>(&values_vec);
-      BuildOutput<string>(0, 0, values_vec, &tfprof_tensor_pb_);
+      std::vector<tstring> values_vec;
+      GetValueVec<tstring, tstring>(&values_vec);
+      BuildOutput<tstring>(0, 0, values_vec, &tfprof_tensor_pb_);
       break;
     }
     default: {
-      fprintf(stderr, "Not Supported type %d\n", tensor_->dtype());
+      absl::FPrintF(stderr, "Not Supported type %d\n", tensor_->dtype());
       break;
     }
   }

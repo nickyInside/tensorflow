@@ -13,15 +13,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include <numeric>
+#include <cstdint>
+#include <vector>
 
-#include "tensorflow/compiler/tf2xla/type_util.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
+#include "absl/algorithm/container.h"
+#include "tensorflow/compiler/tf2xla/lib/broadcast.h"
+#include "tensorflow/compiler/tf2xla/mlir_xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/core/framework/bounds_check.h"
-#include "tensorflow/core/framework/kernel_def_builder.h"
+#include "xla/hlo/builder/xla_builder.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/util/bcast.h"
 
 namespace tensorflow {
 namespace {
@@ -63,7 +68,7 @@ class SelectOp : public XlaOpKernel {
                                           cond_shape.num_elements()));
 
       // Broadcast into the dimensions on the right.
-      std::vector<int64> broadcast_dimensions(cond_shape.dims());
+      std::vector<int64_t> broadcast_dimensions(cond_shape.dims());
       absl::c_iota(broadcast_dimensions, 0);
       cond_handle = xla::BroadcastInDim(cond_handle, then_shape.dim_sizes(),
                                         broadcast_dimensions);
@@ -72,10 +77,65 @@ class SelectOp : public XlaOpKernel {
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(SelectOp);
+  SelectOp(const SelectOp&) = delete;
+  void operator=(const SelectOp&) = delete;
 };
 
-REGISTER_XLA_OP(Name("Select"), SelectOp);
+REGISTER_XLA_OP(Name("Select"), MlirXlaOpKernel);
+
+class SelectOpV2 : public XlaOpKernel {
+ public:
+  explicit SelectOpV2(OpKernelConstruction* ctx) : XlaOpKernel(ctx) {}
+
+  void Compile(XlaOpKernelContext* ctx) override {
+    const TensorShape cond_shape = ctx->InputShape(0);
+    const TensorShape then_shape = ctx->InputShape(1);
+    const TensorShape else_shape = ctx->InputShape(2);
+
+    // Compute the output shape from the broadcast of the two data inputs, with
+    // the broadcast of the conditional.
+    // Then Broadcast all three inputs to the output shape and emit a select.
+
+    BCast bcast_then_else(BCast::FromShape(then_shape),
+                          BCast::FromShape(else_shape),
+                          /*fewer_dims_optimization=*/false);
+    if (!bcast_then_else.IsValid()) {
+      ctx->SetStatus(errors::InvalidArgument(
+          "Incompatible shapes: ", then_shape.DebugString(), " vs. ",
+          else_shape.DebugString()));
+      return;
+    }
+    BCast bcast(bcast_then_else.output_shape(), BCast::FromShape(cond_shape),
+                /*fewer_dims_optimization=*/false);
+    if (!bcast.IsValid()) {
+      ctx->SetStatus(errors::InvalidArgument(
+          "Incompatible shapes: ",
+          BCast::ToShape(bcast_then_else.output_shape()).DebugString(), " vs. ",
+          cond_shape.DebugString()));
+      return;
+    }
+
+    auto bcasted_cond = BroadcastTo(ctx->Input(0), bcast.output_shape());
+    OP_REQUIRES_OK(ctx, bcasted_cond.status());
+    auto cond_handle = bcasted_cond.value();
+
+    auto bcasted_then = BroadcastTo(ctx->Input(1), bcast.output_shape());
+    OP_REQUIRES_OK(ctx, bcasted_then.status());
+    auto then_handle = bcasted_then.value();
+
+    auto bcasted_else = BroadcastTo(ctx->Input(2), bcast.output_shape());
+    OP_REQUIRES_OK(ctx, bcasted_else.status());
+    auto else_handle = bcasted_else.value();
+
+    ctx->SetOutput(0, xla::Select(cond_handle, then_handle, else_handle));
+  }
+
+ private:
+  SelectOpV2(const SelectOpV2&) = delete;
+  void operator=(const SelectOpV2&) = delete;
+};
+
+REGISTER_XLA_OP(Name("SelectV2"), SelectOpV2);
 
 }  // namespace
 }  // namespace tensorflow

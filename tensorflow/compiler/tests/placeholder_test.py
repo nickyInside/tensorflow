@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for xla handling of placeholder_with_default."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import resource_variable_ops
@@ -28,7 +24,7 @@ from tensorflow.python.platform import googletest
 class PlaceholderTest(xla_test.XLATestCase):
 
   def test_placeholder_with_default_default(self):
-    with self.cached_session() as sess, self.test_scope():
+    with self.session() as sess, self.test_scope():
       v = resource_variable_ops.ResourceVariable(4.0)
       ph = array_ops.placeholder_with_default(v, shape=[])
       out = ph * 2
@@ -36,7 +32,7 @@ class PlaceholderTest(xla_test.XLATestCase):
       self.assertEqual(8.0, self.evaluate(out))
 
   def test_placeholder_with_default_fed(self):
-    with self.cached_session() as sess, self.test_scope():
+    with self.session() as sess, self.test_scope():
       v = resource_variable_ops.ResourceVariable(4.0)
       ph = array_ops.placeholder_with_default(v, shape=[])
       out = ph * 2

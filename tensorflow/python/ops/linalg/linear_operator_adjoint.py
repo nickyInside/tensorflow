@@ -14,21 +14,19 @@
 # ==============================================================================
 """Takes the adjoint of a `LinearOperator`."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops.linalg import linalg_impl as linalg
 from tensorflow.python.ops.linalg import linear_operator
+from tensorflow.python.ops.linalg import linear_operator_util
 from tensorflow.python.util.tf_export import tf_export
 
-__all__ = []
+__all__ = ["LinearOperatorAdjoint"]
 
 
 @tf_export("linalg.LinearOperatorAdjoint")
+@linear_operator.make_composite_tensor
 class LinearOperatorAdjoint(linear_operator.LinearOperator):
   """`LinearOperator` representing the adjoint of another operator.
 
@@ -111,60 +109,61 @@ class LinearOperatorAdjoint(linear_operator.LinearOperator):
     Raises:
       ValueError:  If `operator.is_non_singular` is False.
     """
+    parameters = dict(
+        operator=operator,
+        is_non_singular=is_non_singular,
+        is_self_adjoint=is_self_adjoint,
+        is_positive_definite=is_positive_definite,
+        is_square=is_square,
+        name=name,
+    )
 
     self._operator = operator
 
     # The congruency of is_non_singular and is_self_adjoint was checked in the
     # base operator.
-    def _combined_hint(hint_str, provided_hint_value, message):
-      """Get combined hint in the case where operator.hint should equal hint."""
-      op_hint = getattr(operator, hint_str)
-      if op_hint is False and provided_hint_value:
-        raise ValueError(message)
-      if op_hint and provided_hint_value is False:
-        raise ValueError(message)
-      return (op_hint or provided_hint_value) or None
+    combine_hint = (
+        linear_operator_util.use_operator_or_provided_hint_unless_contradicting)
 
-    is_square = _combined_hint(
-        "is_square", is_square,
+    is_square = combine_hint(
+        operator, "is_square", is_square,
         "An operator is square if and only if its adjoint is square.")
 
-    is_non_singular = _combined_hint(
-        "is_non_singular", is_non_singular,
+    is_non_singular = combine_hint(
+        operator, "is_non_singular", is_non_singular,
         "An operator is non-singular if and only if its adjoint is "
         "non-singular.")
 
-    is_self_adjoint = _combined_hint(
-        "is_self_adjoint", is_self_adjoint,
+    is_self_adjoint = combine_hint(
+        operator, "is_self_adjoint", is_self_adjoint,
         "An operator is self-adjoint if and only if its adjoint is "
         "self-adjoint.")
 
-    is_positive_definite = _combined_hint(
-        "is_positive_definite", is_positive_definite,
+    is_positive_definite = combine_hint(
+        operator, "is_positive_definite", is_positive_definite,
         "An operator is positive-definite if and only if its adjoint is "
         "positive-definite.")
-
-    is_square = _combined_hint(
-        "is_square", is_square,
-        "An operator is square if and only if its adjoint is square.")
 
     # Initialization.
     if name is None:
       name = operator.name + "_adjoint"
-    with ops.name_scope(name, values=operator.graph_parents):
+    with ops.name_scope(name):
       super(LinearOperatorAdjoint, self).__init__(
           dtype=operator.dtype,
-          graph_parents=operator.graph_parents,
           is_non_singular=is_non_singular,
           is_self_adjoint=is_self_adjoint,
           is_positive_definite=is_positive_definite,
           is_square=is_square,
+          parameters=parameters,
           name=name)
 
   @property
   def operator(self):
     """The operator before taking the adjoint."""
     return self._operator
+
+  def _linop_adjoint(self) -> linear_operator.LinearOperator:
+    return self.operator
 
   def _assert_non_singular(self):
     return self.operator.assert_non_singular()
@@ -190,9 +189,8 @@ class LinearOperatorAdjoint(linear_operator.LinearOperator):
     return self.operator.matmul(
         x, adjoint=(not adjoint), adjoint_arg=adjoint_arg)
 
-  def _matvec(self, x, adjoint=False, adjoint_arg=False):
-    return self.operator.matvec(
-        x, adjoint=(not adjoint), adjoint_arg=adjoint_arg)
+  def _matvec(self, x, adjoint=False):
+    return self.operator.matvec(x, adjoint=(not adjoint))
 
   def _determinant(self):
     if self.is_self_adjoint:
@@ -211,9 +209,8 @@ class LinearOperatorAdjoint(linear_operator.LinearOperator):
     return self.operator.solve(
         rhs, adjoint=(not adjoint), adjoint_arg=adjoint_arg)
 
-  def _solvevec(self, rhs, adjoint=False, adjoint_arg=False):
-    return self.operator.solvevec(
-        rhs, adjoint=(not adjoint), adjoint_arg=adjoint_arg)
+  def _solvevec(self, rhs, adjoint=False):
+    return self.operator.solvevec(rhs, adjoint=(not adjoint))
 
   def _to_dense(self):
     if self.is_self_adjoint:
@@ -222,3 +219,20 @@ class LinearOperatorAdjoint(linear_operator.LinearOperator):
 
   def _add_to_tensor(self, x):
     return self.to_dense() + x
+
+  def _eigvals(self):
+    eigvals = self.operator.eigvals()
+    if not self.operator.is_self_adjoint:
+      eigvals = math_ops.conj(eigvals)
+    return eigvals
+
+  def _cond(self):
+    return self.operator.cond()
+
+  @property
+  def _composite_tensor_fields(self):
+    return ("operator",)
+
+  @property
+  def _experimental_parameter_ndims_to_matrix_ndims(self):
+    return {"operator": 0}

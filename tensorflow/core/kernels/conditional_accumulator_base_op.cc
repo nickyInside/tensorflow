@@ -30,31 +30,57 @@ class AccumulatorSetGlobalStepOp
       : ConditionalAccumulatorBaseSyncOpKernel(context) {}
 
  protected:
+  DataTypeVector GetExpectedInputs(
+      ConditionalAccumulatorBase* accumulator) override {
+    return {DT_STRING_REF, DT_INT64};
+  }
+
   void Compute(OpKernelContext* ctx,
                ConditionalAccumulatorBase* accumulator) override {
     // Check signature
-    OP_REQUIRES_OK(ctx, ctx->MatchSignature({DT_STRING_REF, DT_INT64}, {}));
+    CheckSignature(ctx, accumulator);
 
     // Get input new_global_step
     const Tensor* new_global_step_tensor;
     OP_REQUIRES_OK(ctx, ctx->input("new_global_step", &new_global_step_tensor));
     if (!TensorShapeUtils::IsScalar(new_global_step_tensor->shape())) {
-      ctx->CtxFailureWithWarning(errors::InvalidArgument(
+      ctx->CtxFailureWithWarning(absl::InvalidArgumentError(absl::StrCat(
           "Argument num_required must be scalar, but had bad shape ",
-          new_global_step_tensor->shape().DebugString()));
+          new_global_step_tensor->shape().DebugString())));
     }
 
-    Status status =
-        accumulator->SetGlobalStep(new_global_step_tensor->scalar<int64>()());
+    absl::Status status =
+        accumulator->SetGlobalStep(new_global_step_tensor->scalar<int64_t>()());
     if (!status.ok()) ctx->CtxFailureWithWarning(status);
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(AccumulatorSetGlobalStepOp);
+  AccumulatorSetGlobalStepOp(const AccumulatorSetGlobalStepOp&) = delete;
+  void operator=(const AccumulatorSetGlobalStepOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("AccumulatorSetGlobalStep").Device(DEVICE_CPU),
                         AccumulatorSetGlobalStepOp);
+
+class ResourceAccumulatorSetGlobalStepOp : public AccumulatorSetGlobalStepOp {
+ public:
+  explicit ResourceAccumulatorSetGlobalStepOp(OpKernelConstruction* context)
+      : AccumulatorSetGlobalStepOp(context) {}
+
+  DataTypeVector GetExpectedInputs(
+      ConditionalAccumulatorBase* accumulator) override {
+    return {DT_RESOURCE, DT_INT64};
+  }
+
+ private:
+  ResourceAccumulatorSetGlobalStepOp(
+      const ResourceAccumulatorSetGlobalStepOp&) = delete;
+  void operator=(const ResourceAccumulatorSetGlobalStepOp&) = delete;
+};
+
+REGISTER_KERNEL_BUILDER(
+    Name("ResourceAccumulatorSetGlobalStep").Device(DEVICE_CPU),
+    ResourceAccumulatorSetGlobalStepOp);
 
 /**
  * Defines a AccumulatorNumAccumulatedOp, which returns the number of gradients
@@ -68,22 +94,56 @@ class AccumulatorNumAccumulatedOp
       : ConditionalAccumulatorBaseSyncOpKernel(context) {}
 
  protected:
+  void CheckSignature(OpKernelContext* ctx,
+                      ConditionalAccumulatorBase* accumulator) override {
+    // Check input signature
+    OP_REQUIRES_OK(
+        ctx, ctx->MatchSignature(GetExpectedInputs(accumulator), {DT_INT32}));
+  }
+
+  DataTypeVector GetExpectedInputs(
+      ConditionalAccumulatorBase* accumulator) override {
+    return {DT_STRING_REF};
+  }
+
   void Compute(OpKernelContext* ctx,
                ConditionalAccumulatorBase* accumulator) override {
     // Check signature
-    OP_REQUIRES_OK(ctx, ctx->MatchSignature({DT_STRING_REF}, {DT_INT32}));
+    CheckSignature(ctx, accumulator);
+
     Tensor* Taccumulator_size = nullptr;
     OP_REQUIRES_OK(
         ctx, ctx->allocate_output(0, TensorShape({}), &Taccumulator_size));
-    Taccumulator_size->flat<int32>().setConstant(
+    Taccumulator_size->flat<int32_t>().setConstant(
         accumulator->num_accumulated());
   }
 
  private:
-  TF_DISALLOW_COPY_AND_ASSIGN(AccumulatorNumAccumulatedOp);
+  AccumulatorNumAccumulatedOp(const AccumulatorNumAccumulatedOp&) = delete;
+  void operator=(const AccumulatorNumAccumulatedOp&) = delete;
 };
 
 REGISTER_KERNEL_BUILDER(Name("AccumulatorNumAccumulated").Device(DEVICE_CPU),
                         AccumulatorNumAccumulatedOp);
+
+class ResourceAccumulatorNumAccumulatedOp : public AccumulatorNumAccumulatedOp {
+ public:
+  explicit ResourceAccumulatorNumAccumulatedOp(OpKernelConstruction* context)
+      : AccumulatorNumAccumulatedOp(context) {}
+
+  DataTypeVector GetExpectedInputs(
+      ConditionalAccumulatorBase* accumulator) override {
+    return {DT_RESOURCE};
+  }
+
+ private:
+  ResourceAccumulatorNumAccumulatedOp(
+      const ResourceAccumulatorNumAccumulatedOp&) = delete;
+  void operator=(const ResourceAccumulatorNumAccumulatedOp&) = delete;
+};
+
+REGISTER_KERNEL_BUILDER(
+    Name("ResourceAccumulatorNumAccumulated").Device(DEVICE_CPU),
+    ResourceAccumulatorNumAccumulatedOp);
 
 }  // namespace tensorflow

@@ -20,6 +20,7 @@ limitations under the License.
 
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/resource_handle.h"
+#include "tensorflow/core/framework/type_traits.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -42,9 +43,9 @@ class TypedAllocator {
       return nullptr;
     }
 
-    void* p =
-        raw_allocator->AllocateRaw(Allocator::kAllocatorAlignment,
-                                   sizeof(T) * num_elements, allocation_attr);
+    void* p = raw_allocator->AllocateRawAlignedNew(
+        Allocator::kAllocatorAlignment, sizeof(T) * num_elements,
+        allocation_attr);
     T* typed_p = reinterpret_cast<T*>(p);
     if (typed_p) RunCtor<T>(raw_allocator, typed_p, num_elements);
     return typed_p;
@@ -55,7 +56,8 @@ class TypedAllocator {
                          size_t num_elements) {
     if (ptr) {
       RunDtor<T>(raw_allocator, ptr, num_elements);
-      raw_allocator->DeallocateRaw(ptr);
+      raw_allocator->DeallocateRawAlignedDelete(
+          ptr, Allocator::kAllocatorAlignment, sizeof(T) * num_elements);
     }
   }
 
@@ -76,19 +78,19 @@ class TypedAllocator {
 
 template <>
 /* static */
-inline void TypedAllocator::RunCtor(Allocator* raw_allocator, string* p,
+inline void TypedAllocator::RunCtor(Allocator* raw_allocator, tstring* p,
                                     size_t n) {
   if (!raw_allocator->AllocatesOpaqueHandle()) {
-    for (size_t i = 0; i < n; ++p, ++i) new (p) string();
+    for (size_t i = 0; i < n; ++p, ++i) new (p) tstring();
   }
 }
 
 template <>
 /* static */
-inline void TypedAllocator::RunDtor(Allocator* raw_allocator, string* p,
+inline void TypedAllocator::RunDtor(Allocator* raw_allocator, tstring* p,
                                     size_t n) {
   if (!raw_allocator->AllocatesOpaqueHandle()) {
-    for (size_t i = 0; i < n; ++p, ++i) p->~string();
+    for (size_t i = 0; i < n; ++p, ++i) p->~tstring();
   }
 }
 

@@ -15,10 +15,18 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/gl/serialization.h"
 
-#include "absl/types/variant.h"
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include "absl/types/span.h"
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
+#include "tensorflow/lite/delegates/gpu/gl/variable.h"
 
 namespace tflite {
 namespace gpu {
@@ -36,12 +44,14 @@ struct ParameterValueGetter {
     data.add_data(offset);
     return data.Finish().Union();
   }
+
   Offset<void> operator()(const int2& value) {
     auto offset = builder->CreateVector(std::vector<int32_t>{value.x, value.y});
     data::DataInt32Builder data(*builder);
     data.add_data(offset);
     return data.Finish().Union();
   }
+
   Offset<void> operator()(const int4& value) {
     auto offset = builder->CreateVector(
         std::vector<int32_t>{value.x, value.y, value.z, value.w});
@@ -49,6 +59,7 @@ struct ParameterValueGetter {
     data.add_data(offset);
     return data.Finish().Union();
   }
+
   Offset<void> operator()(const std::vector<int2>& value) {
     std::vector<int32_t> d(value.size() * 2);
     for (size_t i = 0; i < value.size(); ++i) {
@@ -60,12 +71,14 @@ struct ParameterValueGetter {
     data.add_data(offset);
     return data.Finish().Union();
   }
+
   Offset<void> operator()(uint32_t value) {
     auto offset = builder->CreateVector(std::vector<uint32_t>{value});
     data::DataUint32Builder data(*builder);
     data.add_data(offset);
     return data.Finish().Union();
   }
+
   Offset<void> operator()(const uint4& value) {
     auto offset = builder->CreateVector(
         std::vector<uint32_t>{value.x, value.y, value.z, value.w});
@@ -73,21 +86,38 @@ struct ParameterValueGetter {
     data.add_data(offset);
     return data.Finish().Union();
   }
+
   Offset<void> operator()(float value) {
     auto offset = builder->CreateVector(std::vector<float>{value});
     data::DataFloatBuilder data(*builder);
     data.add_data(offset);
     return data.Finish().Union();
   }
+
   Offset<void> operator()(const float2& value) {
     auto offset = builder->CreateVector(std::vector<float>{value.x, value.y});
     data::DataFloatBuilder data(*builder);
     data.add_data(offset);
     return data.Finish().Union();
   }
+
   Offset<void> operator()(const float4& value) {
     auto offset = builder->CreateVector(
         std::vector<float>{value.x, value.y, value.z, value.w});
+    data::DataFloatBuilder data(*builder);
+    data.add_data(offset);
+    return data.Finish().Union();
+  }
+
+  Offset<void> operator()(const std::vector<float4>& value) {
+    std::vector<float> d(value.size() * 4);
+    for (size_t i = 0; i < value.size(); ++i) {
+      d[i * 4] = value[i].x;
+      d[i * 4 + 1] = value[i].y;
+      d[i * 4 + 2] = value[i].z;
+      d[i * 4 + 3] = value[i].w;
+    }
+    auto offset = builder->CreateVector(d);
     data::DataFloatBuilder data(*builder);
     data.add_data(offset);
     return data.Finish().Union();
@@ -100,28 +130,40 @@ struct DataVariantTypeGetter {
   data::DataVariant operator()(int32_t) const {
     return data::DataVariant::DataInt32;
   }
+
   data::DataVariant operator()(const int2&) const {
     return data::DataVariant::DataInt32;
   }
+
   data::DataVariant operator()(const int4&) const {
     return data::DataVariant::DataInt32;
   }
+
   data::DataVariant operator()(const std::vector<int2>&) const {
     return data::DataVariant::DataInt32;
   }
+
   data::DataVariant operator()(uint32_t) const {
     return data::DataVariant::DataUint32;
   }
+
   data::DataVariant operator()(const uint4&) const {
     return data::DataVariant::DataUint32;
   }
+
   data::DataVariant operator()(float) const {
     return data::DataVariant::DataFloat;
   }
+
   data::DataVariant operator()(const float2&) const {
     return data::DataVariant::DataFloat;
   }
+
   data::DataVariant operator()(const float4&) const {
+    return data::DataVariant::DataFloat;
+  }
+
+  data::DataVariant operator()(const std::vector<float4>&) const {
     return data::DataVariant::DataFloat;
   }
 };
@@ -130,28 +172,40 @@ struct ParameterTypeGetter {
   data::ParameterType operator()(int32_t) const {
     return data::ParameterType::INT32;
   }
+
   data::ParameterType operator()(const int2&) const {
     return data::ParameterType::INT32;
   }
+
   data::ParameterType operator()(const int4&) const {
     return data::ParameterType::INT32;
   }
+
   data::ParameterType operator()(const std::vector<int2>&) const {
     return data::ParameterType::INT32_2;
   }
+
   data::ParameterType operator()(uint32_t) const {
     return data::ParameterType::UINT32;
   }
+
   data::ParameterType operator()(const uint4&) const {
     return data::ParameterType::UINT32;
   }
+
   data::ParameterType operator()(float) const {
     return data::ParameterType::FLOAT32;
   }
+
   data::ParameterType operator()(const float2&) const {
     return data::ParameterType::FLOAT32;
   }
+
   data::ParameterType operator()(const float4&) const {
+    return data::ParameterType::FLOAT32;
+  }
+
+  data::ParameterType operator()(const std::vector<float4>&) const {
     return data::ParameterType::FLOAT32;
   }
 };
@@ -212,7 +266,7 @@ struct ObjectSizeTypeGetter {
   data::ObjectSize operator()(const uint2&) const {
     return data::ObjectSize::Uint2;
   }
-  data::ObjectSize operator()(const uint32_t&) const {
+  data::ObjectSize operator()(const uint32_t) const {
     return data::ObjectSize::Uint1;
   }
 };
@@ -276,23 +330,23 @@ void SerializedCompiledModelBuilder::AddShader(const std::string& shader_src) {
 }
 
 void SerializedCompiledModelBuilder::AddProgram(
-    const std::vector<UniformParameter>& parameters,
-    const std::vector<Object>& objects, const uint3& workgroup_size,
-    const uint3& num_workgroups, size_t shader_index) {
+    const std::vector<Variable>& parameters, const std::vector<Object>& objects,
+    const uint3& workgroup_size, const uint3& num_workgroups,
+    size_t shader_index) {
   Offset<data::Uint3> fb_workgroups = Encode(num_workgroups, &builder_);
   Offset<data::Uint3> fb_workgroup_size = Encode(workgroup_size, &builder_);
 
   Offset<Vector<Offset<data::UniformParameter>>> fb_params;
   {
     std::vector<Offset<data::UniformParameter>> offsets;
-    for (const UniformParameter& param : parameters) {
+    for (const Variable& param : parameters) {
       auto name = builder_.CreateString(param.name);
-      auto data = absl::visit(ParameterValueGetter{&builder_}, param.value);
+      auto data = std::visit(ParameterValueGetter{&builder_}, param.value);
       data::UniformParameterBuilder builder(builder_);
       builder.add_name(name);
-      builder.add_data_type(absl::visit(DataVariantTypeGetter{}, param.value));
+      builder.add_data_type(std::visit(DataVariantTypeGetter{}, param.value));
       builder.add_data(data);
-      builder.add_type(absl::visit(ParameterTypeGetter{}, param.value));
+      builder.add_type(std::visit(ParameterTypeGetter{}, param.value));
       offsets.push_back(builder.Finish());
     }
     fb_params = builder_.CreateVector(offsets);
@@ -302,17 +356,17 @@ void SerializedCompiledModelBuilder::AddProgram(
   {
     std::vector<Offset<data::Object>> offsets;
     for (const Object& object : objects) {
-      auto object_variant = absl::visit(ObjectGetter{&builder_}, object.object);
-      auto size = absl::visit(ObjectSizeGetter{&builder_}, object.size);
+      auto object_variant = std::visit(ObjectGetter{&builder_}, object.object);
+      auto size = std::visit(ObjectSizeGetter{&builder_}, object.size);
 
       data::ObjectBuilder builder(builder_);
       builder.add_access(ToFB(object.access));
       builder.add_binding(object.binding);
       builder.add_type(ToFB(object.object_type));
       builder.add_data_type(ToFB(object.data_type));
-      builder.add_size_type(absl::visit(ObjectSizeTypeGetter{}, object.size));
+      builder.add_size_type(std::visit(ObjectSizeTypeGetter{}, object.size));
       builder.add_size(size);
-      builder.add_object_type(absl::visit(ObjectTypeGetter{}, object.object));
+      builder.add_object_type(std::visit(ObjectTypeGetter{}, object.object));
       builder.add_object(object_variant);
       offsets.push_back(builder.Finish());
     }
@@ -343,15 +397,15 @@ absl::Span<const uint8_t> SerializedCompiledModelBuilder::Finalize(
 
 namespace {
 
-Status ParseParameter(const data::UniformParameter& fb_parameter,
-                      UniformParameter* parameter) {
+absl::Status ParseParameter(const data::UniformParameter& fb_parameter,
+                            Variable* parameter) {
   parameter->name = fb_parameter.name()->str();
   switch (fb_parameter.type()) {
     case data::ParameterType::INT32: {
       auto* ptr = fb_parameter.data_as_DataInt32();
       if (ptr == nullptr) {
-        return InvalidArgumentError("Unexpected data type '" + parameter->name +
-                                    "'");
+        return absl::InvalidArgumentError("Unexpected data type '" +
+                                          parameter->name + "'");
       }
       switch (ptr->data()->size()) {
         case 1:
@@ -365,16 +419,16 @@ Status ParseParameter(const data::UniformParameter& fb_parameter,
                                   (*ptr->data())[2], (*ptr->data())[3]);
           break;
         default:
-          return InvalidArgumentError("Unexpected size for parameter '" +
-                                      parameter->name + "'");
+          return absl::InvalidArgumentError("Unexpected size for parameter '" +
+                                            parameter->name + "'");
       }
       break;
     }
     case data::ParameterType::UINT32: {
       auto* ptr = fb_parameter.data_as_DataUint32();
       if (ptr == nullptr) {
-        return InvalidArgumentError("Unexpected data type '" + parameter->name +
-                                    "'");
+        return absl::InvalidArgumentError("Unexpected data type '" +
+                                          parameter->name + "'");
       }
       switch (ptr->data()->size()) {
         case 1:
@@ -385,16 +439,16 @@ Status ParseParameter(const data::UniformParameter& fb_parameter,
                                    (*ptr->data())[2], (*ptr->data())[3]);
           break;
         default:
-          return InvalidArgumentError("Unexpected size for parameter '" +
-                                      parameter->name + "'");
+          return absl::InvalidArgumentError("Unexpected size for parameter '" +
+                                            parameter->name + "'");
       }
       break;
     }
     case data::ParameterType::FLOAT32: {
       auto* ptr = fb_parameter.data_as_DataFloat();
       if (ptr == nullptr) {
-        return InvalidArgumentError("Unexpected data type '" + parameter->name +
-                                    "'");
+        return absl::InvalidArgumentError("Unexpected data type '" +
+                                          parameter->name + "'");
       }
       switch (ptr->data()->size()) {
         case 1:
@@ -408,21 +462,21 @@ Status ParseParameter(const data::UniformParameter& fb_parameter,
                                     (*ptr->data())[2], (*ptr->data())[3]);
           break;
         default:
-          return InvalidArgumentError("Unexpected size for parameter '" +
-                                      parameter->name + "'");
+          return absl::InvalidArgumentError("Unexpected size for parameter '" +
+                                            parameter->name + "'");
       }
       break;
     }
     case data::ParameterType::INT32_2: {
       auto* ptr = fb_parameter.data_as_DataInt32();
       if (ptr == nullptr) {
-        return InvalidArgumentError("Unexpected data type '" + parameter->name +
-                                    "'");
+        return absl::InvalidArgumentError("Unexpected data type '" +
+                                          parameter->name + "'");
       }
 
       if (ptr->data()->size() % 2 != 0) {
-        return InvalidArgumentError("Unexpected size for parameter '" +
-                                    parameter->name + "'");
+        return absl::InvalidArgumentError("Unexpected size for parameter '" +
+                                          parameter->name + "'");
       }
 
       std::vector<int2> values(ptr->data()->size() / 2);
@@ -433,7 +487,7 @@ Status ParseParameter(const data::UniformParameter& fb_parameter,
       break;
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 DataType ToEnum(data::DataType type) {
@@ -473,7 +527,7 @@ AccessType ToEnum(data::AccessType type) {
   }
 }
 
-Status ParseObject(const data::Object& fb_object, Object* object) {
+absl::Status ParseObject(const data::Object& fb_object, Object* object) {
   object->access = ToEnum(fb_object.access());
   object->binding = fb_object.binding();
   object->object_type = ToEnum(fb_object.type());
@@ -496,7 +550,7 @@ Status ParseObject(const data::Object& fb_object, Object* object) {
       break;
     }
     case data::ObjectSize::NONE:
-      return InvalidArgumentError("Texture size is not set");
+      return absl::InvalidArgumentError("Texture size is not set");
   }
 
   switch (fb_object.object_type()) {
@@ -513,10 +567,10 @@ Status ParseObject(const data::Object& fb_object, Object* object) {
       break;
     }
     case data::ObjectVariant::NONE: {
-      return InvalidArgumentError("Object is not set");
+      return absl::InvalidArgumentError("Object is not set");
     }
   }
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 CompiledModelOptions ParseParameters(const data::Parameters& fb_parameters) {
@@ -527,11 +581,11 @@ CompiledModelOptions ParseParameters(const data::Parameters& fb_parameters) {
 
 }  // namespace
 
-Status DeserializeCompiledModel(absl::Span<const uint8_t> serialized,
-                                DeserializationHandler* handler) {
+absl::Status DeserializeCompiledModel(absl::Span<const uint8_t> serialized,
+                                      DeserializationHandler* handler) {
   flatbuffers::Verifier verifier(serialized.data(), serialized.size());
   if (!data::VerifyCompiledModelBuffer(verifier)) {
-    return InvalidArgumentError("Serialized model is corrupted.");
+    return absl::InvalidArgumentError("Serialized model is corrupted.");
   }
 
   auto model = data::GetCompiledModel(serialized.data());
@@ -539,13 +593,13 @@ Status DeserializeCompiledModel(absl::Span<const uint8_t> serialized,
     RETURN_IF_ERROR(
         handler->OnShader(absl::MakeSpan(shader->c_str(), shader->size())));
   }
-  std::vector<UniformParameter> parameters;
+  std::vector<Variable> parameters;
   std::vector<Object> objects;
   for (auto program : *model->programs()) {
     parameters.clear();
     objects.clear();
     for (auto fb_parameter : *program->parameters()) {
-      UniformParameter parameter;
+      Variable parameter;
       RETURN_IF_ERROR(ParseParameter(*fb_parameter, &parameter));
       parameters.push_back(std::move(parameter));
     }
@@ -565,7 +619,7 @@ Status DeserializeCompiledModel(absl::Span<const uint8_t> serialized,
                                        program->shader_index()));
   }
   handler->OnOptions(ParseParameters(*model->parameters()));
-  return OkStatus();
+  return absl::OkStatus();
 }
 
 }  // namespace gl

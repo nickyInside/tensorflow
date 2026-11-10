@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/compiler/tf2xla/resource_operation_table.h"
+
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 
@@ -53,10 +54,14 @@ CreateResourceOpInfoMap() {
   add("AssignAddVariableOp"                  , kReadWrite, kVariable);
   add("AssignSubVariableOp"                  , kReadWrite, kVariable);
   add("AssignVariableOp"                     , kWrite,     kVariable);
+  add("AssignVariableXlaConcatND"            , kWrite,     kVariable);
+  add("CollectiveReduceV2"                   , kRead,      kVariable);
   add("ReadVariableOp"                       , kRead,      kVariable);
+  add("ReadVariableXlaSplitND"               , kRead,      kVariable);
   add("ResourceApplyAdaMax"                  , kReadWrite, kVariable);
   add("ResourceApplyAdadelta"                , kReadWrite, kVariable);
   add("ResourceApplyAdagrad"                 , kReadWrite, kVariable);
+  add("ResourceApplyAdagradV2"               , kReadWrite, kVariable),
   add("ResourceApplyAdagradDA"               , kReadWrite, kVariable);
   add("ResourceApplyAdam"                    , kReadWrite, kVariable);
   add("ResourceApplyAddSign"                 , kReadWrite, kVariable);
@@ -82,6 +87,8 @@ CreateResourceOpInfoMap() {
   add("ResourceScatterSub"                   , kReadWrite, kVariable);
   add("ResourceScatterUpdate"                , kReadWrite, kVariable);
   add("ResourceStridedSliceAssign"           , kReadWrite, kVariable);
+  add("RngReadAndSkip"                       , kReadWrite, kVariable);
+  add("RngSkip"                              , kReadWrite, kVariable);
   add("StatefulStandardNormalV2"             , kReadWrite, kVariable);
   add("StatefulTruncatedNormal"              , kReadWrite, kVariable);
   add("StatefulUniform"                      , kReadWrite, kVariable);

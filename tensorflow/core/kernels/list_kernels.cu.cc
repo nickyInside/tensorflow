@@ -16,18 +16,17 @@ limitations under the License.
 #include <limits>
 
 #define EIGEN_USE_THREADS
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 #define EIGEN_USE_GPU
 
-#include "tensorflow/core/kernels/list_kernels.h"
-
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/variant.h"
 #include "tensorflow/core/framework/variant_op_registry.h"
 #include "tensorflow/core/kernels/concat_lib.h"
+#include "tensorflow/core/kernels/list_kernels.h"
 #include "tensorflow/core/lib/core/coding.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/util/util.h"
@@ -105,13 +104,9 @@ typedef Eigen::GpuDevice GPUDevice;
                               .HostMemory("lengths"),                      \
                           TensorListSplit<GPUDevice, T>)
 
-TF_CALL_GPU_NUMBER_TYPES(REGISTER_TENSOR_LIST_OPS_GPU);
-REGISTER_TENSOR_LIST_OPS_GPU(bfloat16);
-TF_CALL_complex64(REGISTER_TENSOR_LIST_OPS_GPU);
-TF_CALL_complex128(REGISTER_TENSOR_LIST_OPS_GPU);
 TF_CALL_int32(REGISTER_TENSOR_LIST_OPS_GPU);
 TF_CALL_int64(REGISTER_TENSOR_LIST_OPS_GPU);
-REGISTER_TENSOR_LIST_OPS_GPU(bool);
+TF_CALL_GPU_ALL_TYPES(REGISTER_TENSOR_LIST_OPS_GPU);
 
 #undef REGISTER_TENSOR_LIST_OPS_GPU
 
@@ -129,4 +124,4 @@ REGISTER_UNARY_VARIANT_UNARY_OP_FUNCTION(ZEROS_LIKE_VARIANT_UNARY_OP,
                                          TensorListZerosLike<GPUDevice>);
 
 }  // namespace tensorflow
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

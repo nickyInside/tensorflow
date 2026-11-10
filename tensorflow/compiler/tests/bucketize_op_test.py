@@ -14,13 +14,10 @@
 # ==============================================================================
 """Tests for bucketize_op."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors_impl
+from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.platform import test
@@ -29,7 +26,7 @@ from tensorflow.python.platform import test
 class BucketizationOpTest(xla_test.XLATestCase):
 
   def testInt(self):
-    with self.cached_session() as sess:
+    with self.session() as sess:
       p = array_ops.placeholder(dtypes.int32)
       with self.test_scope():
         op = math_ops._bucketize(p, boundaries=[0, 3, 8, 11])
@@ -37,8 +34,17 @@ class BucketizationOpTest(xla_test.XLATestCase):
       self.assertAllEqual(expected_out,
                           sess.run(op, {p: [-5, 0, 2, 3, 5, 8, 10, 11, 12]}))
 
+  def testIntWithFloatBoundaries(self):
+    for dtype in [dtypes.int32, dtypes.int64]:
+      with self.session() as sess:
+        p = array_ops.placeholder(dtype)
+        with self.test_scope():
+          op = math_ops._bucketize(p, boundaries=[0.1, 1.1])
+        expected_out = [0, 1, 2, 2]
+        self.assertAllEqual(expected_out, sess.run(op, {p: [0, 1, 2, 3]}))
+
   def testFloat(self):
-    with self.cached_session() as sess:
+    with self.session() as sess:
       p = array_ops.placeholder(dtypes.float32)
       with self.test_scope():
         op = math_ops._bucketize(p, boundaries=[0., 3., 8., 11.])
@@ -48,7 +54,7 @@ class BucketizationOpTest(xla_test.XLATestCase):
           sess.run(op, {p: [-5., 0., 2., 3., 5., 8., 10., 11., 12.]}))
 
   def test2DInput(self):
-    with self.cached_session() as sess:
+    with self.session() as sess:
       p = array_ops.placeholder(dtypes.float32)
       with self.test_scope():
         op = math_ops._bucketize(p, boundaries=[0, 3, 8, 11])
@@ -57,18 +63,19 @@ class BucketizationOpTest(xla_test.XLATestCase):
           expected_out, sess.run(op,
                                  {p: [[-5, 0, 2, 3, 5], [8, 10, 11, 12, 0]]}))
 
+  @test_util.disable_mlir_bridge("Error handling")
   def testInvalidBoundariesOrder(self):
-    with self.cached_session() as sess:
+    with self.session() as sess:
       p = array_ops.placeholder(dtypes.int32)
       with self.test_scope():
         op = math_ops._bucketize(p, boundaries=[0, 8, 3, 11])
-      with self.assertRaisesRegexp(errors_impl.InvalidArgumentError,
-                                   "Expected sorted boundaries"):
+      with self.assertRaisesRegex(errors_impl.InvalidArgumentError,
+                                  "Expected sorted boundaries"):
         sess.run(op, {p: [-5, 0]})
 
   def testBoundariesNotList(self):
-    with self.cached_session():
-      with self.assertRaisesRegexp(TypeError, "Expected list.*"):
+    with self.session():
+      with self.assertRaisesRegex(TypeError, "Expected list.*"):
         p = array_ops.placeholder(dtypes.int32)
         with self.test_scope():
           math_ops._bucketize(p, boundaries=0)

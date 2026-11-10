@@ -19,6 +19,7 @@ limitations under the License.
 
 namespace tensorflow {
 namespace data {
+namespace experimental {
 namespace sql {
 
 // A factory class for creating `QueryConnection` instances.
@@ -31,10 +32,11 @@ class DriverManager {
   // == `sqlite`, then `CreateQueryConnection` will create a
   // `SqliteQueryConnection` instance.
   static std::unique_ptr<QueryConnection> CreateQueryConnection(
-      const string& driver_name);
+      const std::string& driver_name);
 };
 
 }  // namespace sql
+}  // namespace experimental
 }  // namespace data
 }  // namespace tensorflow
 

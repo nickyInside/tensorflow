@@ -14,11 +14,9 @@
 # ==============================================================================
 """Script to evaluate accuracy of TFLite flatbuffer model on mnist dataset."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 import numpy as np
 import tensorflow as tf  # pylint: disable=g-bad-import-order
+from tensorflow.lite.python import lite
 from tensorflow.lite.tutorials import dataset
 flags = tf.app.flags
 
@@ -33,7 +31,7 @@ flags = flags.FLAGS
 
 def test_image_generator():
   # Generates an iterator over images
-  with tf.Session() as sess:
+  with tf.compat.v1.Session() as sess:
     input_data = tf.compat.v1.data.make_one_shot_iterator(dataset.test(
         flags.data_dir)).get_next()
     try:
@@ -69,7 +67,7 @@ def run_eval(interpreter, input_image):
 
 
 def main(_):
-  interpreter = tf.lite.Interpreter(model_path=flags.model_file)
+  interpreter = lite.Interpreter(model_path=flags.model_file)
   interpreter.allocate_tensors()
   num_correct, total = 0, 0
   for input_data in test_image_generator():
@@ -84,4 +82,4 @@ def main(_):
 
 if __name__ == '__main__':
   tf.logging.set_verbosity(tf.logging.INFO)
-  tf.app.run(main)
+  tf.compat.v1.app.run(main)

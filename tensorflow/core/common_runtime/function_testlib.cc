@@ -33,7 +33,7 @@ class FindDeviceOpKernel : public OpKernel {
     Tensor* device_tensor = nullptr;
     OP_REQUIRES_OK(ctx, ctx->allocate_output("device_name", TensorShape{},
                                              &device_tensor));
-    device_tensor->scalar<string>()() =
+    device_tensor->scalar<tstring>()() =
         ctx->function_library()->device()->name();
   }
 };
@@ -48,6 +48,20 @@ FunctionDef FindDevice() {
   return FDH::Define(
       // Name
       "FindDevice",
+      // Args
+      {},
+      // Return values
+      {"device_name: string"},
+      // Attr def
+      {},
+      // Nodes
+      {{{"device_name"}, "FindDeviceOp", {}, {}}});
+}
+
+FunctionDef FindDeviceWithUuid() {
+  return FDH::Define(
+      // Name
+      "FindDevice_1234",
       // Args
       {},
       // Return values
@@ -112,8 +126,8 @@ FunctionDef BlockingOpFn() {
 }
 
 // TODO(phawkins): replace with C++ API for calling functions, when that exists.
-Output Call(Scope* scope, const string& op_name, const string& fn_name,
-            gtl::ArraySlice<Input> inputs) {
+Output Call(Scope* scope, const std::string& op_name,
+            const std::string& fn_name, absl::Span<const Input> inputs) {
   NodeDef def;
   NodeDefBuilder builder(op_name, fn_name, scope->graph()->op_registry());
   for (const Input& input : inputs) {
@@ -121,7 +135,7 @@ Output Call(Scope* scope, const string& op_name, const string& fn_name,
                   input.node()->output_type(input.index()));
   }
   TF_CHECK_OK(builder.Finalize(&def));
-  Status status;
+  absl::Status status;
   Node* n = scope->graph()->AddNode(def, &status);
   TF_CHECK_OK(status);
   TF_CHECK_OK(scope->DoShapeInference(n));

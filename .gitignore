@@ -1,8 +1,10 @@
+MODULE.bazel.lock
 .DS_Store
 .ipynb_checkpoints
 node_modules
 /.bazelrc.user
 /.tf_configure.bazelrc
+/xla_configure.bazelrc
 /bazel-*
 /bazel_pip
 /tools/python_bin_path.sh
@@ -18,13 +20,17 @@ tensorflow/contrib/cmake/_build/
 .idea/**
 /build/
 [Bb]uild/
+/build_output/
 /tensorflow/core/util/version_info.cc
 /tensorflow/python/framework/fast_tensor_util.cpp
 /tensorflow/lite/gen/**
 /tensorflow/lite/tools/make/downloads/**
+/tensorflow/lite/tools/make/gen/**
 /api_init_files_list.txt
 /estimator_api_init_files_list.txt
 *.whl
+dist
+venv/
 
 # Android
 .gradle
@@ -37,7 +43,10 @@ gradleBuild
 *.pbxproj
 *.xcworkspace
 /*.podspec
-/tensorflow/lite/**/[ios|objc|swift]*/BUILD
+/tensorflow/lite/**/coreml/**/BUILD
+/tensorflow/lite/**/ios/BUILD
+/tensorflow/lite/**/objc/BUILD
+/tensorflow/lite/**/swift/BUILD
 /tensorflow/lite/examples/ios/simple/data/*.tflite
 /tensorflow/lite/examples/ios/simple/data/*.txt
 Podfile.lock

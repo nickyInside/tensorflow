@@ -1,4 +1,4 @@
-/* Copyright 2016 The TensorFlow Authors All Rights Reserved.
+/* Copyright 2016 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -16,18 +16,25 @@ limitations under the License.
 #include "tensorflow/core/profiler/internal/tfprof_code.h"
 
 #include <stdio.h>
-#include <utility>
 
-#include "tensorflow/c/c_api.h"
-#include "tensorflow/core/framework/tensor.h"
+#include <algorithm>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/io/zlib_compression_options.h"
 #include "tensorflow/core/lib/io/zlib_outputbuffer.h"
-#include "tensorflow/core/lib/strings/str_util.h"
-#include "tensorflow/core/lib/strings/strcat.h"
-#include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/regexp.h"
 #include "tensorflow/core/profiler/internal/tfprof_constants.h"
+#include "tsl/profiler/protobuf/profile.pb.h"
 
 namespace tensorflow {
 namespace tfprof {
@@ -36,18 +43,18 @@ namespace {
 const char* const kGradientSuffix = " (gradient)";
 
 // Convert to Trace proto into a short readable string.
-string GetTraceString(const CallStack::Trace& trace) {
-  string ntrace(io::Basename(trace.file()));
-  ntrace += strings::StrCat(":", trace.lineno());
+std::string GetTraceString(const CallStack::Trace& trace) {
+  std::string ntrace =
+      absl::StrCat(io::Basename(trace.file()), ":", trace.lineno());
   if (trace.function().length() < 20) {
-    ntrace += ":" + trace.function();
+    absl::StrAppend(&ntrace, ":", trace.function());
   } else {
-    ntrace += ":" + trace.function().substr(0, 17) + "...";
+    absl::StrAppend(&ntrace, ":", trace.function().substr(0, 17), "...");
   }
   return ntrace;
 }
 
-bool IsGradNode(const string& name, string* forward_name) {
+bool IsGradNode(const std::string& name, std::string* forward_name) {
   // Given a forward operation with name op, its gradient op has the following
   // name: ...gradients/op_grad/...
   // TODO(xpan): This is hacky.
@@ -56,7 +63,7 @@ bool IsGradNode(const string& name, string* forward_name) {
   if (grad_prefix == name.npos || grad_suffix == name.npos) {
     return false;
   }
-  auto start = grad_prefix + string("gradients/").length();
+  auto start = grad_prefix + std::string("gradients/").length();
   auto len = grad_suffix - start;
   if (len <= 0) {
     return false;
@@ -76,21 +83,22 @@ class StringTable {
 
   // Returns the index of a string. If not found, inserts the string and
   // return the inserted index.
-  uint64 GetIndex(const string& str) {
+  uint64_t GetIndex(const std::string& str) {
     auto idx = string_id_.find(str);
     if (idx != string_id_.end()) {
       return idx->second;
     }
     all_strings_.push_back(str);
-    return string_id_.insert(std::pair<string, int64>(str, string_id_.size()))
+    return string_id_
+        .insert(std::pair<std::string, int64_t>(str, string_id_.size()))
         .first->second;
   }
 
-  const std::vector<string>& strings() const { return all_strings_; }
+  const std::vector<std::string>& strings() const { return all_strings_; }
 
  private:
-  std::map<string, uint64> string_id_;
-  std::vector<string> all_strings_;
+  std::map<std::string, uint64_t> string_id_;
+  std::vector<std::string> all_strings_;
 };
 
 // FunctionTable maps each function to an id.
@@ -101,10 +109,10 @@ class FunctionTable {
 
   // Returns the index of a function. If not found, adds a function proto
   // and returns the function index.
-  uint64 GetIndex(const string& file_path, const string& func_name,
-                  uint64 func_start_line) {
-    auto key = std::tuple<string, string, uint64>(file_path, func_name,
-                                                  func_start_line);
+  uint64_t GetIndex(const std::string& file_path, const std::string& func_name,
+                    uint64_t func_start_line) {
+    auto key = std::tuple<std::string, std::string, uint64_t>(
+        file_path, func_name, func_start_line);
     auto idx = function_table_.find(key);
     if (idx != function_table_.end()) {
       return idx->second.id();
@@ -113,23 +121,25 @@ class FunctionTable {
     // function index should start from 1.
     func_pb->set_id(function_table_.size());
 
-    string file_base(io::Basename(file_path));
-    file_base = file_base.substr(0, file_base.find_last_of("."));
+    std::string file_base(io::Basename(file_path));
+    file_base = file_base.substr(0, file_base.find_last_of('.'));
     func_pb->set_name(
-        string_table_->GetIndex(strings::StrCat(file_base, ":", func_name)));
+        string_table_->GetIndex(absl::StrCat(file_base, ":", func_name)));
     func_pb->set_filename(string_table_->GetIndex(file_path));
     func_pb->set_start_line(func_start_line);
     return func_pb->id();
   }
 
-  const std::map<std::tuple<string, string, uint64>, pprof::Function>&
+  const std::map<std::tuple<std::string, std::string, uint64_t>,
+                 pprof::Function>&
   functions() const {
     return function_table_;
   }
 
  private:
   StringTable* string_table_;
-  std::map<std::tuple<string, string, uint64>, pprof::Function> function_table_;
+  std::map<std::tuple<std::string, std::string, uint64_t>, pprof::Function>
+      function_table_;
 };
 
 // LocationTable maps each function call to an id.
@@ -138,13 +148,13 @@ class LocationTable {
   explicit LocationTable(FunctionTable* function_table)
       : function_table_(function_table) {}
 
-  // Returns the index of a function call localtion. If not found, adds a
+  // Returns the index of a function call location. If not found, adds a
   // location proto and returns the location index.
-  uint64 GetIndex(const string& file_path, uint64 line_number,
-                  const string& called_function_name,
-                  const string& called_file_path,
-                  uint64 called_func_start_line) {
-    auto key = std::tuple<string, string, uint64>(
+  uint64_t GetIndex(const std::string& file_path, uint64_t line_number,
+                    const std::string& called_function_name,
+                    const std::string& called_file_path,
+                    uint64_t called_func_start_line) {
+    auto key = std::tuple<std::string, std::string, uint64_t>(
         file_path, called_function_name, line_number);
 
     auto idx = location_table_.find(key);
@@ -160,14 +170,16 @@ class LocationTable {
     return location_pb->id();
   }
 
-  const std::map<std::tuple<string, string, uint64>, pprof::Location>&
+  const std::map<std::tuple<std::string, std::string, uint64_t>,
+                 pprof::Location>&
   locations() const {
     return location_table_;
   }
 
  private:
   FunctionTable* function_table_;
-  std::map<std::tuple<string, string, uint64>, pprof::Location> location_table_;
+  std::map<std::tuple<std::string, std::string, uint64_t>, pprof::Location>
+      location_table_;
 };
 
 // Samples stores samples of all calls. A sample is a single call trace,
@@ -182,22 +194,22 @@ class Samples {
   // the call stack, from callee to caller.
   // This method adds the statistics of graph nodes created by the python
   // call.
-  void Add(const CodeNode* node, const std::vector<uint64>& location_ids) {
+  void Add(const CodeNode* node, const std::vector<uint64_t>& location_ids) {
     // displayed leaf might not be true leaf. Retrieve the true leaves for
     // stats.
     std::vector<const CodeNode*> all_leaf = FetchAllLeaf(node);
     CHECK(!all_leaf.empty()) << node->name();
 
     for (const CodeNode* cn : all_leaf) {
-      for (auto gn_it : cn->node->graph_nodes()) {
+      for (const auto& gn_it : cn->node->graph_nodes()) {
         const TFGraphNode* gn = gn_it.second;
-        string name = gn->name();
+        std::string name = gn->name();
         // Generate a new trace name, in case the name is taken.
         while (sample_table_.find(name) != sample_table_.end()) {
           name += '@';
         }
         pprof::Sample* sample_pb = &sample_table_[name];
-        for (uint64 id : location_ids) {
+        for (uint64_t id : location_ids) {
           sample_pb->mutable_location_id()->Add(id);
         }
         pprof::Label* label_pb = sample_pb->mutable_label()->Add();
@@ -205,7 +217,7 @@ class Samples {
         label_pb->set_str(string_table_->GetIndex(gn->name()));
 
         sample_pb->mutable_value()->Add(1);
-        string type = *opts_->select.begin();
+        std::string type = *opts_->select.begin();
         if (type == kShown[1]) {
           sample_pb->mutable_value()->Add(gn->exec_micros(node->node->step()));
         } else if (type == kShown[9]) {
@@ -229,13 +241,13 @@ class Samples {
         } else if (type == kShown[3]) {
           sample_pb->mutable_value()->Add(gn->float_ops(node->node->step()));
         } else {
-          fprintf(stderr, "pprof doesn't support -select=%s\n", type.c_str());
+          absl::FPrintF(stderr, "pprof doesn't support -select=%s\n", type);
         }
       }
     }
   }
 
-  const std::map<string, pprof::Sample>& samples() const {
+  const std::map<std::string, pprof::Sample>& samples() const {
     return sample_table_;
   }
 
@@ -254,7 +266,7 @@ class Samples {
 
   StringTable* string_table_;
   const Options* opts_;
-  std::map<string, pprof::Sample> sample_table_;
+  std::map<std::string, pprof::Sample> sample_table_;
 };
 
 class PprofProfileImpl : public PprofProfile {
@@ -265,54 +277,67 @@ class PprofProfileImpl : public PprofProfile {
         loc_table_(new LocationTable(func_table_.get())),
         samples_(new Samples(&string_table_, opts)) {}
 
-  uint64 AddLocation(const CodeNode* callee, const CodeNode* caller) override {
-    const string& file_path = caller->file();
-    uint64 lineno = caller->lineno();
-    const string& callee_file_path = callee->file();
-    const string& callee_function = callee->function();
-    uint64 callee_func_start_line = callee->func_start_line();
+  uint64_t AddLocation(const CodeNode* callee,
+                       const CodeNode* caller) override {
+    const std::string& file_path = caller->file();
+    uint64_t lineno = caller->lineno();
+    const std::string& callee_file_path = callee->file();
+    const std::string& callee_function = callee->function();
+    uint64_t callee_func_start_line = callee->func_start_line();
 
     return loc_table_->GetIndex(file_path, lineno, callee_function,
                                 callee_file_path, callee_func_start_line);
   }
 
-  void AddSample(const CodeNode* leaf, std::vector<uint64>* call_ids) override {
-    std::vector<uint64> reversed_call_ids;
+  void AddSample(const CodeNode* leaf,
+                 std::vector<uint64_t>* call_ids) override {
+    std::vector<uint64_t> reversed_call_ids;
     std::reverse_copy(call_ids->begin(), call_ids->end(),
                       std::back_inserter(reversed_call_ids));
     samples_->Add(leaf, reversed_call_ids);
   }
 
-  Status WritePprofProfile(const string& filename) override {
+  absl::Status WritePprofProfile(const std::string& filename) override {
     pprof::Profile profile_pb;
     Build(&profile_pb);
 
     std::unique_ptr<WritableFile> file;
-    Status s = Env::Default()->NewWritableFile(filename, &file);
+    absl::Status s = Env::Default()->NewWritableFile(filename, &file);
     if (!s.ok()) return s;
 
-    int32 buf_size = 1024 * 1024;
+    int32_t buf_size = 1024 * 1024;
     io::ZlibOutputBuffer* zlib_output_buffer = new io::ZlibOutputBuffer(
         file.get(), buf_size, buf_size, io::ZlibCompressionOptions::GZIP());
     s = zlib_output_buffer->Init();
-    if (!s.ok()) return s;
+    if (!s.ok()) {
+      delete zlib_output_buffer;
+      return s;
+    }
     s = zlib_output_buffer->Append(profile_pb.SerializeAsString());
-    if (!s.ok()) return s;
+    if (!s.ok()) {
+      delete zlib_output_buffer;
+      return s;
+    }
     s = zlib_output_buffer->Close();
-    if (!s.ok()) return s;
-    fprintf(stdout, "\nRun pprof -png --nodecount=100 --sample_index=1 <%s>\n",
-            filename.c_str());
+    if (!s.ok()) {
+      delete zlib_output_buffer;
+      return s;
+    }
+    absl::FPrintF(stdout,
+                  "\nRun pprof -png --nodecount=100 --sample_index=1 <%s>\n",
+                  filename);
+    delete zlib_output_buffer;
     return s;
   }
 
  private:
   void Build(pprof::Profile* profile_pb) {
-    string sample_type_description = "count";
+    std::string sample_type_description = "count";
     auto sample_type = profile_pb->mutable_sample_type()->Add();
     sample_type->set_type(string_table_.GetIndex(sample_type_description));
     sample_type->set_unit(string_table_.GetIndex("count"));
 
-    string type = *opts_->select.begin();
+    std::string type = *opts_->select.begin();
     sample_type_description = type;
     sample_type = profile_pb->mutable_sample_type()->Add();
     sample_type->set_type(string_table_.GetIndex(sample_type_description));
@@ -354,10 +379,10 @@ class PprofProfileImpl : public PprofProfile {
       profile_pb->mutable_comment()->Add(string_table_.GetIndex(
           "Model float operations (Only available if defined)."));
     } else {
-      fprintf(stderr, "pprof doesn't support selecting: %s\n", type.c_str());
+      absl::FPrintF(stderr, "pprof doesn't support selecting: %s\n", type);
     }
 
-    for (const string& str : string_table_.strings()) {
+    for (const std::string& str : string_table_.strings()) {
       *profile_pb->mutable_string_table()->Add() = str;
     }
     for (const auto& sample_it : samples_->samples()) {
@@ -387,14 +412,14 @@ void TFCode::AddNode(TFGraphNode* node) {
   // We infer the forward operation name from gradient op name. So, we can
   // map gradient op traces to forward op traces.
   // E.g. gradient node of 'inp_1/Conv2D' would be 'gradients/inp_1/Conv2D_grad.
-  string forward_name;
+  std::string forward_name;
   if (IsGradNode(node->name(), &forward_name)) {
     auto grad_nodes_it = grad_nodes_.find(forward_name);
     if (grad_nodes_it != grad_nodes_.end()) {
       grad_nodes_it->second.push_back(node);
     } else {
-      grad_nodes_.insert(
-          std::pair<string, std::vector<TFGraphNode*>>(forward_name, {node}));
+      grad_nodes_.insert(std::pair<std::string, std::vector<TFGraphNode*>>(
+          forward_name, {node}));
     }
     return;
   } else {
@@ -402,31 +427,33 @@ void TFCode::AddNode(TFGraphNode* node) {
   }
 
   if (!root_) {
-    graph_root_.reset(new TFMultiGraphNode(kTFProfRoot));
-    root_.reset(new CodeNode(graph_root_.get(), nullptr, ""));
+    graph_root_ = std::make_unique<TFMultiGraphNode>(kTFProfRoot);
+    root_ = std::make_unique<CodeNode>(graph_root_.get(), nullptr, "");
   }
 
   CodeNode* pre_code_node = root_.get();
   // TODO(xpan): Consider to release CodeDef after TFCode is built. It
   // takes a lot of memory.
-  std::set<string> traces;
-  for (int i = 0; i < node->call_stack()->traces().size(); ++i) {
+  std::set<std::string> traces;
+  for (int i = 0, end = node->call_stack()->traces().size(); i < end; ++i) {
     // Unlike op name, which is globally unique, trace name is only unique
     // w.r.t. it's parent.
-    const string& trace = GetTraceString(node->call_stack()->traces().at(i));
+    const std::string& trace =
+        GetTraceString(node->call_stack()->traces().at(i));
     traces.insert(trace);
     pre_code_node = pre_code_node->AddChildren(
         trace, &node->call_stack()->traces().at(i), "");
-    if (i == node->call_stack()->traces().size() - 1) {
+    const int64_t last_index = node->call_stack()->traces().size() - 1;
+    if (i == last_index) {
       pre_code_node->node->AddGraphNode(node);
     }
   }
 }
 
 void TFCode::Build() {
-  int64 unaccounted_nodes = 0;
-  for (auto it : grad_nodes_) {
-    const string& forward_name = it.first;
+  int64_t unaccounted_nodes = 0;
+  for (const auto& it : grad_nodes_) {
+    const std::string& forward_name = it.first;
     auto forward_it = forward_nodes_.find(forward_name);
     if (forward_it == forward_nodes_.end()) {
       unaccounted_nodes += 1;
@@ -435,12 +462,13 @@ void TFCode::Build() {
     TFGraphNode* fn = forward_it->second;
     CodeNode* leaf = nullptr;
     CodeNode* pre_code_node = root_.get();
-    for (int i = 0; i < fn->call_stack()->traces().size(); ++i) {
-      const string& trace =
+    for (int i = 0, end = fn->call_stack()->traces().size(); i < end; ++i) {
+      const std::string& trace =
           GetTraceString(fn->call_stack()->traces().at(i)) + kGradientSuffix;
       pre_code_node = pre_code_node->AddChildren(
           trace, &fn->call_stack()->traces().at(i), kGradientSuffix);
-      if (i == fn->call_stack()->traces().size() - 1) {
+      const int64_t last_trace = fn->call_stack()->traces().size() - 1;
+      if (i == last_trace) {
         leaf = pre_code_node;
       }
     }
@@ -449,7 +477,8 @@ void TFCode::Build() {
     }
   }
   if (unaccounted_nodes > 0) {
-    fprintf(stderr, "%lld gradient nodes not accounted\n", unaccounted_nodes);
+    absl::FPrintF(stderr, "%d gradient nodes not accounted\n",
+                  unaccounted_nodes);
   }
 }
 
@@ -458,19 +487,20 @@ const ShowMultiNode* TFCode::ShowInternal(const Options& opts,
   root_->ResetTotalStats();
   if (opts.output_type == kOutput[3]) {
     if (opts.select.size() != 1) {
-      fprintf(stderr, "Can only select 1 attribute for pprof output.\n");
+      absl::FPrintF(stderr, "Can only select 1 attribute for pprof output.\n");
       return root_.get();
     }
-    string select = *opts.select.begin();
+    std::string select = *opts.select.begin();
     if (select != kShown[0] && select != kShown[1] && select != kShown[2] &&
         select != kShown[3] && select != kShown[9] && select != kShown[10] &&
         select != kShown[11] && select != kShown[12] && select != kShown[13]) {
-      fprintf(stderr, "pprof doesn't support -select=%s\n", select.c_str());
+      absl::FPrintF(stderr, "pprof doesn't support -select=%s\n", select);
       return root_.get();
     }
   }
   if (opts.account_displayed_op_only) {
-    fprintf(stderr, "Note: code view ignores account_displayed_op_only\n");
+    absl::FPrintF(stderr,
+                  "Note: code view ignores account_displayed_op_only\n");
   }
 
   std::vector<CodeNode*> roots = Account(root_->children, opts);
@@ -491,14 +521,14 @@ const ShowMultiNode* TFCode::ShowInternal(const Options& opts,
   root->formatted_str = FormatLegend(opts) + root->formatted_str;
 
   if (opts.output_type == kOutput[3]) {
-    std::vector<uint64> call_ids;
-    pprof_profile_.reset(new PprofProfileImpl(&opts));
+    std::vector<uint64_t> call_ids;
+    pprof_profile_ = std::make_unique<PprofProfileImpl>(&opts);
     Format(root, root->show_children, opts, &root->formatted_str,
            root->mutable_proto(), &call_ids);
-    Status s = pprof_profile_->WritePprofProfile(
+    absl::Status s = pprof_profile_->WritePprofProfile(
         opts.output_options.at(kPprofOpts[0]));
     if (!s.ok()) {
-      fprintf(stderr, "%s\n", s.ToString().c_str());
+      absl::FPrintF(stderr, "%s\n", s.ToString());
     }
   } else {
     Format(root, root->show_children, opts, &root->formatted_str,
@@ -511,15 +541,16 @@ const ShowMultiNode* TFCode::ShowInternal(const Options& opts,
 }
 
 void TFCode::Format(const CodeNode* root, const std::vector<CodeNode*>& nodes,
-                    const Options& opts, string* display_str,
-                    MultiGraphNodeProto* proto, std::vector<uint64>* call_ids) {
+                    const Options& opts, std::string* display_str,
+                    MultiGraphNodeProto* proto,
+                    std::vector<uint64_t>* call_ids) {
   if (nodes.empty() && root->has_trace() && opts.output_type == kOutput[3]) {
     pprof_profile_->AddSample(root, call_ids);
   }
 
   for (CodeNode* node : nodes) {
     if (root->has_trace() && opts.output_type == kOutput[3]) {
-      uint64 loc_id = pprof_profile_->AddLocation(node, root);
+      uint64_t loc_id = pprof_profile_->AddLocation(node, root);
       call_ids->push_back(loc_id);
     }
     display_str->append(node->formatted_str);
@@ -532,15 +563,15 @@ void TFCode::Format(const CodeNode* root, const std::vector<CodeNode*>& nodes,
   }
 }
 
-std::vector<CodeNode*> TFCode::SearchRoot(std::vector<CodeNode*> roots,
-                                          const std::vector<string>& regexes) {
+std::vector<CodeNode*> TFCode::SearchRoot(
+    std::vector<CodeNode*> roots, const std::vector<std::string>& regexes) {
   std::vector<CodeNode*> res;
   if (roots.empty()) {
     return res;
   }
   for (CodeNode* root : roots) {
     bool match_start_node = false;
-    for (const string& regex : regexes) {
+    for (const std::string& regex : regexes) {
       if (RE2::FullMatch(root->name(), regex)) {
         res.push_back(root);
         match_start_node = true;
@@ -583,7 +614,7 @@ std::vector<CodeNode*> TFCode::PrintScope(const std::vector<CodeNode*> roots,
       node->formatted_str = FormatNode(node, opts, last_ident);
 
       if (opts.select.find(kShown[4]) != opts.select.end()) {
-        fprintf(stderr, "code view has no tensor value to show\n");
+        absl::FPrintF(stderr, "code view has no tensor value to show\n");
       }
       show_nodes.push_back(node);
     } else {
@@ -616,9 +647,9 @@ std::vector<CodeNode*> TFCode::Account(const std::vector<CodeNode*>& roots,
   return act_nodes;
 }
 
-string TFCode::FormatNodeMemory(CodeNode* node, int64 bytes,
-                                int64 total_bytes) const {
-  string memory = FormatMemory(total_bytes);
+std::string TFCode::FormatNodeMemory(CodeNode* node, int64_t bytes,
+                                     int64_t total_bytes) const {
+  std::string memory = FormatMemory(total_bytes);
   if (node->account) {
     memory = FormatMemory(bytes) + "/" + memory;
   } else {
@@ -627,9 +658,9 @@ string TFCode::FormatNodeMemory(CodeNode* node, int64 bytes,
   return memory;
 }
 
-string TFCode::FormatNode(CodeNode* node, const Options& opts,
-                          int64 indent) const {
-  std::vector<string> attrs;
+std::string TFCode::FormatNode(CodeNode* node, const Options& opts,
+                               int64_t indent) const {
+  std::vector<std::string> attrs;
   if (opts.select.find(kShown[0]) != opts.select.end()) {
     attrs.push_back(FormatNodeMemory(node, node->proto().requested_bytes(),
                                      node->proto().total_requested_bytes()));
@@ -647,11 +678,12 @@ string TFCode::FormatNode(CodeNode* node, const Options& opts,
                                      node->proto().total_output_bytes()));
   }
 
-  std::vector<string> time_attrs = FormatTimes(node, opts);
+  std::vector<std::string> time_attrs = FormatTimes(node, opts);
   attrs.insert(attrs.end(), time_attrs.begin(), time_attrs.end());
 
   if (opts.select.find(kShown[2]) != opts.select.end()) {
-    string params = FormatNumber(node->proto().total_parameters()) + " params";
+    std::string params =
+        FormatNumber(node->proto().total_parameters()) + " params";
     if (node->account) {
       params = FormatNumber(node->proto().parameters()) + "/" + params;
     } else {
@@ -661,7 +693,7 @@ string TFCode::FormatNode(CodeNode* node, const Options& opts,
   }
 
   if (opts.select.find(kShown[3]) != opts.select.end()) {
-    string fops = FormatNumber(node->proto().total_float_ops()) + " flops";
+    std::string fops = FormatNumber(node->proto().total_float_ops()) + " flops";
     if (node->account) {
       fops = FormatNumber(node->proto().float_ops()) + "/" + fops;
     } else {
@@ -672,23 +704,22 @@ string TFCode::FormatNode(CodeNode* node, const Options& opts,
 
   if (opts.select.find(kShown[5]) != opts.select.end() &&
       !node->node->devices().empty()) {
-    attrs.push_back(str_util::Join(node->node->devices(), "|"));
+    attrs.push_back(absl::StrJoin(node->node->devices(), "|"));
   }
   if (opts.select.find(kShown[6]) != opts.select.end()) {
-    std::set<string> op_types = node->node->op_types();
-    attrs.push_back(str_util::Join(op_types, "|"));
+    std::set<std::string> op_types = node->node->op_types();
+    attrs.push_back(absl::StrJoin(op_types, "|"));
   }
   if (opts.select.find(kShown[7]) != opts.select.end()) {
     // TODO(xpan): Make op count available in code view?
-    attrs.push_back(strings::Printf("%s N/A in code view", kShown[7]));
+    attrs.push_back(absl::StrFormat("%s N/A in code view", kShown[7]));
   }
   if (opts.select.find(kShown[8]) != opts.select.end()) {
-    attrs.push_back(strings::Printf("%s N/A in code view", kShown[8]));
+    attrs.push_back(absl::StrFormat("%s N/A in code view", kShown[8]));
   }
 
-  return strings::Printf("%s%s (%s)\n", string(indent, ' ').c_str(),
-                         node->name().c_str(),
-                         str_util::Join(attrs, ", ").c_str());
+  return absl::StrFormat("%s%s (%s)\n", std::string(indent, ' '), node->name(),
+                         absl::StrJoin(attrs, ", "));
 }
 }  // namespace tfprof
 }  // namespace tensorflow

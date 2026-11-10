@@ -14,16 +14,12 @@
 # ==============================================================================
 """Visitor restricting traversal to only the public tensorflow API."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import re
 
 from tensorflow.python.util import tf_inspect
 
 
-class PublicAPIVisitor(object):
+class PublicAPIVisitor:
   """Visitor to use with `traverse` to visit exactly the public TF API."""
 
   def __init__(self, visitor):
@@ -40,6 +36,22 @@ class PublicAPIVisitor(object):
 
     # Modules/classes we want to suppress entirely.
     self._private_map = {
+        'tf': [
+            'compiler',
+            'core',
+            # TODO(scottzhu): See b/227410870 for more details. Currently
+            # dtensor API is exposed under tf.experimental.dtensor, but in the
+            # meantime, we have tensorflow/dtensor directory which will be treat
+            # as a python package. We want to avoid step into the
+            # tensorflow/dtensor directory when visit the API.
+            # When the tf.dtensor becomes the public API, it will actually pick
+            # up from tf.compat.v2.dtensor as priority and hide the
+            # tensorflow/dtensor package.
+            'security',
+            'dtensor',
+            'python',
+            'tsl',  # TODO(tlongeri): Remove after TSL is moved out of TF.
+        ],
         # Some implementations have this internal module that we shouldn't
         # expose.
         'tf.flags': ['cpp_flags'],
@@ -50,8 +62,6 @@ class PublicAPIVisitor(object):
     # Each entry maps a module path to a name to ignore in traversal.
     self._do_not_descend_map = {
         'tf': [
-            'compiler',
-            'core',
             'examples',
             'flags',  # Don't add flags
             # TODO(drpng): This can be removed once sealed off.
@@ -60,7 +70,6 @@ class PublicAPIVisitor(object):
             'pywrap_tensorflow',
             # TODO(drpng): This can be removed once sealed.
             'user_ops',
-            'python',
             'tools',
             'tensorboard',
         ],
@@ -70,8 +79,6 @@ class PublicAPIVisitor(object):
         'tf.app': ['flags'],
         # Imported for compatibility between py2/3.
         'tf.test': ['mock'],
-        # Externalized modules of the Keras API.
-        'tf.keras': ['applications', 'preprocessing']
     }
 
   @property
@@ -106,10 +113,9 @@ class PublicAPIVisitor(object):
     """Return whether a name is private."""
     # TODO(wicke): Find out what names to exclude.
     del obj  # Unused.
-    return ((path in self._private_map and
-             name in self._private_map[path]) or
+    return ((path in self._private_map and name in self._private_map[path]) or
             (name.startswith('_') and not re.match('__.*__$', name) or
-             name in ['__base__', '__class__']))
+             name in ['__base__', '__class__', '__next_in_mro__']))
 
   def _do_not_descend(self, path, name):
     """Safely queries if a specific fully qualified name should be excluded."""

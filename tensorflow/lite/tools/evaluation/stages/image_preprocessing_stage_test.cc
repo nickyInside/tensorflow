@@ -14,10 +14,15 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/tools/evaluation/stages/image_preprocessing_stage.h"
 
-#include <memory>
+#include <cstdint>
+#include <fstream>
+#include <ios>
 #include <string>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "absl/strings/string_view.h"
+#include "tensorflow/lite/c/c_api_types.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_config.pb.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_stages.pb.h"
 
@@ -25,65 +30,68 @@ namespace tflite {
 namespace evaluation {
 namespace {
 
-constexpr char kImagePreprocessingStageName[] = "inception_preprocessing_stage";
-constexpr char kTestImage[] =
+constexpr absl::string_view kImagePreprocessingStageName =
+    "inception_preprocessing_stage";
+constexpr absl::string_view kTestImage =
     "tensorflow/lite/tools/evaluation/stages/testdata/"
     "grace_hopper.jpg";
-constexpr int kImageDim = 224;
 
-EvaluationStageConfig GetImagePreprocessingStageConfig(TfLiteType output_type) {
-  EvaluationStageConfig config;
-  config.set_name(kImagePreprocessingStageName);
-  auto* params =
-      config.mutable_specification()->mutable_image_preprocessing_params();
-  params->set_image_height(kImageDim);
-  params->set_image_width(kImageDim);
-  params->set_output_type(static_cast<int>(output_type));
-  return config;
+MATCHER(HasValidLatencyMetrics, "") {
+  if (arg.num_runs() != 1) {
+    *result_listener << "num_runs is " << arg.num_runs() << " (expected 1)";
+    return false;
+  }
+  const auto& total_latency = arg.process_metrics().total_latency();
+  int64_t last_latency = total_latency.last_us();
+  if (last_latency <= 0 || last_latency >= 1e7) {
+    *result_listener << "last_latency is " << last_latency
+                     << " (expected to be in range (0, 1e7))";
+    return false;
+  }
+  if (total_latency.max_us() != last_latency) {
+    *result_listener << "max_us (" << total_latency.max_us()
+                     << ") != last_latency (" << last_latency << ")";
+    return false;
+  }
+  if (total_latency.min_us() != last_latency) {
+    *result_listener << "min_us (" << total_latency.min_us()
+                     << ") != last_latency (" << last_latency << ")";
+    return false;
+  }
+  if (total_latency.sum_us() != last_latency) {
+    *result_listener << "sum_us (" << total_latency.sum_us()
+                     << ") != last_latency (" << last_latency << ")";
+    return false;
+  }
+  if (total_latency.avg_us() != last_latency) {
+    *result_listener << "avg_us (" << total_latency.avg_us()
+                     << ") != last_latency (" << last_latency << ")";
+    return false;
+  }
+  return true;
 }
 
 TEST(ImagePreprocessingStage, NoParams) {
-  EvaluationStageConfig config =
-      GetImagePreprocessingStageConfig(kTfLiteFloat32);
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  EvaluationStageConfig config = builder.build();
   config.mutable_specification()->clear_image_preprocessing_params();
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
-  EXPECT_EQ(stage.Init(), kTfLiteError);
-}
-
-TEST(ImagePreprocessingStage, NoImageHeight) {
-  EvaluationStageConfig config =
-      GetImagePreprocessingStageConfig(kTfLiteFloat32);
-  config.mutable_specification()
-      ->mutable_image_preprocessing_params()
-      ->clear_image_height();
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
-  EXPECT_EQ(stage.Init(), kTfLiteError);
-}
-
-TEST(ImagePreprocessingStage, NoImageWidth) {
-  EvaluationStageConfig config =
-      GetImagePreprocessingStageConfig(kTfLiteFloat32);
-  config.mutable_specification()
-      ->mutable_image_preprocessing_params()
-      ->clear_image_width();
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
+  ImagePreprocessingStage stage(config);
   EXPECT_EQ(stage.Init(), kTfLiteError);
 }
 
 TEST(ImagePreprocessingStage, InvalidCroppingFraction) {
-  EvaluationStageConfig config =
-      GetImagePreprocessingStageConfig(kTfLiteFloat32);
-  config.mutable_specification()
-      ->mutable_image_preprocessing_params()
-      ->set_cropping_fraction(-0.8);
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  builder.AddCroppingStep(-0.8);
+  ImagePreprocessingStage stage(builder.build());
   EXPECT_EQ(stage.Init(), kTfLiteError);
 }
 
 TEST(ImagePreprocessingStage, ImagePathNotSet) {
-  EvaluationStageConfig config =
-      GetImagePreprocessingStageConfig(kTfLiteFloat32);
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  ImagePreprocessingStage stage(builder.build());
   EXPECT_EQ(stage.Init(), kTfLiteOk);
 
   EXPECT_EQ(stage.Run(), kTfLiteError);
@@ -91,11 +99,14 @@ TEST(ImagePreprocessingStage, ImagePathNotSet) {
 }
 
 TEST(ImagePreprocessingStage, TestImagePreprocessingFloat) {
-  std::string image_path = kTestImage;
+  std::string image_path(kTestImage);
 
-  EvaluationStageConfig config =
-      GetImagePreprocessingStageConfig(kTfLiteFloat32);
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  builder.AddCroppingStep(0.875);
+  builder.AddResizingStep(224, 224, false);
+  builder.AddNormalizationStep(127.5, 1.0 / 127.5);
+  ImagePreprocessingStage stage(builder.build());
   EXPECT_EQ(stage.Init(), kTfLiteOk);
 
   // Pre-run.
@@ -114,29 +125,20 @@ TEST(ImagePreprocessingStage, TestImagePreprocessingFloat) {
   // These values were verified by running entire image classification pipeline
   // & ensuring output is accurate. We test 3 values, one for each of R/G/B
   // channels.
-  EXPECT_FLOAT_EQ(preprocessed_image_ptr[0], -0.882353);
-  EXPECT_FLOAT_EQ(preprocessed_image_ptr[1], -0.89019614);
-  EXPECT_FLOAT_EQ(preprocessed_image_ptr[2], -0.78039223);
-  EXPECT_EQ(metrics.num_runs(), 1);
-  const auto& last_latency =
-      metrics.process_metrics().total_latency().last_us();
-  EXPECT_GT(last_latency, 0);
-  EXPECT_LT(last_latency, 1e7);
-  EXPECT_EQ(metrics.process_metrics().total_latency().max_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().min_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().sum_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().avg_us(), last_latency);
+  EXPECT_FLOAT_EQ(preprocessed_image_ptr[0], -0.74901962);
+  EXPECT_FLOAT_EQ(preprocessed_image_ptr[1], -0.74901962);
+  EXPECT_FLOAT_EQ(preprocessed_image_ptr[2], -0.68627453);
+  EXPECT_THAT(metrics, HasValidLatencyMetrics());
 }
 
 TEST(ImagePreprocessingStage, TestImagePreprocessingFloat_NoCrop) {
-  std::string image_path = kTestImage;
+  std::string image_path(kTestImage);
 
-  EvaluationStageConfig config =
-      GetImagePreprocessingStageConfig(kTfLiteFloat32);
-  config.mutable_specification()
-      ->mutable_image_preprocessing_params()
-      ->set_cropping_fraction(0);
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  builder.AddResizingStep(224, 224, false);
+  builder.AddNormalizationStep(127.5, 1.0 / 127.5);
+  ImagePreprocessingStage stage(builder.build());
   EXPECT_EQ(stage.Init(), kTfLiteOk);
 
   // Pre-run.
@@ -158,22 +160,17 @@ TEST(ImagePreprocessingStage, TestImagePreprocessingFloat_NoCrop) {
   EXPECT_FLOAT_EQ(preprocessed_image_ptr[0], -0.83529419);
   EXPECT_FLOAT_EQ(preprocessed_image_ptr[1], -0.7960785);
   EXPECT_FLOAT_EQ(preprocessed_image_ptr[2], -0.35686275);
-  EXPECT_EQ(metrics.num_runs(), 1);
-  const auto& last_latency =
-      metrics.process_metrics().total_latency().last_us();
-  EXPECT_GT(last_latency, 0);
-  EXPECT_LT(last_latency, 1e7);
-  EXPECT_EQ(metrics.process_metrics().total_latency().max_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().min_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().sum_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().avg_us(), last_latency);
+  EXPECT_THAT(metrics, HasValidLatencyMetrics());
 }
 
 TEST(ImagePreprocessingStage, TestImagePreprocessingUInt8Quantized) {
-  std::string image_path = kTestImage;
+  std::string image_path(kTestImage);
 
-  EvaluationStageConfig config = GetImagePreprocessingStageConfig(kTfLiteUInt8);
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteUInt8);
+  builder.AddCroppingStep(0.875);
+  builder.AddResizingStep(224, 224, false);
+  ImagePreprocessingStage stage(builder.build());
   EXPECT_EQ(stage.Init(), kTfLiteOk);
 
   // Pre-run.
@@ -192,25 +189,21 @@ TEST(ImagePreprocessingStage, TestImagePreprocessingUInt8Quantized) {
   // These values were verified by running entire image classification pipeline
   // & ensuring output is accurate. We test 3 values, one for each of R/G/B
   // channels.
-  EXPECT_EQ(preprocessed_image_ptr[0], 15);
-  EXPECT_EQ(preprocessed_image_ptr[1], 14);
-  EXPECT_EQ(preprocessed_image_ptr[2], 28);
-  EXPECT_EQ(metrics.num_runs(), 1);
-  const auto& last_latency =
-      metrics.process_metrics().total_latency().last_us();
-  EXPECT_GT(last_latency, 0);
-  EXPECT_LT(last_latency, 1e7);
-  EXPECT_EQ(metrics.process_metrics().total_latency().max_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().min_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().sum_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().avg_us(), last_latency);
+  EXPECT_EQ(preprocessed_image_ptr[0], 32);
+  EXPECT_EQ(preprocessed_image_ptr[1], 32);
+  EXPECT_EQ(preprocessed_image_ptr[2], 40);
+  EXPECT_THAT(metrics, HasValidLatencyMetrics());
 }
 
 TEST(ImagePreprocessingStage, TestImagePreprocessingInt8Quantized) {
-  std::string image_path = kTestImage;
+  std::string image_path(kTestImage);
 
-  EvaluationStageConfig config = GetImagePreprocessingStageConfig(kTfLiteInt8);
-  ImagePreprocessingStage stage = ImagePreprocessingStage(config);
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteInt8);
+  builder.AddCroppingStep(0.875);
+  builder.AddResizingStep(224, 224, false);
+  builder.AddNormalizationStep(128.0, 1.0);
+  ImagePreprocessingStage stage(builder.build());
   EXPECT_EQ(stage.Init(), kTfLiteOk);
 
   // Pre-run.
@@ -229,18 +222,157 @@ TEST(ImagePreprocessingStage, TestImagePreprocessingInt8Quantized) {
   // These values were verified by running entire image classification pipeline
   // & ensuring output is accurate. We test 3 values, one for each of R/G/B
   // channels.
-  EXPECT_EQ(preprocessed_image_ptr[0], -113);
-  EXPECT_EQ(preprocessed_image_ptr[1], -114);
-  EXPECT_EQ(preprocessed_image_ptr[2], -100);
-  EXPECT_EQ(metrics.num_runs(), 1);
-  const auto& last_latency =
-      metrics.process_metrics().total_latency().last_us();
-  EXPECT_GT(last_latency, 0);
-  EXPECT_LT(last_latency, 1e7);
-  EXPECT_EQ(metrics.process_metrics().total_latency().max_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().min_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().sum_us(), last_latency);
-  EXPECT_EQ(metrics.process_metrics().total_latency().avg_us(), last_latency);
+  EXPECT_EQ(preprocessed_image_ptr[0], -96);
+  EXPECT_EQ(preprocessed_image_ptr[1], -96);
+  EXPECT_EQ(preprocessed_image_ptr[2], -88);
+  EXPECT_THAT(metrics, HasValidLatencyMetrics());
+}
+
+TEST(ImagePreprocessingStage, TestImagePreprocessingPadding) {
+  std::string image_path(kTestImage);
+
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteInt8);
+  builder.AddCroppingStep(0.875);
+  builder.AddResizingStep(224, 224, false);
+  builder.AddPaddingStep(225, 225, 0);
+  builder.AddNormalizationStep(128.0, 1.0);
+  ImagePreprocessingStage stage(builder.build());
+  EXPECT_EQ(stage.Init(), kTfLiteOk);
+
+  // Pre-run.
+  EXPECT_EQ(stage.GetPreprocessedImageData(), nullptr);
+
+  stage.SetImagePath(&image_path);
+  EXPECT_EQ(stage.Run(), kTfLiteOk);
+  EvaluationStageMetrics metrics = stage.LatestMetrics();
+
+  int8_t* preprocessed_image_ptr =
+      static_cast<int8_t*>(stage.GetPreprocessedImageData());
+  EXPECT_NE(preprocessed_image_ptr, nullptr);
+  // We check raw values computed from central-cropping & bilinear interpolation
+  // on the test image. The interpolation math is similar to Unit Square formula
+  // here: https://en.wikipedia.org/wiki/Bilinear_interpolation#Unit_square
+  // These values were verified by running entire image classification pipeline
+  // & ensuring output is accurate. We test 3 values, one for each of R/G/B
+  // channels.
+  EXPECT_EQ(preprocessed_image_ptr[0], -128);
+  EXPECT_EQ(preprocessed_image_ptr[224], -128);
+  EXPECT_EQ(preprocessed_image_ptr[225 * 3], -128);
+  EXPECT_EQ(preprocessed_image_ptr[225 * 3 + 3], -96);
+  EXPECT_EQ(preprocessed_image_ptr[225 * 3 + 4], -96);
+  EXPECT_EQ(preprocessed_image_ptr[225 * 3 + 5], -88);
+  EXPECT_THAT(metrics, HasValidLatencyMetrics());
+}
+
+TEST(ImagePreprocessingStage, TestImagePreprocessingSubtractMean) {
+  std::string image_path(kTestImage);
+
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  builder.AddCroppingStep(0.875);
+  builder.AddResizingStep(224, 224, false);
+  builder.AddPerChannelNormalizationStep(110.0, 120.0, 123.0, 1.0);
+  ImagePreprocessingStage stage(builder.build());
+  EXPECT_EQ(stage.Init(), kTfLiteOk);
+
+  // Pre-run.
+  EXPECT_EQ(stage.GetPreprocessedImageData(), nullptr);
+
+  stage.SetImagePath(&image_path);
+  EXPECT_EQ(stage.Run(), kTfLiteOk);
+  EvaluationStageMetrics metrics = stage.LatestMetrics();
+
+  float* preprocessed_image_ptr =
+      static_cast<float*>(stage.GetPreprocessedImageData());
+  EXPECT_NE(preprocessed_image_ptr, nullptr);
+  // We check raw values computed from central-cropping & bilinear interpolation
+  // on the test image. The interpolation math is similar to Unit Square formula
+  // here: https://en.wikipedia.org/wiki/Bilinear_interpolation#Unit_square
+  // These values were verified by running entire image classification pipeline
+  // & ensuring output is accurate. We test 3 values, one for each of R/G/B
+  // channels.
+  EXPECT_EQ(preprocessed_image_ptr[0], -78);
+  EXPECT_EQ(preprocessed_image_ptr[1], -88);
+  EXPECT_EQ(preprocessed_image_ptr[2], -83);
+  EXPECT_THAT(metrics, HasValidLatencyMetrics());
+}
+
+TEST(ImagePreprocessingStage, TestCropTargetLargerThanImage) {
+  std::string image_path(kTestImage);
+
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  // A crop target larger than the image would produce negative start offsets
+  // and read out of bounds. It must be rejected at run time.
+  builder.AddCroppingStep(/*width=*/100000U, /*height=*/100000U);
+  builder.AddNormalizationStep(127.5, 1.0 / 127.5);
+  ImagePreprocessingStage stage(builder.build());
+  EXPECT_EQ(stage.Init(), kTfLiteOk);
+  stage.SetImagePath(&image_path);
+  EXPECT_EQ(stage.Run(), kTfLiteError);
+}
+
+TEST(ImagePreprocessingStage, TestPaddingTargetSmallerThanImage) {
+  std::string image_path(kTestImage);
+
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  // A padding target smaller than the image would produce negative padding
+  // counts and write out of bounds. It must be rejected at run time.
+  builder.AddPaddingStep(/*width=*/1, /*height=*/1, 0);
+  builder.AddNormalizationStep(127.5, 1.0 / 127.5);
+  ImagePreprocessingStage stage(builder.build());
+  EXPECT_EQ(stage.Init(), kTfLiteOk);
+  stage.SetImagePath(&image_path);
+  EXPECT_EQ(stage.Run(), kTfLiteError);
+}
+
+TEST(ImagePreprocessingStage, TestPaddingTargetTooLarge) {
+  std::string image_path(kTestImage);
+
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  // A padding target large enough to overflow the output buffer size
+  // computation must be rejected at run time.
+  builder.AddPaddingStep(/*width=*/100000, /*height=*/100000, 0);
+  builder.AddNormalizationStep(127.5, 1.0 / 127.5);
+  ImagePreprocessingStage stage(builder.build());
+  EXPECT_EQ(stage.Init(), kTfLiteOk);
+  stage.SetImagePath(&image_path);
+  EXPECT_EQ(stage.Run(), kTfLiteError);
+}
+
+TEST(ImagePreprocessingStage, TestInvalidRawImageSize) {
+  std::string image_path = testing::TempDir() + "/invalid.rgb8";
+  std::ofstream stream(image_path, std::ios::out | std::ios::binary);
+  stream.write("1234", 4);
+  stream.close();
+
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  builder.AddNormalizationStep(127.5, 1.0 / 127.5);
+  ImagePreprocessingStage stage(builder.build());
+  EXPECT_EQ(stage.Init(), kTfLiteOk);
+  stage.SetImagePath(&image_path);
+  EXPECT_EQ(stage.Run(), kTfLiteError);
+}
+
+TEST(ImagePreprocessingStage, TestRawImageSizeMismatchWithCroppingTarget) {
+  std::string image_path = testing::TempDir() + "/mismatch.rgb8";
+  std::ofstream stream(image_path, std::ios::out | std::ios::binary);
+  // 6 bytes = 2 pixels (if 3 channels)
+  stream.write("123456", 6);
+  stream.close();
+
+  ImagePreprocessingConfigBuilder builder(
+      std::string(kImagePreprocessingStageName), kTfLiteFloat32);
+  // Target size 2x2 = 4 pixels = 12 bytes.
+  builder.AddCroppingStep(/*width=*/2U, /*height=*/2U);
+  ImagePreprocessingStage stage(builder.build());
+  EXPECT_EQ(stage.Init(), kTfLiteOk);
+  stage.SetImagePath(&image_path);
+  EXPECT_EQ(stage.Run(), kTfLiteError);
 }
 
 }  // namespace

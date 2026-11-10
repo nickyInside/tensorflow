@@ -21,13 +21,13 @@ limitations under the License.
 #include <string>
 #include <vector>
 
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/notification.h"
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/thread_annotations.h"
-
 namespace tensorflow {
 
 // RecordYielder produces value records from a set of tfrecord files
@@ -38,7 +38,7 @@ namespace tensorflow {
 //   2) each record is yielded only once within every epoch;
 //   3) the order in which records are yielded is highly randomized.
 //   4) the peak memory usage is roughly avg record size *
-//      (opts.bufsize + opts.parellelism * 16).
+//      (opts.bufsize + opts.parallelism * 16).
 //
 // Usage example:
 //   RecordYielder::Options opts;
@@ -59,11 +59,11 @@ class RecordYielder {
  public:
   struct Options {
     // Glob pattern for tfrecords.
-    string file_pattern;
+    std::string file_pattern;
 
     // Random seed. It determines how data files are shuffled and how
     // records are shuffled.
-    int64 seed = 0;
+    int64_t seed = 0;
 
     // Each epoch, all files are first shuffled according to the
     // random seed and the epoch number, and then all files are
@@ -73,13 +73,13 @@ class RecordYielder {
     float file_shuffle_shift_ratio = 0;
 
     // Randomization buffer keeps these many records.
-    uint64 bufsize = 1;
+    uint64_t bufsize = 1;
 
     // Uses these many concurrent tfrecord iterators to iterate through
     // tfrecords.
-    int32 parallelism = 1;
+    int32_t parallelism = 1;
 
-    string compression_type;
+    std::string compression_type;
   };
 
   explicit RecordYielder(OpKernelConstruction* context,
@@ -90,10 +90,10 @@ class RecordYielder {
   RecordYielder& operator=(const RecordYielder&) = delete;
 
   // Yields one 'value'.
-  Status YieldOne(string* value);
+  absl::Status YieldOne(tstring* value);
 
   // Returns the current epoch number.
-  int64 current_epoch() const { return epoch_; }
+  int64_t current_epoch() const { return epoch_; }
 
  private:
   typedef RecordYielder ME;
@@ -104,55 +104,55 @@ class RecordYielder {
   thread::ThreadPool* thread_;
 
   // Epoch number.
-  std::atomic<int64> epoch_;
+  std::atomic<int64_t> epoch_;
 
   mutex mu_;
 
   // Turned to true when this is deleted.
-  bool stop_ GUARDED_BY(mu_) = false;
-  Status status_ GUARDED_BY(mu_);
+  bool stop_ TF_GUARDED_BY(mu_) = false;
+  absl::Status status_ TF_GUARDED_BY(mu_);
 
   // PRG used for randomization.
-  std::mt19937_64 rnd_ GUARDED_BY(mu_);
+  std::mt19937_64 rnd_ TF_GUARDED_BY(mu_);
 
   // Randomization buffer.
-  std::vector<string> buf_ GUARDED_BY(mu_);
+  std::vector<std::string> buf_ TF_GUARDED_BY(mu_);
 
   // True iff we are draining an epoch.
   bool epoch_end_ = false;
 
-  int64 num_records_added_in_epoch_ = 0;
-  int64 num_records_yielded_in_epoch_ = 0;
+  int64_t num_records_added_in_epoch_ = 0;
+  int64_t num_records_yielded_in_epoch_ = 0;
 
   // Trigger when the main loop has exited.
-  Notification main_loop_done_;
+  absl::Notification main_loop_done_;
 
   // condition_variables.
   condition_variable buf_empty_;
-  bool BufEmpty() const SHARED_LOCKS_REQUIRED(mu_) {
+  bool BufEmpty() const TF_SHARED_LOCKS_REQUIRED(mu_) {
     return stop_ || buf_.empty();
   }
 
   condition_variable buf_not_full_;
-  bool BufNotFull() const SHARED_LOCKS_REQUIRED(mu_) {
+  bool BufNotFull() const TF_SHARED_LOCKS_REQUIRED(mu_) {
     return stop_ || buf_.size() < opts_.bufsize;
   }
 
   condition_variable buf_enough_;
-  bool BufEnough() const SHARED_LOCKS_REQUIRED(mu_) {
+  bool BufEnough() const TF_SHARED_LOCKS_REQUIRED(mu_) {
     // NOTE: Unless we are finishing an epoch, we want to make sure
     // the buf_ contains enough randomized elements before yielding
     // any.
     return stop_ || !status_.ok() || (epoch_end_ && !buf_.empty()) ||
            (!epoch_end_ &&
-            buf_.size() >= std::max<uint64>(1, opts_.bufsize / 2));
+            buf_.size() >= std::max<uint64_t>(1, opts_.bufsize / 2));
   }
 
   void MainLoop();
   struct Shard;
   void ShardLoop(Shard* shard);
-  bool ShouldFinish(const Status& s);
-  bool Add(std::vector<string>* values);
+  bool ShouldFinish(const absl::Status& s);
+  bool Add(std::vector<std::string>* values);
 };
 
 }  // namespace tensorflow

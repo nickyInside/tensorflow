@@ -13,16 +13,12 @@
 # limitations under the License.
 # ==============================================================================
 """Gradients for CuudnnRNN operators."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import gen_cudnn_rnn_ops
 
 
 @ops.RegisterGradient("CudnnRNN")
-def _cudnn_rnn_backward(op, *grads):
+def _cudnn_rnn_backward(op: ops.Operation, *grads):
   """Gradients for the CudnnRNN op."""
   if not op.get_attr("is_training"):
     raise ValueError(
@@ -48,7 +44,7 @@ def _cudnn_rnn_backward(op, *grads):
 
 
 @ops.RegisterGradient("CudnnRNNV2")
-def _cudnn_rnn_backward_v2(op, *grad):
+def _cudnn_rnn_backward_v2(op: ops.Operation, *grad):
   if not op.get_attr("is_training"):
     raise ValueError(
         "To use CudnnRNNV2 in gradients, is_training must be set to True.")
@@ -74,12 +70,11 @@ def _cudnn_rnn_backward_v2(op, *grad):
 
 
 @ops.RegisterGradient("CudnnRNNV3")
-def _cudnn_rnn_backwardv3(op, *grads):
+def _cudnn_rnn_backwardv3(op: ops.Operation, *grads):
   """Gradients for the CudnnRNNV3 op."""
   if not op.get_attr("is_training"):
     raise ValueError(
-        "To use CudnnRNNV3 in gradients, is_training must be set to"
-        " True.")
+        "To use CudnnRNNV3 in gradients, is_training must be set to True.")
   return gen_cudnn_rnn_ops.cudnn_rnn_backprop_v3(
       input=op.inputs[0],
       input_h=op.inputs[1],
@@ -98,6 +93,7 @@ def _cudnn_rnn_backwardv3(op, *grads):
       seed=op.get_attr("seed"),
       seed2=op.get_attr("seed2"),
       time_major=op.get_attr("time_major"),
+      num_proj=op.get_attr("num_proj"),
       rnn_mode=op.get_attr("rnn_mode"),
       input_mode=op.get_attr("input_mode"),
       direction=op.get_attr("direction")) + (None,)

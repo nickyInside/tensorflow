@@ -15,14 +15,24 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/gl/compiler/object_accessor.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
-#include "absl/types/variant.h"
+#include "absl/strings/string_view.h"
+#include "tensorflow/lite/delegates/gpu/common/access_type.h"
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
+#include "tensorflow/lite/delegates/gpu/gl/compiler/preprocessor.h"
+#include "tensorflow/lite/delegates/gpu/gl/compiler/variable_accessor.h"
+#include "tensorflow/lite/delegates/gpu/gl/object.h"
 
 namespace tflite {
 namespace gpu {
@@ -63,14 +73,19 @@ void MaybeConvertFromHalf(DataType data_type, absl::string_view value,
 }
 
 struct ReadFromTextureGenerator {
-  RewriteStatus operator()(uint32_t) const {
+  RewriteStatus operator()(size_t) const {
     if (element.indices.size() != 1) {
       result->append("WRONG_NUMBER_OF_INDICES");
       return RewriteStatus::ERROR;
     }
     // 1D textures are emulated as 2D textures
-    absl::StrAppend(result, "imageLoad(", element.object_name, ", ivec2(",
-                    element.indices[0], ", 0))");
+    if (sampler_textures) {
+      absl::StrAppend(result, "texelFetch(", element.object_name, ", ivec2(",
+                      element.indices[0], ", 0), 0)");
+    } else {
+      absl::StrAppend(result, "imageLoad(", element.object_name, ", ivec2(",
+                      element.indices[0], ", 0))");
+    }
     return RewriteStatus::SUCCESS;
   }
 
@@ -80,18 +95,25 @@ struct ReadFromTextureGenerator {
       result->append("WRONG_NUMBER_OF_INDICES");
       return RewriteStatus::ERROR;
     }
-    absl::StrAppend(result, "imageLoad(", element.object_name, ", ivec",
-                    Shape::size(), "(", absl::StrJoin(element.indices, ", "),
-                    "))");
+    if (sampler_textures) {
+      absl::StrAppend(result, "texelFetch(", element.object_name, ", ivec",
+                      Shape::size(), "(", absl::StrJoin(element.indices, ", "),
+                      "), 0)");
+    } else {
+      absl::StrAppend(result, "imageLoad(", element.object_name, ", ivec",
+                      Shape::size(), "(", absl::StrJoin(element.indices, ", "),
+                      "))");
+    }
     return RewriteStatus::SUCCESS;
   }
 
   const object_accessor_internal::IndexedElement& element;
+  const bool sampler_textures;
   std::string* result;
 };
 
 struct ReadFromBufferGenerator {
-  RewriteStatus operator()(uint32_t) const {
+  RewriteStatus operator()(size_t) const {
     if (element.indices.size() != 1) {
       result->append("WRONG_NUMBER_OF_INDICES");
       return RewriteStatus::ERROR;
@@ -152,22 +174,23 @@ struct ReadFromBufferGenerator {
 RewriteStatus GenerateReadAccessor(
     const Object& object,
     const object_accessor_internal::IndexedElement& element,
-    std::string* result, bool* requires_sizes) {
+    bool sampler_textures, std::string* result, bool* requires_sizes) {
   switch (object.object_type) {
     case ObjectType::BUFFER:
-      return absl::visit(ReadFromBufferGenerator{object.data_type, element,
-                                                 result, requires_sizes},
-                         object.size);
+      return std::visit(ReadFromBufferGenerator{object.data_type, element,
+                                                result, requires_sizes},
+                        object.size);
     case ObjectType::TEXTURE:
-      return absl::visit(ReadFromTextureGenerator{element, result},
-                         object.size);
+      return std::visit(
+          ReadFromTextureGenerator{element, sampler_textures, result},
+          object.size);
     case ObjectType::UNKNOWN:
       return RewriteStatus::ERROR;
   }
 }
 
 struct WriteToBufferGenerator {
-  RewriteStatus operator()(uint32_t) const {
+  RewriteStatus operator()(size_t) const {
     if (element.indices.size() != 1) {
       result->append("WRONG_NUMBER_OF_INDICES");
       return RewriteStatus::ERROR;
@@ -223,7 +246,7 @@ struct WriteToBufferGenerator {
 };
 
 struct WriteToTextureGenerator {
-  RewriteStatus operator()(uint32_t) const {
+  RewriteStatus operator()(size_t) const {
     if (element.indices.size() != 1) {
       result->append("WRONG_NUMBER_OF_INDICES");
       return RewriteStatus::ERROR;
@@ -258,12 +281,12 @@ RewriteStatus GenerateWriteAccessor(
     absl::string_view value, std::string* result, bool* requires_sizes) {
   switch (object.object_type) {
     case ObjectType::BUFFER:
-      return absl::visit(WriteToBufferGenerator{object.data_type, element,
-                                                value, result, requires_sizes},
-                         object.size);
+      return std::visit(WriteToBufferGenerator{object.data_type, element, value,
+                                               result, requires_sizes},
+                        object.size);
     case ObjectType::TEXTURE:
-      return absl::visit(WriteToTextureGenerator{element, value, result},
-                         object.size);
+      return std::visit(WriteToTextureGenerator{element, value, result},
+                        object.size);
     case ObjectType::UNKNOWN:
       return RewriteStatus::ERROR;
   }
@@ -287,21 +310,29 @@ std::string ToBufferType(DataType data_type) {
     case DataType::UINT16:
     case DataType::UINT32:
       return "uvec4";
+    case DataType::UINT64:
+      return "u64vec4_not_available_in_glsl";
     case DataType::INT8:
     case DataType::INT16:
     case DataType::INT32:
       return "ivec4";
+    case DataType::INT64:
+      return "i64vec4_not_available_in_glsl";
     case DataType::FLOAT16:
       return "uvec2";
+    case DataType::BOOL:
     case DataType::FLOAT32:
       return "vec4";
-    default:
-      return "unknown";
+    case DataType::FLOAT64:
+      return "dvec4";
+    case DataType::UNKNOWN:
+      return "unknown_buffer_type";
+      // Do NOT add `default:'; we want build failure for new enum values.
   }
 }
 
 struct TextureImageTypeGetter {
-  std::string operator()(uint32_t) const {
+  std::string operator()(size_t) const {
     // 1D textures are emulated as 2D textures
     return (*this)(uint2());
   }
@@ -318,7 +349,7 @@ struct TextureImageTypeGetter {
       case DataType::FLOAT32:
         return "image2D";
       default:
-        return "unknown";
+        return "unknown_image_2d";
     }
   }
 
@@ -334,15 +365,60 @@ struct TextureImageTypeGetter {
       case DataType::FLOAT32:
         return "image2DArray";
       default:
-        return "unknown";
+        return "unknown_image_2d_array";
     }
   }
 
   DataType type;
 };
 
-std::string ToImageType(const Object& object) {
-  return absl::visit(TextureImageTypeGetter{object.data_type}, object.size);
+struct TextureSamplerTypeGetter {
+  std::string operator()(size_t) const {
+    // 1D textures are emulated as 2D textures
+    return (*this)(uint2());
+  }
+
+  std::string operator()(const uint2&) const {
+    switch (type) {
+      case DataType::FLOAT16:
+      case DataType::FLOAT32:
+        return "sampler2D";
+      case DataType::INT32:
+      case DataType::INT16:
+        return "isampler2D";
+      case DataType::UINT32:
+      case DataType::UINT16:
+        return "usampler2D";
+      default:
+        return "unknown_sampler2D";
+    }
+  }
+
+  std::string operator()(const uint3&) const {
+    switch (type) {
+      case DataType::FLOAT16:
+      case DataType::FLOAT32:
+        return "sampler2DArray";
+      case DataType::INT32:
+      case DataType::INT16:
+        return "isampler2DArray";
+      case DataType::UINT32:
+      case DataType::UINT16:
+        return "usampler2DArray";
+      default:
+        return "unknown_sampler2DArray";
+    }
+  }
+
+  DataType type;
+};
+
+std::string ToImageType(const Object& object, bool sampler_textures) {
+  if (sampler_textures && (object.access == AccessType::READ)) {
+    return std::visit(TextureSamplerTypeGetter{object.data_type}, object.size);
+  } else {
+    return std::visit(TextureImageTypeGetter{object.data_type}, object.size);
+  }
 }
 
 std::string ToImageLayoutQualifier(DataType type) {
@@ -360,7 +436,7 @@ std::string ToImageLayoutQualifier(DataType type) {
     case DataType::FLOAT32:
       return "rgba32f";
     default:
-      return "unknown";
+      return "unknown_image_layout";
   }
 }
 
@@ -375,29 +451,29 @@ std::string ToImagePrecision(DataType type) {
     case DataType::FLOAT32:
       return "highp";
     default:
-      return "unknown";
+      return "unknown_image_precision";
   }
 }
 
 struct SizeParametersAdder {
-  void operator()(uint32_t) const {}
+  void operator()(size_t) const {}
 
   void operator()(const uint2& size) const {
-    parameters->AddParameter(
+    variable_accessor->AddUniformParameter(
         {absl::StrCat(object_name, "_w"), static_cast<int32_t>(size.x)});
   }
 
   // p1 and p2 are padding. For some reason buffer does not map correctly
   // without it.
   void operator()(const uint3& size) const {
-    parameters->AddParameter(
+    variable_accessor->AddUniformParameter(
         {absl::StrCat(object_name, "_w"), static_cast<int32_t>(size.x)});
-    parameters->AddParameter(
+    variable_accessor->AddUniformParameter(
         {absl::StrCat(object_name, "_h"), static_cast<int32_t>(size.y)});
   }
 
   absl::string_view object_name;
-  ParameterAccessor* parameters;
+  VariableAccessor* variable_accessor;
 };
 
 // Adds necessary parameters to parameter accessor that represent object size
@@ -406,12 +482,13 @@ struct SizeParametersAdder {
 //  - 2D : 'int object_name_w'
 //  - 3D : 'int object_name_w' + 'int object_name_h'
 void AddSizeParameters(absl::string_view object_name, const Object& object,
-                       ParameterAccessor* parameters) {
-  absl::visit(SizeParametersAdder{object_name, parameters}, object.size);
+                       VariableAccessor* parameters) {
+  std::visit(SizeParametersAdder{object_name, parameters}, object.size);
 }
 
 void GenerateObjectDeclaration(absl::string_view name, const Object& object,
-                               std::string* declaration, bool is_mali) {
+                               std::string* declaration, bool is_mali,
+                               bool sampler_textures) {
   switch (object.object_type) {
     case ObjectType::BUFFER:
       // readonly modifier used to fix shader compilation for Mali on Android 8,
@@ -422,12 +499,19 @@ void GenerateObjectDeclaration(absl::string_view name, const Object& object,
                       " data[]; } ", name, ";\n");
       break;
     case ObjectType::TEXTURE:
-      absl::StrAppend(declaration, "layout(",
-                      ToImageLayoutQualifier(object.data_type),
-                      ", binding = ", object.binding, ")",
-                      ToAccessModifier(object.access, true), " uniform ",
-                      ToImagePrecision(object.data_type), " ",
-                      ToImageType(object), " ", name, ";\n");
+      if (sampler_textures && (object.access == AccessType::READ)) {
+        absl::StrAppend(declaration, "layout(binding = ", object.binding,
+                        ") uniform ", ToImagePrecision(object.data_type), " ",
+                        ToImageType(object, sampler_textures), " ", name,
+                        ";\n");
+      } else {
+        absl::StrAppend(
+            declaration, "layout(", ToImageLayoutQualifier(object.data_type),
+            ", binding = ", object.binding, ")",
+            ToAccessModifier(object.access, true), " uniform ",
+            ToImagePrecision(object.data_type), " ",
+            ToImageType(object, sampler_textures), " ", name, ";\n");
+      }
       break;
     case ObjectType::UNKNOWN:
       // do nothing.
@@ -464,10 +548,10 @@ RewriteStatus ObjectAccessor::RewriteRead(absl::string_view location,
     return RewriteStatus::NOT_RECOGNIZED;
   }
   bool requires_sizes = false;
-  auto status =
-      GenerateReadAccessor(it->second, element, output, &requires_sizes);
+  auto status = GenerateReadAccessor(it->second, element, sampler_textures_,
+                                     output, &requires_sizes);
   if (requires_sizes) {
-    AddSizeParameters(it->first, it->second, parameter_accessor_);
+    AddSizeParameters(it->first, it->second, variable_accessor_);
   }
   return status;
 }
@@ -489,7 +573,7 @@ RewriteStatus ObjectAccessor::RewriteWrite(absl::string_view location,
   auto status = GenerateWriteAccessor(it->second, element, value, output,
                                       &requires_sizes);
   if (requires_sizes) {
-    AddSizeParameters(it->first, it->second, parameter_accessor_);
+    AddSizeParameters(it->first, it->second, variable_accessor_);
   }
   return status;
 }
@@ -504,30 +588,23 @@ bool ObjectAccessor::AddObject(const std::string& name, Object object) {
 std::string ObjectAccessor::GetObjectDeclarations() const {
   std::string declarations;
   for (auto& o : name_to_object_) {
-    GenerateObjectDeclaration(o.first, o.second, &declarations, is_mali_);
+    GenerateObjectDeclaration(o.first, o.second, &declarations, is_mali_,
+                              sampler_textures_);
   }
   return declarations;
 }
 
 std::string ObjectAccessor::GetFunctionsDeclarations() const {
-  std::string modifier = "";
-  // Mali compiler does not want to compile a function without readonly
-  // modifier. See b/111601761 for the context.
-  if (is_mali_) {
-    modifier = "readonly ";
-  }
-  // If there is a single object SSBO with F16, then we need to output functions
+  // If there is a single object SSBO with F16, then we need to output macros
   // as well.
   for (const auto& o : name_to_object_) {
     if (o.second.data_type == DataType::FLOAT16 &&
         o.second.object_type == ObjectType::BUFFER) {
-      return absl::StrCat("vec4 Vec4FromHalf(in ", modifier,
-                          "uvec2 v) { return vec4(unpackHalf2x16(v.x), "
-                          "unpackHalf2x16(v.y)); }\n"
-                          "uvec2 Vec4ToHalf(in ",
-                          modifier,
-                          "vec4 v) { return uvec2(packHalf2x16(v.xy), "
-                          "packHalf2x16(v.zw)); }\n");
+      return absl::StrCat(
+          "#define Vec4FromHalf(v) vec4(unpackHalf2x16(v.x), "
+          "unpackHalf2x16(v.y))\n",
+          "#define Vec4ToHalf(v) uvec2(packHalf2x16(v.xy), "
+          "packHalf2x16(v.zw))");
     }
   }
   return "";
@@ -535,6 +612,7 @@ std::string ObjectAccessor::GetFunctionsDeclarations() const {
 
 std::vector<Object> ObjectAccessor::GetObjects() const {
   std::vector<Object> objects;
+  objects.reserve(name_to_object_.size());
   for (auto& o : name_to_object_) {
     objects.push_back(o.second);
   }

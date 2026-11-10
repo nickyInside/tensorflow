@@ -26,19 +26,19 @@ class ShuffleAndRepeatFusion : public TFDataOptimizerBase {
   ShuffleAndRepeatFusion() = default;
   ~ShuffleAndRepeatFusion() override = default;
 
-  string name() const override { return "shuffle_and_repeat_fusion"; };
+  std::string name() const override { return "shuffle_and_repeat_fusion"; };
 
-  Status Init(
+  bool UsesFunctionLibrary() const override { return false; }
+
+  absl::Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override {
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status OptimizeAndCollectStats(Cluster* cluster, const GrapplerItem& item,
-                                 GraphDef* output,
-                                 OptimizationStats* stats) override;
-
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimize_output, double result) override;
+  absl::Status OptimizeAndCollectStats(Cluster* cluster,
+                                       const GrapplerItem& item,
+                                       GraphDef* output,
+                                       OptimizationStats* stats) override;
 };
 
 }  // namespace grappler

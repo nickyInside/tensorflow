@@ -22,6 +22,7 @@ limitations under the License.
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/ops_testutil.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/test.h"
 
@@ -35,7 +36,7 @@ class TestKernel : public OpKernel {
     Tensor* out_tensor = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output("ndef", TensorShape({}),
                                                      &out_tensor));
-    out_tensor->scalar<string>()() = SummarizeNodeDef(def());
+    out_tensor->scalar<tstring>()() = SummarizeNodeDef(def());
   }
 };
 
@@ -87,23 +88,24 @@ class OpCompatibilityTest : public OpsTestBase {
     TF_ASSERT_OK(RunOpKernel());
   }
 
-  string Result() { return GetOutput(0)->scalar<string>()(); }
+  std::string Result() { return GetOutput(0)->scalar<tstring>()(); }
 
   void ExpectIncompatible(const OpDef& old_op_def, const OpDef& new_op_def,
-                          const string& error) {
+                          const std::string& error) {
     // Test OpDefCompatible gives the same answer without the node_def.
-    Status status = OpDefCompatible(old_op_def, new_op_def);
+    absl::Status status = OpDefCompatible(old_op_def, new_op_def);
     if (status.ok()) {
       ADD_FAILURE() << SummarizeOpDef(old_op_def) << " vs. "
                     << SummarizeOpDef(new_op_def);
     } else {
-      EXPECT_TRUE(str_util::StrContains(status.error_message(), error))
+      EXPECT_TRUE(absl::StrContains(status.message(), error))
           << status << " does not contain " << error;
     }
   }
 
-  void ExpectInvalid(const OpDef& old_op_def, const string& validation_error,
-                     const string& compatibility_error) {
+  void ExpectInvalid(const OpDef& old_op_def,
+                     const std::string& validation_error,
+                     const std::string& compatibility_error) {
     // Record the original signature before we change *node_def().
     DataTypeVector old_in_types, old_out_types;
     TF_ASSERT_OK(InOutTypesForNode(*node_def(), old_op_def, &old_in_types,
@@ -114,12 +116,11 @@ class OpCompatibilityTest : public OpsTestBase {
     AddDefaultsToNodeDef(*new_op_def, node_def());
 
     // Validate that it does not pass validation.
-    Status status = ValidateNodeDef(*node_def(), *new_op_def);
+    absl::Status status = ValidateNodeDef(*node_def(), *new_op_def);
     if (status.ok()) {
       ADD_FAILURE() << SummarizeNodeDef(*node_def());
     } else {
-      EXPECT_TRUE(
-          str_util::StrContains(status.error_message(), validation_error))
+      EXPECT_TRUE(absl::StrContains(status.message(), validation_error))
           << status << " does not contain " << validation_error;
     }
 
@@ -127,7 +128,7 @@ class OpCompatibilityTest : public OpsTestBase {
   }
 
   void ExpectTypeMismatch(const OpDef& old_op_def,
-                          const string& compatibility_error) {
+                          const std::string& compatibility_error) {
     // Record the original signature before we change *node_def().
     DataTypeVector old_in_types, old_out_types;
     TF_ASSERT_OK(InOutTypesForNode(*node_def(), old_op_def, &old_in_types,
@@ -153,7 +154,7 @@ class OpCompatibilityTest : public OpsTestBase {
   }
 
   void ExpectRenameFailure(const OpDef& old_op_def,
-                           const string& compatibility_error) {
+                           const std::string& compatibility_error) {
     // This should be all that is needed to get compatibility.
     const OpDef* new_op_def = RegisteredOpDef();
     AddDefaultsToNodeDef(*new_op_def, node_def());
@@ -166,7 +167,7 @@ class OpCompatibilityTest : public OpsTestBase {
   }
 
   void ExpectDefaultChangeFailure(const OpDef& old_op_def,
-                                  const string& compatibility_error) {
+                                  const std::string& compatibility_error) {
     // This should be all that is needed to get compatibility.
     const OpDef* new_op_def = RegisteredOpDef();
     AddDefaultsToNodeDef(*new_op_def, node_def());
@@ -174,13 +175,12 @@ class OpCompatibilityTest : public OpsTestBase {
     // Validate that the NodeDef is valid.
     TF_ASSERT_OK(ValidateNodeDef(*node_def(), *new_op_def));
 
-    Status status = OpDefAttrDefaultsUnchanged(old_op_def, *new_op_def);
+    absl::Status status = OpDefAttrDefaultsUnchanged(old_op_def, *new_op_def);
     if (status.ok()) {
       ADD_FAILURE() << SummarizeOpDef(old_op_def) << " vs. "
                     << SummarizeOpDef(*new_op_def);
     } else {
-      EXPECT_TRUE(
-          str_util::StrContains(status.error_message(), compatibility_error))
+      EXPECT_TRUE(absl::StrContains(status.message(), compatibility_error))
           << status << " does not contain " << compatibility_error;
     }
   }
@@ -704,19 +704,6 @@ TEST_F(OpCompatibilityTest, OutputAddRef) {
 
 // Negative tests -------------------------------------------------------------
 
-// Can't remove an attr.
-REGISTER_OP("RemoveAttr");
-
-TEST_F(OpCompatibilityTest, RemoveAttrFails) {
-  OpRegistrationData old_op;
-  TF_ASSERT_OK(OpDefBuilder("RemoveAttr").Attr("a: int").Finalize(&old_op));
-  TF_ASSERT_OK(NodeDefBuilder("fails", &old_op.op_def)
-                   .Attr("a", 3)
-                   .Finalize(node_def()));
-  ExpectInvalid(old_op.op_def, "NodeDef mentions attr 'a' not in",
-                "Attr 'a' removed");
-}
-
 // Can't add an attr without a default.
 REGISTER_OP("AddAttrNoDefault").Attr("a: int");
 
@@ -1052,7 +1039,7 @@ TEST_F(OpCompatibilityTest, RenameOutputListFails) {
                       "Output signature mismatch 'old:T' vs. 'new:T'");
 }
 
-// Should not be able to add a default to an attr.
+// It's ok to add a default to an attr if it doesn't already have one.
 REGISTER_OP("AddDefault").Output("ndef: string").Attr("a: int = 1234");
 REGISTER_KERNEL_BUILDER(Name("AddDefault").Device(DEVICE_CPU), TestKernel);
 
@@ -1065,9 +1052,8 @@ TEST_F(OpCompatibilityTest, AddDefault) {
   TF_ASSERT_OK(NodeDefBuilder("add_default", &old_op.op_def)
                    .Attr("a", 765)
                    .Finalize(node_def()));
-  ExpectDefaultChangeFailure(
-      old_op.op_def,
-      "Attr 'a' has added/removed it's default; from no default to 1234");
+  ExpectSuccess(old_op.op_def);
+  EXPECT_EQ("{{node add_default}} = AddDefault[a=765]()", Result());
 }
 
 // Should not be able to remove a default from an attr.
@@ -1084,7 +1070,7 @@ TEST_F(OpCompatibilityTest, RemoveDefault) {
       NodeDefBuilder("remove_default", &old_op.op_def).Finalize(node_def()));
   ExpectDefaultChangeFailure(
       old_op.op_def,
-      "Attr 'a' has added/removed it's default; from 91 to no default");
+      "Attr 'a' has removed it's default; from 91 to no default");
 }
 
 // Should not be able to change a default for an attr.

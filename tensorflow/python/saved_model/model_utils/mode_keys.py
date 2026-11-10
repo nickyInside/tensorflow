@@ -12,14 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
+# LINT.IfChange
 """Utils for managing different mode strings used by Keras and Estimator models.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import collections
+from tensorflow.python.util.compat import collections_abc
 
 
 class KerasModeKeys(object):
@@ -65,7 +62,7 @@ def is_train(mode):
   return mode in [KerasModeKeys.TRAIN, EstimatorModeKeys.TRAIN]
 
 
-class ModeKeyMap(collections.Mapping):
+class ModeKeyMap(collections_abc.Mapping):
   """Map using ModeKeys as keys.
 
   This class creates an immutable mapping from modes to values. For example,
@@ -107,3 +104,4 @@ class ModeKeyMap(collections.Mapping):
 
   def __len__(self):
     return len(self._keys)
+# LINT.ThenChange(//tensorflow/python/keras/saving/utils_v1/mode_keys.py)

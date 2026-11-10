@@ -1,20 +1,40 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # TensorFlow Java API.
 
-package(default_visibility = ["//visibility:private"])
-
-licenses(["notice"])  # Apache 2.0
-
-load(":build_defs.bzl", "JAVACOPTS")
-load(":src/gen/gen_ops.bzl", "tf_java_op_gen_srcjar")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_java//java:defs.bzl", "java_library", "java_plugin")
 load(
     "//tensorflow:tensorflow.bzl",
+    "VERSION",
     "tf_binary_additional_srcs",
     "tf_cc_binary",
+    "tf_cc_test",
     "tf_copts",
     "tf_custom_op_library",
     "tf_java_test",
-    "tf_cc_test",
+)
+load(":build_defs.bzl", "JAVACOPTS")
+load(":src/gen/gen_ops.bzl", "tf_java_op_gen_srcjar")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    default_visibility = ["//visibility:private"],
+    licenses = ["notice"],
 )
 
 java_library(
@@ -23,10 +43,24 @@ java_library(
         ":java_op_sources",
         ":java_sources",
     ],
-    data = [":libtensorflow_jni"] + tf_binary_additional_srcs(),
+    data = tf_binary_additional_srcs() + [":libtensorflow_jni"],
     javacopts = JAVACOPTS,
     plugins = [":processor"],
+    resources = [":java_resources"],
     visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "version-info",
+    outs = ["src/main/resources/tensorflow-version-info"],
+    cmd = "echo version=%s > $@" % VERSION,
+    output_to_bindir = 1,
+)
+
+filegroup(
+    name = "java_resources",
+    srcs = [":version-info"],
+    visibility = ["//visibility:private"],
 )
 
 # NOTE(ashankar): Rule to include the Java API in the Android Inference Library
@@ -37,10 +71,7 @@ filegroup(
         "src/main/java/org/tensorflow/*.java",
         "src/main/java/org/tensorflow/types/*.java",
     ]),
-    visibility = [
-        "//tensorflow/contrib/android:__pkg__",
-        "//tensorflow/java:__pkg__",
-    ],
+    visibility = ["//tensorflow/tools/android/inference_interface:__pkg__"],
 )
 
 java_plugin(
@@ -65,9 +96,7 @@ java_library(
 filegroup(
     name = "java_op_sources",
     srcs = glob(["src/main/java/org/tensorflow/op/**/*.java"]) + [":java_op_gen_sources"],
-    visibility = [
-        "//tensorflow/java:__pkg__",
-    ],
+    visibility = ["//visibility:private"],
 )
 
 tf_java_op_gen_srcjar(
@@ -97,6 +126,9 @@ tf_cc_binary(
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:ops",
+        "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/log:check",
+        "@xla//xla/tsl/platform:status",
     ],
 )
 
@@ -121,6 +153,10 @@ cc_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:op_gen_lib",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
         "@com_googlesource_code_re2//:re2",
     ],
 )
@@ -152,6 +188,19 @@ tf_java_test(
     srcs = ["src/test/java/org/tensorflow/EagerOperationBuilderTest.java"],
     javacopts = JAVACOPTS,
     test_class = "org.tensorflow.EagerOperationBuilderTest",
+    deps = [
+        ":tensorflow",
+        ":testutil",
+        "@junit",
+    ],
+)
+
+tf_java_test(
+    name = "EagerOperationTest",
+    size = "small",
+    srcs = ["src/test/java/org/tensorflow/EagerOperationTest.java"],
+    javacopts = JAVACOPTS,
+    test_class = "org.tensorflow.EagerOperationTest",
     deps = [
         ":tensorflow",
         ":testutil",
@@ -414,6 +463,9 @@ tf_cc_binary(
             "-z defs",
             "-s",
             "-Wl,--version-script,$(location {})".format(LINKER_VERSION_SCRIPT),
+            # copybara:uncomment_begin(google-only)
+            # "-Wl,--undefined-version",
+            # copybara:uncomment_end
         ],
     }),
     linkshared = 1,

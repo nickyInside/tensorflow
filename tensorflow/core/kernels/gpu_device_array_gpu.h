@@ -15,20 +15,19 @@ limitations under the License.
 
 // Contains structs and functions to be included in device code.
 
-#ifndef TENSORFLOW_CORE_KERNELS_CUDA_DEVICE_ARRAY_GPU_H_
-#define TENSORFLOW_CORE_KERNELS_CUDA_DEVICE_ARRAY_GPU_H_
+#ifndef TENSORFLOW_CORE_KERNELS_GPU_DEVICE_ARRAY_GPU_H_
+#define TENSORFLOW_CORE_KERNELS_GPU_DEVICE_ARRAY_GPU_H_
 
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
     (defined(TENSORFLOW_USE_ROCM) && TENSORFLOW_USE_ROCM)
 
 namespace tensorflow {
 
-static constexpr int kMaxInlineGpuPointers = 8;
 // To decode on the device side, use GetGpuDeviceArrayOnDevice.
 // To encode on the host side, use GpuDeviceArrayOnHost.
 template <typename ValueType, int MaxInlineValues = 8>
 struct GpuDeviceArrayStruct {
-  int32 size;
+  int32_t size;
   // used if size <= MaxInlineValues;
   ValueType inline_values[MaxInlineValues];
   ValueType* out_of_line_values = nullptr;  // used if size > MaxInlineValues;
@@ -48,4 +47,4 @@ EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE ValueType* GetGpuDeviceArrayOnDevice(
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
-#endif  // TENSORFLOW_CORE_KERNELS_CUDA_DEVICE_ARRAY_GPU_H_
+#endif  // TENSORFLOW_CORE_KERNELS_GPU_DEVICE_ARRAY_GPU_H_

@@ -14,13 +14,13 @@
 # ==============================================================================
 """Generate tensorflow graphs for testing tfcompile."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import argparse
 import os
 import sys
+
+from absl import app
+import six
+from six.moves import range
 
 from tensorflow.core.protobuf import saver_pb2
 from tensorflow.python.client import session
@@ -29,11 +29,16 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import function
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack  # pylint: disable=g-direct-tensorflow-import
+from tensorflow.python.ops import cond
+from tensorflow.python.ops import control_flow_assert
 from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import control_flow_util
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import nn_ops
+from tensorflow.python.ops import random_ops
+from tensorflow.python.ops import variable_v1
 from tensorflow.python.ops import variables
-from tensorflow.python.platform import app
 from tensorflow.python.training import saver as saver_lib
 
 FLAGS = None
@@ -47,7 +52,7 @@ def tfadd(_):
 
 def tfadd_with_ckpt(out_dir):
   x = array_ops.placeholder(dtypes.int32, name='x_hold')
-  y = variables.VariableV1(constant_op.constant([0]), name='y_saved')
+  y = variable_v1.VariableV1(constant_op.constant([0]), name='y_saved')
   math_ops.add(x, y, name='x_y_sum')
 
   init_op = variables.global_variables_initializer()
@@ -62,7 +67,7 @@ def tfadd_with_ckpt(out_dir):
 
 def tfadd_with_ckpt_saver(out_dir):
   x = array_ops.placeholder(dtypes.int32, name='x_hold')
-  y = variables.VariableV1(constant_op.constant([0]), name='y_saved')
+  y = variable_v1.VariableV1(constant_op.constant([0]), name='y_saved')
   math_ops.add(x, y, name='x_y_sum')
 
   init_op = variables.global_variables_initializer()
@@ -76,14 +81,15 @@ def tfadd_with_ckpt_saver(out_dir):
     # Without the SaverDef, the restore op won't be named correctly.
     saver_file = os.path.join(out_dir, 'test_graph_tfadd_with_ckpt_saver.saver')
     with open(saver_file, 'wb') as f:
-      f.write(saver.as_saver_def().SerializeToString())
+      f.write(six.ensure_binary(saver.as_saver_def().SerializeToString()))
 
 
 def tfassert_eq(_):
   x = array_ops.placeholder(dtypes.int32, name='x_hold')
   y = array_ops.placeholder(dtypes.int32, name='y_hold')
-  control_flow_ops.Assert(
-      math_ops.equal(x, y), ['Expected x == y.'], name='assert_eq')
+  control_flow_assert.Assert(
+      math_ops.equal(x, y), ['Expected x == y.'], name='assert_eq'
+  )
   math_ops.add(x, math_ops.negative(y), name='x_y_diff')
 
 
@@ -91,7 +97,7 @@ def tfcond(_):
   p = array_ops.placeholder(dtypes.bool, name='p_hold')
   x = array_ops.placeholder(dtypes.int32, name='x_hold')
   y = array_ops.placeholder(dtypes.int32, name='y_hold')
-  z = control_flow_ops.cond(p, lambda: x, lambda: y)
+  z = cond.cond(p, lambda: x, lambda: y)
   array_ops.identity(z, name='result')
 
 
@@ -105,6 +111,14 @@ def tfmatmul(_):
   x = array_ops.placeholder(dtypes.float32, name='x_hold')
   y = array_ops.placeholder(dtypes.float32, name='y_hold')
   math_ops.matmul(x, y, name='x_y_prod')
+
+
+def tfmatmul_with_constant(_):
+  x = array_ops.placeholder(dtypes.float32, name='x_hold')
+  constant_y = array_ops.ones(
+      shape=[1024, 256], dtype=dtypes.float32, name='constant_y_hold'
+  )
+  math_ops.matmul(x, constant_y, name='x_constant_y_prod')
 
 
 def tfmatmulandadd(_):
@@ -149,12 +163,23 @@ def tftop_k(_):
   array_ops.identity(output[1], name='indices')
 
 
-def tfvariable(_):
+def tfvariable_readonly(_):
   x = variables.Variable(1000.0, name='x')
+  unused_y = variables.Variable(1000.0, name='y')
   old_x = x.value()
   with ops.control_dependencies([old_x]):
-    new_x = x.assign_add(42.0)
-  array_ops.stack([old_x, new_x], name='result')
+    new_value = math_ops.add(old_x, 42.0)
+  array_ops.identity(new_value, name='result')
+
+
+# TODO(b/147908587): Change x and the two constants back to have a scalar shape
+#                    when the bug is fixed.
+def tfvariable(_):
+  x = variables.Variable([1000.0], name='x', shape=[1])
+  old_x = x.value()
+  with ops.control_dependencies([old_x]):
+    new_x = x.assign_add([42.0])
+  array_ops_stack.stack([old_x, new_x], name='result')
 
 
 def tfvariable_sequential_updates(_):
@@ -169,6 +194,23 @@ def tfvariable_sequential_updates(_):
   array_ops.identity(updates, name='result')
 
 
+def tfrandom_uniform(_):
+  x = random_ops.random_uniform(shape=[1], minval=0.0, maxval=5.0)
+  array_ops.identity(x, name='result')
+
+
+def tfscatter(_):
+  # NOTE(basioli): We run two scatter operations to make sure fusion kernels
+  # get named correctly in XLA:CPU.
+  indices0 = array_ops.placeholder(dtypes.int32, name='indices_0')
+  updates0 = array_ops.placeholder(dtypes.float32, name='updates_0')
+  indices1 = array_ops.placeholder(dtypes.int32, name='indices_1')
+  updates1 = array_ops.placeholder(dtypes.float32, name='updates_1')
+  shape = constant_op.constant([8], name='shape')
+  array_ops.scatter_nd(indices0, updates0, shape, name='result_0')
+  array_ops.scatter_nd(indices1, updates1, shape, name='result_1')
+
+
 def write_graph(build_graph, out_dir):
   """Build a graph using build_graph and write it out."""
   g = ops.Graph()
@@ -176,10 +218,15 @@ def write_graph(build_graph, out_dir):
     build_graph(out_dir)
     filename = os.path.join(out_dir, 'test_graph_%s.pb' % build_graph.__name__)
     with open(filename, 'wb') as f:
-      f.write(g.as_graph_def().SerializeToString())
+      f.write(
+          six.ensure_binary(
+              g.as_graph_def().SerializeToString(deterministic=True)
+          )
+      )
 
 
 def main(_):
+  control_flow_util.enable_control_flow_v2()
   write_graph(tfadd, FLAGS.out_dir)
   write_graph(tfadd_with_ckpt, FLAGS.out_dir)
   write_graph(tfadd_with_ckpt_saver, FLAGS.out_dir)
@@ -188,11 +235,15 @@ def main(_):
   write_graph(tffunction, FLAGS.out_dir)
   write_graph(tfgather, FLAGS.out_dir)
   write_graph(tfmatmul, FLAGS.out_dir)
+  write_graph(tfmatmul_with_constant, FLAGS.out_dir)
   write_graph(tfmatmulandadd, FLAGS.out_dir)
   write_graph(tfsplits, FLAGS.out_dir)
   write_graph(tftop_k, FLAGS.out_dir)
   write_graph(tfvariable, FLAGS.out_dir)
+  write_graph(tfvariable_readonly, FLAGS.out_dir)
   write_graph(tfvariable_sequential_updates, FLAGS.out_dir)
+  write_graph(tfrandom_uniform, FLAGS.out_dir)
+  write_graph(tfscatter, FLAGS.out_dir)
 
 
 if __name__ == '__main__':
@@ -202,6 +253,7 @@ if __name__ == '__main__':
       '--out_dir',
       type=str,
       default='',
-      help='Output directory for graphs, checkpoints and savers.')
+      help='Output directory for graphs, checkpoints and savers.',
+  )
   FLAGS, unparsed = parser.parse_known_args()
   app.run(main=main, argv=[sys.argv[0]] + unparsed)

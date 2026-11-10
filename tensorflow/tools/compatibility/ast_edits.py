@@ -14,11 +14,9 @@
 # ==============================================================================
 """Upgrader for Python scripts according to an API change specification."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import ast
+import collections
+import numbers
 import os
 import re
 import shutil
@@ -27,7 +25,93 @@ import tempfile
 import traceback
 
 import pasta
-import six
+
+
+# Monkeypatch pasta to fix Python 3.14 issues with numbers in AST constants.
+try:
+  import pasta.base.annotate as pasta_annotate  # pylint: disable=g-import-not-at-top
+except ImportError:
+  pasta_annotate = None
+
+if pasta_annotate:
+  def _patch_visit_constant(cls):
+    """Adds or overrides visit_Constant on cls to handle Python 3.14."""
+    original_visit_constant = getattr(cls, "visit_Constant", None)
+
+    def visit_Constant(self, node):  # pylint: disable=invalid-name
+      if sys.version_info >= (3, 14):
+        if isinstance(node.value, numbers.Number) and not isinstance(
+            node.value, bool
+        ):
+          if hasattr(self, "visit_Num"):
+            node.n = node.value
+            try:
+              self.visit_Num(node)
+            finally:
+              del node.n
+          else:
+            self.generic_visit(node)
+        elif isinstance(node.value, (str, bytes)):
+          node.s = node.value
+          try:
+            if isinstance(node.value, str):
+              if hasattr(self, "visit_Str"):
+                self.visit_Str(node)
+              else:
+                self.generic_visit(node)
+            else:
+              if hasattr(self, "visit_Bytes"):
+                self.visit_Bytes(node)
+              else:
+                self.generic_visit(node)
+          finally:
+            del node.s
+        elif isinstance(node.value, bool) or node.value is None:
+          if hasattr(self, "visit_NameConstant"):
+            self.visit_NameConstant(node)
+          else:
+            self.generic_visit(node)
+        elif node.value is Ellipsis:
+          if hasattr(self, "visit_Ellipsis"):
+            self.visit_Ellipsis(node)
+          else:
+            self.generic_visit(node)
+        else:
+          if original_visit_constant:
+            original_visit_constant(self, node)
+          else:
+            self.generic_visit(node)
+      else:
+        if original_visit_constant:
+          original_visit_constant(self, node)
+        else:
+          self.generic_visit(node)
+
+    cls.visit_Constant = visit_Constant
+    return cls
+
+  if hasattr(pasta_annotate, "get_ast_annotator"):
+    original_get_ast_annotator = pasta_annotate.get_ast_annotator
+
+    def patched_get_ast_annotator(*args, **kwargs):
+      cls = original_get_ast_annotator(*args, **kwargs)
+      return _patch_visit_constant(cls)
+
+    pasta_annotate.get_ast_annotator = patched_get_ast_annotator
+
+  elif hasattr(pasta_annotate, "get_base_visitor"):
+    original_get_base_visitor = pasta_annotate.get_base_visitor
+
+    def patched_get_base_visitor(*args, **kwargs):
+      cls = original_get_base_visitor(*args, **kwargs)
+      return _patch_visit_constant(cls)
+
+    pasta_annotate.get_base_visitor = patched_get_base_visitor
+  else:
+    if hasattr(pasta_annotate, "BaseVisitor"):
+      _patch_visit_constant(pasta_annotate.BaseVisitor)
+    if hasattr(pasta_annotate, "AstAnnotator"):
+      _patch_visit_constant(pasta_annotate.AstAnnotator)
 
 # Some regular expressions we will need for parsing
 FIND_OPEN = re.compile(r"^\s*(\[).*$")
@@ -37,6 +121,10 @@ FIND_STRING_CHARS = re.compile(r"['\"]")
 INFO = "INFO"
 WARNING = "WARNING"
 ERROR = "ERROR"
+
+
+ImportRename = collections.namedtuple(
+    "ImportRename", ["new_name", "excluded_prefixes"])
 
 
 def full_name_node(name, ctx=ast.Load()):
@@ -101,7 +189,88 @@ def get_arg_value(node, arg_name, arg_pos=None):
   return (False, None)
 
 
-class APIChangeSpec(object):
+def uses_star_args_in_call(node):
+  """Check if an ast.Call node uses arbitrary-length positional *args.
+
+  This function works with the AST call node format of Python3.5+
+  as well as the different AST format of earlier versions of Python.
+
+  Args:
+    node: The ast.Call node to check arg values for.
+
+  Returns:
+    True if the node uses starred variadic positional args or keyword args.
+    False if it does not.
+  """
+  if sys.version_info[:2] >= (3, 5):
+    # Check for an *args usage in python 3.5+
+    for arg in node.args:
+      if isinstance(arg, ast.Starred):
+        return True
+  else:
+    if node.starargs:
+      return True
+  return False
+
+
+def uses_star_kwargs_in_call(node):
+  """Check if an ast.Call node uses arbitrary-length **kwargs.
+
+  This function works with the AST call node format of Python3.5+
+  as well as the different AST format of earlier versions of Python.
+
+  Args:
+    node: The ast.Call node to check arg values for.
+
+  Returns:
+    True if the node uses starred variadic positional args or keyword args.
+    False if it does not.
+  """
+  if sys.version_info[:2] >= (3, 5):
+    # Check for a **kwarg usage in python 3.5+
+    for keyword in node.keywords:
+      if keyword.arg is None:
+        return True
+  else:
+    if node.kwargs:
+      return True
+  return False
+
+
+def uses_star_args_or_kwargs_in_call(node):
+  """Check if an ast.Call node uses arbitrary-length *args or **kwargs.
+
+  This function works with the AST call node format of Python3.5+
+  as well as the different AST format of earlier versions of Python.
+
+  Args:
+    node: The ast.Call node to check arg values for.
+
+  Returns:
+    True if the node uses starred variadic positional args or keyword args.
+    False if it does not.
+  """
+  return uses_star_args_in_call(node) or uses_star_kwargs_in_call(node)
+
+
+def excluded_from_module_rename(module, import_rename_spec):
+  """Check if this module import should not be renamed.
+
+  Args:
+    module: (string) module name.
+    import_rename_spec: ImportRename instance.
+
+  Returns:
+    True if this import should not be renamed according to the
+    import_rename_spec.
+  """
+  for excluded_prefix in import_rename_spec.excluded_prefixes:
+    if module.startswith(excluded_prefix):
+      return True
+  return False
+
+
+class APIChangeSpec:
   """This class defines the transformations that need to happen.
 
   This class must provide the following fields:
@@ -118,9 +287,37 @@ class APIChangeSpec(object):
   * `function_transformers`: maps function names to custom handlers
   * `module_deprecations`: maps module names to warnings that will be printed
     if the module is still used after all other transformations have run
+  * `import_renames`: maps import name (must be a short name without '.')
+    to ImportRename instance.
 
   For an example, see `TFAPIChangeSpec`.
   """
+
+  def preprocess(self, root_node):  # pylint: disable=unused-argument
+    """Preprocess a parse tree. Return a preprocessed node, logs and errors."""
+    return root_node, [], []
+
+  def clear_preprocessing(self):
+    """Restore this APIChangeSpec to before it preprocessed a file.
+
+    This is needed if preprocessing a file changed any rewriting rules.
+    """
+    pass
+
+
+class NoUpdateSpec(APIChangeSpec):
+  """A specification of an API change which doesn't change anything."""
+
+  def __init__(self):
+    self.function_handle = {}
+    self.function_reorders = {}
+    self.function_keyword_renames = {}
+    self.symbol_renames = {}
+    self.function_warnings = {}
+    self.change_to_function = {}
+    self.module_deprecations = {}
+    self.function_transformers = {}
+    self.import_renames = {}
 
 
 class _PastaEditVisitor(ast.NodeVisitor):
@@ -286,14 +483,19 @@ class _PastaEditVisitor(ast.NodeVisitor):
     arg_warnings = self._get_applicable_dict("function_arg_warnings",
                                              full_name, name)
 
+    variadic_args = uses_star_args_or_kwargs_in_call(node)
+
     for (kwarg, arg), (level, warning) in sorted(arg_warnings.items()):
-      present, _ = get_arg_value(node, kwarg, arg)
+      present, _ = get_arg_value(node, kwarg, arg) or variadic_args
       if present:
         warned = True
         warning_message = warning.replace("<function name>", full_name or name)
+        template = "%s called with %s argument, requires manual check: %s"
+        if variadic_args:
+          template = ("%s called with *args or **kwargs that may include %s, "
+                      "requires manual check: %s")
         self.add_log(level, node.lineno, node.col_offset,
-                     "%s called with %s argument requires manual check: %s" %
-                     (full_name or name, kwarg, warning_message))
+                     template % (full_name or name, kwarg, warning_message))
 
     return warned
 
@@ -316,10 +518,7 @@ class _PastaEditVisitor(ast.NodeVisitor):
       if not isinstance(parent, ast.Call):
         # ast.Call's constructor is really picky about how many arguments it
         # wants, and also, it changed between Py2 and Py3.
-        if six.PY2:
-          new_node = ast.Call(node, [], [], None, None)
-        else:
-          new_node = ast.Call(node, [], [])
+        new_node = ast.Call(node, [], [])
         pasta.ast_utils.replace_child(parent, node, new_node)
         ast.copy_location(new_node, node)
         self.add_log(INFO, node.lineno, node.col_offset,
@@ -332,21 +531,31 @@ class _PastaEditVisitor(ast.NodeVisitor):
     function_reorders = self._api_change_spec.function_reorders
 
     if full_name in function_reorders:
+      if uses_star_args_in_call(node):
+        self.add_log(WARNING, node.lineno, node.col_offset,
+                     "(Manual check required) upgrading %s may require "
+                     "re-ordering the call arguments, but it was passed "
+                     "variable-length positional *args. The upgrade "
+                     "script cannot handle these automatically." % full_name)
+
       reordered = function_reorders[full_name]
+      new_args = []
       new_keywords = []
       idx = 0
       for arg in node.args:
         if sys.version_info[:2] >= (3, 5) and isinstance(arg, ast.Starred):
           continue  # Can't move Starred to keywords
         keyword_arg = reordered[idx]
-        keyword = ast.keyword(arg=keyword_arg, value=arg)
-        new_keywords.append(keyword)
+        if keyword_arg:
+          new_keywords.append(ast.keyword(arg=keyword_arg, value=arg))
+        else:
+          new_args.append(arg)
         idx += 1
 
       if new_keywords:
         self.add_log(INFO, node.lineno, node.col_offset,
                      "Added keywords to args of function %r" % full_name)
-        node.args = []
+        node.args = new_args
         node.keywords = new_keywords + (node.keywords or [])
         return True
     return False
@@ -359,6 +568,13 @@ class _PastaEditVisitor(ast.NodeVisitor):
     if not renamed_keywords:
       return False
 
+    if uses_star_kwargs_in_call(node):
+      self.add_log(WARNING, node.lineno, node.col_offset,
+                   "(Manual check required) upgrading %s may require "
+                   "renaming or removing call arguments, but it was passed "
+                   "variable-length *args or **kwargs. The upgrade "
+                   "script cannot handle these automatically." %
+                   (full_name or name))
     modified = False
     new_keywords = []
     for keyword in node.keywords:
@@ -426,6 +642,15 @@ class _PastaEditVisitor(ast.NodeVisitor):
 
     parent = self._stack[-2]
 
+    if transformers:
+      if uses_star_args_or_kwargs_in_call(node):
+        self.add_log(WARNING, node.lineno, node.col_offset,
+                     "(Manual check required) upgrading %s may require "
+                     "modifying call arguments, but it was passed "
+                     "variable-length *args or **kwargs. The upgrade "
+                     "script cannot handle these automatically." %
+                     (full_name or name))
+
     for transformer in transformers:
       logs = []
       new_node = transformer(parent, node, full_name, name, logs)
@@ -466,8 +691,284 @@ class _PastaEditVisitor(ast.NodeVisitor):
 
     self.generic_visit(node)
 
+  def visit_Import(self, node):  # pylint: disable=invalid-name
+    """Handle visiting an import node in the AST.
 
-class ASTCodeUpgrader(object):
+    Args:
+      node: Current Node
+    """
+    new_aliases = []
+    import_updated = False
+    import_renames = getattr(self._api_change_spec, "import_renames", {})
+    max_submodule_depth = getattr(self._api_change_spec, "max_submodule_depth",
+                                  1)
+    inserts_after_imports = getattr(self._api_change_spec,
+                                    "inserts_after_imports", {})
+
+    # This loop processes imports in the format
+    # import foo as f, bar as b
+    for import_alias in node.names:
+      all_import_components = import_alias.name.split(".")
+      # Look for rename, starting with longest import levels.
+      found_update = False
+      for i in reversed(list(range(1, max_submodule_depth + 1))):
+        import_component = all_import_components[0]
+        for j in range(1, min(i, len(all_import_components))):
+          import_component += "." + all_import_components[j]
+        import_rename_spec = import_renames.get(import_component, None)
+
+        if not import_rename_spec or excluded_from_module_rename(
+            import_alias.name, import_rename_spec):
+          continue
+
+        new_name = (
+            import_rename_spec.new_name +
+            import_alias.name[len(import_component):])
+
+        # If current import is
+        #   import foo
+        # then new import should preserve imported name:
+        #   import new_foo as foo
+        # This happens when module has just one component.
+        new_asname = import_alias.asname
+        if not new_asname and "." not in import_alias.name:
+          new_asname = import_alias.name
+
+        new_alias = ast.alias(name=new_name, asname=new_asname)
+        new_aliases.append(new_alias)
+        import_updated = True
+        found_update = True
+
+        # Insert any followup lines that should happen after this import.
+        full_import = (import_alias.name, import_alias.asname)
+        insert_offset = 1
+        for line_to_insert in inserts_after_imports.get(full_import, []):
+          assert self._stack[-1] is node
+          parent = self._stack[-2]
+
+          new_line_node = pasta.parse(line_to_insert)
+          ast.copy_location(new_line_node, node)
+          parent.body.insert(
+              parent.body.index(node) + insert_offset, new_line_node)
+          insert_offset += 1
+
+          # Insert a newline after the import if necessary
+          old_suffix = pasta.base.formatting.get(node, "suffix")
+          if old_suffix is None:
+            old_suffix = os.linesep
+          if os.linesep not in old_suffix:
+            pasta.base.formatting.set(node, "suffix", old_suffix + os.linesep)
+
+          # Apply indentation to new node.
+          pasta.base.formatting.set(new_line_node, "prefix",
+                                    pasta.base.formatting.get(node, "prefix"))
+          pasta.base.formatting.set(new_line_node, "suffix", os.linesep)
+          self.add_log(
+              INFO, node.lineno, node.col_offset,
+              "Adding `%s` after import of %s" %
+              (new_line_node, import_alias.name))
+        # Find one match, break
+        if found_update:
+          break
+      # No rename is found for all levels
+      if not found_update:
+        new_aliases.append(import_alias)  # no change needed
+
+    # Replace the node if at least one import needs to be updated.
+    if import_updated:
+      assert self._stack[-1] is node
+      parent = self._stack[-2]
+
+      new_node = ast.Import(new_aliases)
+      ast.copy_location(new_node, node)
+      pasta.ast_utils.replace_child(parent, node, new_node)
+      self.add_log(
+          INFO, node.lineno, node.col_offset,
+          "Changed import from %r to %r." %
+          (pasta.dump(node), pasta.dump(new_node)))
+
+    self.generic_visit(node)
+
+  def visit_ImportFrom(self, node):  # pylint: disable=invalid-name
+    """Handle visiting an import-from node in the AST.
+
+    Args:
+      node: Current Node
+    """
+    if not node.module:
+      self.generic_visit(node)
+      return
+
+    from_import = node.module
+
+    # Look for rename based on first component of from-import.
+    # i.e. based on foo in foo.bar.
+    from_import_first_component = from_import.split(".")[0]
+    import_renames = getattr(self._api_change_spec, "import_renames", {})
+    import_rename_spec = import_renames.get(from_import_first_component, None)
+    if not import_rename_spec:
+      self.generic_visit(node)
+      return
+
+    # Split module aliases into the ones that require import update
+    # and those that don't. For e.g. if we want to rename "a" to "b"
+    # unless we import "a.c" in the following:
+    # from a import c, d
+    # we want to update import for "d" but not for "c".
+    updated_aliases = []
+    same_aliases = []
+    for import_alias in node.names:
+      full_module_name = "%s.%s" % (from_import, import_alias.name)
+      if excluded_from_module_rename(full_module_name, import_rename_spec):
+        same_aliases.append(import_alias)
+      else:
+        updated_aliases.append(import_alias)
+
+    if not updated_aliases:
+      self.generic_visit(node)
+      return
+
+    assert self._stack[-1] is node
+    parent = self._stack[-2]
+
+    # Replace first component of from-import with new name.
+    new_from_import = (
+        import_rename_spec.new_name +
+        from_import[len(from_import_first_component):])
+    updated_node = ast.ImportFrom(new_from_import, updated_aliases, node.level)
+    ast.copy_location(updated_node, node)
+    pasta.ast_utils.replace_child(parent, node, updated_node)
+
+    # If some imports had to stay the same, add another import for them.
+    additional_import_log = ""
+    if same_aliases:
+      same_node = ast.ImportFrom(from_import, same_aliases, node.level,
+                                 col_offset=node.col_offset, lineno=node.lineno)
+      ast.copy_location(same_node, node)
+      parent.body.insert(parent.body.index(updated_node), same_node)
+      # Apply indentation to new node.
+      pasta.base.formatting.set(
+          same_node, "prefix",
+          pasta.base.formatting.get(updated_node, "prefix"))
+      additional_import_log = " and %r" % pasta.dump(same_node)
+
+    self.add_log(
+        INFO, node.lineno, node.col_offset,
+        "Changed import from %r to %r%s." %
+        (pasta.dump(node),
+         pasta.dump(updated_node),
+         additional_import_log))
+
+    self.generic_visit(node)
+
+
+class AnalysisResult:
+  """This class represents an analysis result and how it should be logged.
+
+  This class must provide the following fields:
+
+  * `log_level`: The log level to which this detection should be logged
+  * `log_message`: The message that should be logged for this detection
+
+  For an example, see `VersionedTFImport`.
+  """
+
+
+class APIAnalysisSpec:
+  """This class defines how `AnalysisResult`s should be generated.
+
+  It specifies how to map imports and symbols to `AnalysisResult`s.
+
+  This class must provide the following fields:
+
+  * `symbols_to_detect`: maps function names to `AnalysisResult`s
+  * `imports_to_detect`: maps imports represented as (full module name, alias)
+    tuples to `AnalysisResult`s
+    notifications)
+
+  For an example, see `TFAPIImportAnalysisSpec`.
+  """
+
+
+class PastaAnalyzeVisitor(_PastaEditVisitor):
+  """AST Visitor that looks for specific API usage without editing anything.
+
+  This is used before any rewriting is done to detect if any symbols are used
+  that require changing imports or disabling rewriting altogether.
+  """
+
+  def __init__(self, api_analysis_spec):
+    super(PastaAnalyzeVisitor, self).__init__(NoUpdateSpec())
+    self._api_analysis_spec = api_analysis_spec
+    self._results = []   # Holds AnalysisResult objects
+
+  @property
+  def results(self):
+    return self._results
+
+  def add_result(self, analysis_result):
+    self._results.append(analysis_result)
+
+  def visit_Attribute(self, node):  # pylint: disable=invalid-name
+    """Handle bare Attributes i.e. [tf.foo, tf.bar]."""
+    full_name = self._get_full_name(node)
+    if full_name:
+      detection = self._api_analysis_spec.symbols_to_detect.get(full_name, None)
+      if detection:
+        self.add_result(detection)
+        self.add_log(
+            detection.log_level, node.lineno, node.col_offset,
+            detection.log_message)
+
+    self.generic_visit(node)
+
+  def visit_Import(self, node):  # pylint: disable=invalid-name
+    """Handle visiting an import node in the AST.
+
+    Args:
+      node: Current Node
+    """
+    for import_alias in node.names:
+      # Detect based on full import name and alias)
+      full_import = (import_alias.name, import_alias.asname)
+      detection = (self._api_analysis_spec
+                   .imports_to_detect.get(full_import, None))
+      if detection:
+        self.add_result(detection)
+        self.add_log(
+            detection.log_level, node.lineno, node.col_offset,
+            detection.log_message)
+
+    self.generic_visit(node)
+
+  def visit_ImportFrom(self, node):  # pylint: disable=invalid-name
+    """Handle visiting an import-from node in the AST.
+
+    Args:
+      node: Current Node
+    """
+    if not node.module:
+      self.generic_visit(node)
+      return
+
+    from_import = node.module
+
+    for import_alias in node.names:
+      # Detect based on full import name(to & as)
+      full_module_name = "%s.%s" % (from_import, import_alias.name)
+      full_import = (full_module_name, import_alias.asname)
+      detection = (self._api_analysis_spec
+                   .imports_to_detect.get(full_import, None))
+      if detection:
+        self.add_result(detection)
+        self.add_log(
+            detection.log_level, node.lineno, node.col_offset,
+            detection.log_message)
+
+    self.generic_visit(node)
+
+
+class ASTCodeUpgrader:
   """Handles upgrading a set of Python files using a given API change spec."""
 
   def __init__(self, api_change_spec):
@@ -476,12 +977,16 @@ class ASTCodeUpgrader(object):
                       type(api_change_spec))
     self._api_change_spec = api_change_spec
 
-  def process_file(self, in_filename, out_filename):
+  def process_file(self,
+                   in_filename,
+                   out_filename,
+                   no_change_to_outfile_on_error=False):
     """Process the given python file for incompatible changes.
 
     Args:
       in_filename: filename to parse
       out_filename: output file to write to
+      no_change_to_outfile_on_error: not modify the output file on errors
     Returns:
       A tuple representing number of files processed, log of actions, errors
     """
@@ -494,7 +999,10 @@ class ASTCodeUpgrader(object):
                                      temp_file)
     # pylint: enable=g-backslash-continuation
 
-    shutil.move(temp_file.name, out_filename)
+    if no_change_to_outfile_on_error and ret[0] == 0:
+      os.remove(temp_file.name)
+    else:
+      shutil.move(temp_file.name, out_filename)
     return ret
 
   def format_log(self, log, in_filename):
@@ -512,12 +1020,18 @@ class ASTCodeUpgrader(object):
       log = ["ERROR: Failed to parse.\n" + traceback.format_exc()]
       return 0, "", log, []
 
+    t, preprocess_logs, preprocess_errors = self._api_change_spec.preprocess(t)
+
     visitor = _PastaEditVisitor(self._api_change_spec)
     visitor.visit(t)
 
-    logs = [self.format_log(log, None) for log in visitor.log]
+    self._api_change_spec.clear_preprocessing()
+
+    logs = [self.format_log(log, None) for log in (preprocess_logs +
+                                                   visitor.log)]
     errors = [self.format_log(error, in_filename)
-              for error in visitor.warnings_and_errors]
+              for error in (preprocess_errors +
+                            visitor.warnings_and_errors)]
     return 1, pasta.dump(t), logs, errors
 
   def _format_log(self, log, in_filename, out_filename):
@@ -620,10 +1134,25 @@ class ASTCodeUpgrader(object):
       output_directory = os.path.dirname(output_path)
       if not os.path.isdir(output_directory):
         os.makedirs(output_directory)
+
+      if os.path.islink(input_path):
+        link_target = os.readlink(input_path)
+        link_target_output = os.path.join(
+            output_root_directory, os.path.relpath(link_target, root_directory))
+        if (link_target, link_target_output) in files_to_process:
+          # Create a link to the new location of the target file
+          os.symlink(link_target_output, output_path)
+        else:
+          report += "Copying symlink %s without modifying its target %s" % (
+              input_path, link_target)
+          os.symlink(link_target, output_path)
+        continue
+
       file_count += 1
       _, l_report, l_errors = self.process_file(input_path, output_path)
       tree_errors[input_path] = l_errors
       report += l_report
+
     for input_path, output_path in files_to_copy:
       output_directory = os.path.dirname(output_path)
       if not os.path.isdir(output_directory):
@@ -635,8 +1164,9 @@ class ASTCodeUpgrader(object):
     """Process a directory of python files in place."""
     files_to_process = []
     for dir_name, _, file_list in os.walk(root_directory):
-      py_files = [os.path.join(dir_name,
-                               f) for f in file_list if f.endswith(".py")]
+      py_files = [
+          os.path.join(dir_name, f) for f in file_list if f.endswith(".py")
+      ]
       files_to_process += py_files
 
     file_count = 0
@@ -647,6 +1177,9 @@ class ASTCodeUpgrader(object):
     report += ("=" * 80) + "\n"
 
     for path in files_to_process:
+      if os.path.islink(path):
+        report += "Skipping symlink %s.\n" % path
+        continue
       file_count += 1
       _, l_report, l_errors = self.process_file(path, path)
       tree_errors[path] = l_errors

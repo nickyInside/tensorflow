@@ -17,7 +17,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_EAGER_REMOTE_TENSOR_HANDLE_H_
 
 #include "tensorflow/core/platform/fingerprint.h"
-#include "tensorflow/core/protobuf/eager_service.pb.h"
+#include "tensorflow/core/protobuf/remote_tensor_handle.pb.h"
 
 namespace tensorflow {
 namespace eager {
@@ -25,10 +25,10 @@ namespace eager {
 struct RemoteTensorHandleInternal {
   explicit RemoteTensorHandleInternal(const RemoteTensorHandle& tensor_handle)
       : op_id(tensor_handle.op_id()), output_num(tensor_handle.output_num()) {}
-  RemoteTensorHandleInternal(int64 op_id, int32 output_num)
+  RemoteTensorHandleInternal(int64_t op_id, int32_t output_num)
       : op_id(op_id), output_num(output_num) {}
-  int64 op_id;
-  int32 output_num;
+  int64_t op_id;
+  int32_t output_num;
 };
 
 struct RemoteTensorHandleInternalHash {

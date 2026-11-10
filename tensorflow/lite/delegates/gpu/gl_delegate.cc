@@ -15,38 +15,47 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/gl_delegate.h"
 
-#include <algorithm>
-#include <cstdint>
-#include <cstring>
-#include <string>
-#include <vector>
-
 #include <EGL/egl.h>
 #include <GLES3/gl31.h>
+
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 #include "absl/types/span.h"
-#include "tensorflow/lite/builtin_ops.h"
-#include "tensorflow/lite/c/c_api_internal.h"
+#include "flatbuffers/buffer.h"  // from @flatbuffers
+#include "flatbuffers/verifier.h"  // from @flatbuffers
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/delegates/gpu/common/convert.h"
+#include "tensorflow/lite/delegates/gpu/common/gpu_info.h"
 #include "tensorflow/lite/delegates/gpu/common/model.h"
 #include "tensorflow/lite/delegates/gpu/common/model_builder.h"
 #include "tensorflow/lite/delegates/gpu/common/model_transformer.h"
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
 #include "tensorflow/lite/delegates/gpu/common/tensor.h"
-#include "tensorflow/lite/delegates/gpu/common/transformations/general_transformations.h"
+#include "tensorflow/lite/delegates/gpu/common/transformations/model_transformations.h"
 #include "tensorflow/lite/delegates/gpu/gl/api.h"
 #include "tensorflow/lite/delegates/gpu/gl/command_queue.h"
-#include "tensorflow/lite/delegates/gpu/gl/compiler.h"
+#include "tensorflow/lite/delegates/gpu/gl/compiler_options.h"
 #include "tensorflow/lite/delegates/gpu/gl/converters/bhwc_to_phwc4.h"
 #include "tensorflow/lite/delegates/gpu/gl/converters/phwc4_to_bhwc.h"
 #include "tensorflow/lite/delegates/gpu/gl/egl_environment.h"
-#include "tensorflow/lite/delegates/gpu/gl/gl_call.h"
+#include "tensorflow/lite/delegates/gpu/gl/gl_buffer.h"
 #include "tensorflow/lite/delegates/gpu/gl/kernels/registry.h"
+#include "tensorflow/lite/delegates/gpu/gl/object.h"
+#include "tensorflow/lite/delegates/gpu/gl/object_manager.h"
+#include "tensorflow/lite/delegates/gpu/gl/request_gpu_info.h"
+#include "tensorflow/lite/delegates/gpu/gl/runtime_options.h"
 #include "tensorflow/lite/delegates/gpu/gl/workgroups/best_effort_calculator.h"
+#include "tensorflow/lite/logger.h"
 #include "tensorflow/lite/minimal_logging.h"
 
 #ifndef TFLITE_GPU_BINARY_RELEASE
-#include "flatbuffers/flatbuffers.h"  // TF:flatbuffers
 #include "tensorflow/lite/delegates/gpu/gl/metadata_generated.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 #endif  // TFLITE_GPU_BINARY_RELEASE
@@ -67,7 +76,9 @@ TfLiteStatus DelegateCopyToBufferHandle(
     TfLiteBufferHandle buffer_handle,  // ValueId
     TfLiteTensor* tensor);
 
-inline bool IsPHWC4(const BHWC& shape) { return shape.c == 4; }
+inline bool IsPHWC4(const BHWC& shape) {
+  return shape.c == 4 || (shape.h == 1 && shape.w == 1 && shape.c % 4 == 0);
+}
 
 class Delegate {
   struct ValueRef {
@@ -89,7 +100,8 @@ class Delegate {
     }
   }
 
-  Status CopyFromBufferHandle(TfLiteBufferHandle handle, TfLiteTensor* tensor) {
+  absl::Status CopyFromBufferHandle(TfLiteBufferHandle handle,
+                                    TfLiteTensor* tensor) {
     ValueRef ref;
     RETURN_IF_ERROR(FindObject(handle, &ref));
     auto buffer = phwc4_objects_.FindBuffer(handle);
@@ -101,8 +113,8 @@ class Delegate {
     });
   }
 
-  Status CopyToBufferHandle(TfLiteBufferHandle handle,
-                            TfLiteTensor* tensor) const {
+  absl::Status CopyToBufferHandle(TfLiteBufferHandle handle,
+                                  TfLiteTensor* tensor) const {
     ValueRef ref;
     RETURN_IF_ERROR(FindObject(handle, &ref));
     auto buffer = phwc4_objects_.FindBuffer(handle);
@@ -113,39 +125,33 @@ class Delegate {
     });
   }
 
-  Status BindBufferToTensor(GLuint ssbo, int tensor_index) {
+  absl::Status BindBufferToTensor(GLuint ssbo, int tensor_index) {
     int64_t bytes_size;
-    {
-      gl_buffer_internal::BufferBinder binder(GL_SHADER_STORAGE_BUFFER, ssbo);
-      RETURN_IF_ERROR(TFLITE_GPU_CALL_GL(glGetBufferParameteri64v,
-                                         GL_SHADER_STORAGE_BUFFER,
-                                         GL_BUFFER_SIZE, &bytes_size));
-    }
+    RETURN_IF_ERROR(GetSSBOSize(ssbo, &bytes_size));
     return bhwc_objects_.RegisterBuffer(
         tensor_index, GlBuffer(GL_SHADER_STORAGE_BUFFER, ssbo, bytes_size,
                                /* offset = */ 0,
                                /* has_ownership = */ false));
   }
 
-  Status Prepare(TfLiteContext* context,
-                 const TfLiteDelegateParams* delegate_params) {
+  absl::Status Prepare(TfLiteContext* context,
+                       const TfLiteDelegateParams* delegate_params) {
     // Extract TFLite delegate execution plan from the context and convert it
-    // into FlowGraph32.
+    // into GraphFloat32.
     GraphFloat32 graph;
     RETURN_IF_ERROR(BuildModel(context, delegate_params, &graph));
 
     // Apply general transformations on the graph.
-    NullTransformationReporter reporter;
-    ModelTransformer transformer(&graph, &reporter);
-    if (!ApplyGeneralTransformations(&transformer)) {
-      return InternalError("Graph general transformations failed");
+    ModelTransformer transformer(&graph);
+    if (!ApplyModelTransformations(&transformer)) {
+      return absl::InternalError("Graph transformations failed");
     }
 
     if (!env_) RETURN_IF_ERROR(EglEnvironment::NewEglEnvironment(&env_));
 
     // TODO(impjdi): Remove code duplication.
     auto values = graph.values();
-    auto find_value = [&](int tensor_index) -> Value<TensorRefFloat32>* {
+    auto find_value = [&](int tensor_index) -> Value* {
       for (auto value : values) {
         if (value->tensor.ref == tensor_index) return value;
       }
@@ -159,11 +165,14 @@ class Delegate {
       tensors_[value->id] = {value->tensor.shape, 0};
     }
 
+    std::unordered_set<int> tflite_graph_io;  // NOLINT
+
     // Prepare graph inputs.
     //
     // Note that graph.inputs() cannot be used directly, as the notion of
     // graph input has a different meaning in public API and GPU-internal API.
     {
+      inputs_.clear();
       inputs_.reserve(delegate_params->input_tensors->size);
       for (int i = 0; i < delegate_params->input_tensors->size; ++i) {
         const int tensor_index = delegate_params->input_tensors->data[i];
@@ -171,9 +180,10 @@ class Delegate {
         if (tensor->allocation_type == TfLiteAllocationType::kTfLiteMmapRo) {
           continue;
         }
+        tflite_graph_io.insert(tensor_index);
         const auto* input = find_value(tensor_index);
         if (!input || tensor->type != TfLiteType::kTfLiteFloat32) {
-          return NotFoundError("Input tensor is not found in the graph.");
+          return absl::NotFoundError("Input tensor is not found in the graph.");
         }
 
         inputs_.push_back(input->id);
@@ -204,13 +214,16 @@ class Delegate {
     // Note that graph.outputs() cannot be used directly, as the notion of
     // graph output has a different meaning in public API and GPU-internal API.
     {
+      outputs_.clear();
       outputs_.reserve(delegate_params->output_tensors->size);
       for (int i = 0; i < delegate_params->output_tensors->size; ++i) {
         const int tensor_index = delegate_params->output_tensors->data[i];
         auto* tensor = context->tensors + tensor_index;
+        tflite_graph_io.insert(tensor_index);
         const auto* output = find_value(tensor_index);
         if (!output || tensor->type != TfLiteType::kTfLiteFloat32) {
-          return NotFoundError("Output tensor is not found in the graph.");
+          return absl::NotFoundError(
+              "Output tensor is not found in the graph.");
         }
 
         outputs_.push_back(output->id);
@@ -248,6 +261,8 @@ class Delegate {
         options_.compile_options.preferred_gl_object_type);
     compile_options.dynamic_batch =
         static_cast<bool>(options_.compile_options.dynamic_batch_enabled);
+    compile_options.inline_parameters =
+        static_cast<bool>(options_.compile_options.inline_parameters);
     auto shaders = NewNodeShaderRegistry();
     GpuInfo gpu_info;
     RETURN_IF_ERROR(RequestGpuInfo(&gpu_info));
@@ -255,7 +270,7 @@ class Delegate {
     auto workgroups_calculator =
         BestEffortWorkgroupsCalculator(options_.metadata, gpu_info);
     std::unique_ptr<CompiledModel> compiled_model;
-    RETURN_IF_ERROR(Compile(compile_options, graph, *shaders,
+    RETURN_IF_ERROR(Compile(compile_options, graph, tflite_graph_io, *shaders,
                             *workgroups_calculator, &compiled_model));
 
     // Create inference context.
@@ -263,17 +278,10 @@ class Delegate {
     RETURN_IF_ERROR(compiled_model->NewRun(runtime_options, &phwc4_objects_,
                                            command_queue_.get(),
                                            &inference_context_));
-    return OkStatus();
+    return absl::OkStatus();
   }
 
-  Status Invoke(TfLiteContext* context) {
-    const EGLContext egl_context_at_delegate_init = env_->context().context();
-    const EGLContext egl_context_at_delegate_invoke = eglGetCurrentContext();
-    if (egl_context_at_delegate_init != egl_context_at_delegate_invoke) {
-      return FailedPreconditionError(
-          "Delegate should run on the same thread where it was initialized.");
-    }
-
+  absl::Status Invoke(TfLiteContext* context) {
     // Push input data from a tensor to GPU.
     for (ValueId id : inputs_) {
       const ValueRef& ref = tensors_[id];
@@ -323,18 +331,18 @@ class Delegate {
         RETURN_IF_ERROR(CopyFromBufferHandle(id, &tensor));
       }
     }
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   TfLiteDelegate* tflite_delegate() { return &delegate_; }
 
  private:
-  Status FindObject(ValueId id, ValueRef* ref) const {
+  absl::Status FindObject(ValueId id, ValueRef* ref) const {
     if (id >= tensors_.size()) {
-      return InvalidArgumentError("Invalid buffer id");
+      return absl::InvalidArgumentError("Invalid buffer id");
     }
     *ref = tensors_[id];
-    return OkStatus();
+    return absl::OkStatus();
   }
 
   TfLiteDelegate delegate_ = {
@@ -360,18 +368,6 @@ class Delegate {
   std::unique_ptr<InferenceContext> inference_context_;
 };
 
-// TODO(impjdi): Merge with MetalDelegate.
-bool IsAllFloatTensors(const TfLiteContext* context,
-                       const TfLiteIntArray* array) {
-  for (int i = 0; i < array->size; ++i) {
-    const TfLiteTensor* t = context->tensors + array->data[i];
-    if (t->allocation_type == kTfLiteArenaRw && t->type != kTfLiteFloat32) {
-      return false;
-    }
-  }
-  return true;
-}
-
 inline Delegate* GetGpuDelegate(TfLiteNode* node) {
   return reinterpret_cast<Delegate*>(node->user_data);
 }
@@ -391,8 +387,8 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
         // for whatever reason forbids that.
         const auto status = gpu_delegate->Prepare(context, params);
         if (status.ok()) return gpu_delegate;
-        context->ReportError(context, "TfLiteGpuDelegate Prepare: %s",
-                             status.error_message().c_str());
+        TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate Prepare: %s",
+                           std::string(status.message()).c_str());
         return nullptr;
       },
       // .free
@@ -405,8 +401,8 @@ TfLiteStatus DelegatePrepare(TfLiteContext* context, TfLiteDelegate* delegate) {
       [](TfLiteContext* context, TfLiteNode* node) -> TfLiteStatus {
         const auto status = GetGpuDelegate(node)->Invoke(context);
         if (status.ok()) return kTfLiteOk;
-        context->ReportError(context, "TfLiteGpuDelegate Invoke: %s",
-                             status.error_message().c_str());
+        TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate Invoke: %s",
+                           std::string(status.message()).c_str());
         return kTfLiteError;
       },
       nullptr,              // .profiling_string
@@ -429,8 +425,8 @@ TfLiteStatus DelegateCopyFromBufferHandle(TfLiteContext* context,
   if (!gpu_delegate) return kTfLiteError;
   const auto status = gpu_delegate->CopyFromBufferHandle(buffer_handle, tensor);
   if (status.ok()) return kTfLiteOk;
-  context->ReportError(context, "TfLiteGpuDelegate CopyFromBufferHandle: %s",
-                       status.error_message().c_str());
+  TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate CopyFromBufferHandle: %s",
+                     std::string(status.message()).c_str());
   return kTfLiteError;
 }
 
@@ -442,8 +438,8 @@ TfLiteStatus DelegateCopyToBufferHandle(TfLiteContext* context,
   if (!gpu_delegate) return kTfLiteError;
   const auto status = gpu_delegate->CopyToBufferHandle(buffer_handle, tensor);
   if (status.ok()) return kTfLiteOk;
-  context->ReportError(context, "TfLiteGpuDelegate CopyToBufferHandle: %s",
-                       status.error_message().c_str());
+  TF_LITE_KERNEL_LOG(context, "TfLiteGpuDelegate CopyToBufferHandle: %s",
+                     std::string(status.message()).c_str());
   return kTfLiteError;
 }
 
@@ -451,6 +447,22 @@ TfLiteStatus DelegateCopyToBufferHandle(TfLiteContext* context,
 }  // namespace gl
 }  // namespace gpu
 }  // namespace tflite
+
+TfLiteGlCompileOptions TfLiteGlCompileOptionsDefault() {
+  TfLiteGlCompileOptions options;
+  options.precision_loss_allowed = 0;
+  options.preferred_gl_object_type = TFLITE_GL_OBJECT_TYPE_FASTEST;
+  options.dynamic_batch_enabled = 0;
+  options.inline_parameters = 0;
+  return options;
+}
+
+TfLiteGpuDelegateOptions TfLiteGpuDelegateOptionsDefault() {
+  TfLiteGpuDelegateOptions options;
+  options.metadata = nullptr;
+  options.compile_options = TfLiteGlCompileOptionsDefault();
+  return options;
+}
 
 TfLiteDelegate* TfLiteGpuDelegateCreate(
     const TfLiteGpuDelegateOptions* options) {

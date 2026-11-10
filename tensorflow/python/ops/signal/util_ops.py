@@ -14,17 +14,15 @@
 # ==============================================================================
 """Utility ops shared across tf.contrib.signal."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-import fractions
+import fractions  # gcd is here for Python versions < 3
+import math  # Get gcd here for Python versions >= 3
+import sys
 
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import while_loop
 
 
 def gcd(a, b, name=None):
@@ -59,9 +57,13 @@ def gcd(a, b, name=None):
     const_a = tensor_util.constant_value(a)
     const_b = tensor_util.constant_value(b)
     if const_a is not None and const_b is not None:
-      return ops.convert_to_tensor(fractions.gcd(const_a, const_b))
+      if sys.version_info.major < 3:
+        math_gcd = fractions.gcd
+      else:
+        math_gcd = math.gcd
+      return ops.convert_to_tensor(math_gcd(const_a, const_b))
 
     cond = lambda _, b: math_ops.greater(b, array_ops.zeros_like(b))
     body = lambda a, b: [b, math_ops.mod(a, b)]
-    a, b = control_flow_ops.while_loop(cond, body, [a, b], back_prop=False)
+    a, b = while_loop.while_loop(cond, body, [a, b], back_prop=False)
     return a

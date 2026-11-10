@@ -36,15 +36,15 @@ struct FakeResult {};
 // NoOp optimizer stage that supports all the node types and does nothing
 class FakeOptimizerStage : public GraphOptimizerStage<FakeResult> {
  public:
-  explicit FakeOptimizerStage(const string& optimizer_name,
-                              const string& stage_name,
+  explicit FakeOptimizerStage(const std::string& optimizer_name,
+                              const std::string& stage_name,
                               const GraphOptimizerContext& ctx)
       : GraphOptimizerStage(optimizer_name, stage_name, ctx) {}
   ~FakeOptimizerStage() override = default;
 
   bool IsSupported(const NodeDef* node) const override { return true; }
-  Status TrySimplify(NodeDef* node, FakeResult* result) override {
-    return Status::OK();
+  absl::Status TrySimplify(NodeDef* node, FakeResult* result) override {
+    return absl::OkStatus();
   }
 };
 
@@ -73,11 +73,12 @@ TEST_F(GraphOptimizerStageTest, OptimizedNodeName) {
 
   // Without rewrite rule
   EXPECT_EQ(stage.OptimizedNodeName(node), "a/b/c/my_opt/my_stg_Add");
-  EXPECT_EQ(stage.OptimizedNodeName(node, std::vector<string>({"Mul", "Sqrt"})),
-            "a/b/c/my_opt/my_stg_Add_Mul_Sqrt");
+  EXPECT_EQ(
+      stage.OptimizedNodeName(node, std::vector<std::string>({"Mul", "Sqrt"})),
+      "a/b/c/my_opt/my_stg_Add_Mul_Sqrt");
 
   // With rewrite rule
-  const string rewrite = "my_rewrite";
+  const std::string rewrite = "my_rewrite";
   EXPECT_EQ(stage.OptimizedNodeName(node, rewrite),
             "a/b/c/my_opt/my_stg_my_rewrite_Add");
 }
@@ -104,7 +105,7 @@ TEST_F(GraphOptimizerStageTest, UniqueOptimizedNodeName) {
             "a/b/c/my_opt/my_stg_A_unique0");
 
   // With rewrite rule
-  const string rewrite = "my_rewrite";
+  const std::string rewrite = "my_rewrite";
   EXPECT_EQ(stage.UniqueOptimizedNodeName(node, rewrite),
             "a/b/c/my_opt/my_stg_my_rewrite_A_unique1");
 }
@@ -133,7 +134,7 @@ TEST_F(GraphOptimizerStageTest, UniqueOptimizedNodeNameWithUsedNodeNames) {
             "a/b/c/my_opt/my_stg_A_unique1");
 
   // With rewrite rule
-  const string rewrite = "my_rewrite";
+  const std::string rewrite = "my_rewrite";
   EXPECT_EQ(stage.UniqueOptimizedNodeName(node, rewrite),
             "a/b/c/my_opt/my_stg_my_rewrite_A_unique2");
 }
@@ -167,17 +168,17 @@ TEST_F(GraphOptimizerStageTest, GetInputNodeAndProperties) {
   EXPECT_EQ(add_node->input(0), "a");
   EXPECT_EQ(add_node->input(1), "b");
 
-  OpInfo::TensorProperties add_properties;
+  const OpInfo::TensorProperties* add_properties;
   TF_CHECK_OK(stage.GetTensorProperties("Add", &add_properties));
-  EXPECT_EQ(add_properties.dtype(), DT_FLOAT);
+  EXPECT_EQ(add_properties->dtype(), DT_FLOAT);
 
-  OpInfo::TensorProperties a_properties;
+  const OpInfo::TensorProperties* a_properties;
   TF_CHECK_OK(stage.GetTensorProperties("a:0", &a_properties));
-  EXPECT_EQ(a_properties.dtype(), DT_FLOAT_REF);
+  EXPECT_EQ(a_properties->dtype(), DT_FLOAT_REF);
 
-  OpInfo::TensorProperties b_properties;
+  const OpInfo::TensorProperties* b_properties;
   TF_CHECK_OK(stage.GetTensorProperties("b:0", &b_properties));
-  EXPECT_EQ(b_properties.dtype(), DT_FLOAT_REF);
+  EXPECT_EQ(b_properties->dtype(), DT_FLOAT_REF);
 }
 
 TEST_F(GraphOptimizerStageTest, AddNodes) {
@@ -228,6 +229,10 @@ TEST_F(GraphOptimizerStageTest, AddNodes) {
   NodeDef* empty_node_by_name;
   TF_CHECK_OK(stage.GetInputNode("Add_2", &empty_node_by_name));
   EXPECT_EQ(empty_node, empty_node_by_name);
+
+  // Check that AddEmptyNode adds a unique suffix if the node already exists.
+  NodeDef* unique_empty_node = stage.AddEmptyNode("Add_2");
+  EXPECT_EQ(unique_empty_node->name(), "Add_2_0");
 }
 
 }  // namespace

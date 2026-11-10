@@ -13,31 +13,64 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/compiler/jit/mark_for_compilation_pass_test_helper.h"
+#include "tensorflow/compiler/jit/mark_for_compilation_pass.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <initializer_list>
+#include <memory>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_map.h"
-#include "absl/memory/memory.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/match.h"
+#include "absl/strings/str_join.h"
+#include "absl/strings/str_split.h"
+#include "absl/strings/string_view.h"
+#include "absl/types/span.h"
 #include "tensorflow/cc/framework/ops.h"
+#include "tensorflow/cc/framework/scope.h"
 #include "tensorflow/cc/ops/array_ops.h"
+#include "tensorflow/cc/ops/const_op.h"
+#include "tensorflow/cc/ops/control_flow_ops.h"
 #include "tensorflow/cc/ops/control_flow_ops_internal.h"
+#include "tensorflow/cc/ops/data_flow_ops.h"
 #include "tensorflow/cc/ops/function_ops.h"
 #include "tensorflow/cc/ops/functional_ops.h"
 #include "tensorflow/cc/ops/list_ops.h"
+#include "tensorflow/cc/ops/logging_ops.h"
+#include "tensorflow/cc/ops/math_ops.h"
+#include "tensorflow/cc/ops/no_op.h"
+#include "tensorflow/cc/ops/random_ops.h"
 #include "tensorflow/cc/ops/resource_variable_ops.h"
 #include "tensorflow/cc/ops/sendrecv_ops.h"
-#include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/cc/ops/state_ops.h"
 #include "tensorflow/compiler/jit/defs.h"
+#include "tensorflow/compiler/jit/flags.h"
+#include "tensorflow/compiler/jit/mark_for_compilation_pass_test_helper.h"
 #include "tensorflow/compiler/jit/node_matchers.h"
-#include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
+#include "tensorflow/compiler/jit/xla_cluster_util.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "tensorflow/core/common_runtime/graph_def_builder_util.h"
+#include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/graph/algorithm.h"
-#include "tensorflow/core/graph/graph_constructor.h"
+#include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/graph/graph_def_builder.h"
-#include "tensorflow/core/graph/graph_def_builder_util.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/graph/node_builder.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/test.h"
 
 using ::tensorflow::testing::FindNodeByName;
@@ -45,14 +78,19 @@ using ::tensorflow::testing::FindNodeByName;
 namespace tensorflow {
 namespace {
 
+static bool Initialized = [] {
+  tensorflow::GetXlaDeviceFlags()->tf_xla_enable_xla_devices = true;
+  return true;
+}();
+
 REGISTER_OP("UncompilableNullary").Output("o: float");
 REGISTER_OP("UncompilableUnary").Input("a: float").Output("o: float");
 
-std::unordered_map<string, string> GetClusters(const Graph& graph) {
-  std::unordered_map<string, string> ids;
+std::unordered_map<std::string, std::string> GetClusters(const Graph& graph) {
+  std::unordered_map<std::string, std::string> ids;
   for (Node* node : graph.nodes()) {
-    string cluster;
-    if (GetNodeAttr(node->attrs(), kXlaClusterAttr, &cluster).ok()) {
+    std::string cluster;
+    if (TryGetNodeAttr(node->attrs(), kXlaClusterAttr, &cluster)) {
       CHECK(!cluster.empty());
       ids[node->name()] = cluster;
     }
@@ -67,10 +105,22 @@ std::unordered_map<string, string> GetClusters(const Graph& graph) {
   return ids;
 }
 
-absl::flat_hash_map<string, std::vector<string>> GetClusterSets(
-    const Graph& g, std::vector<string>* cluster_names = nullptr) {
+std::set<std::string> GetClusterNames(const Graph& graph) {
+  std::set<std::string> names;
+  for (Node* node : graph.nodes()) {
+    std::string cluster;
+    if (TryGetNodeAttr(node->attrs(), kXlaClusterAttr, &cluster)) {
+      CHECK(!cluster.empty());
+      names.insert(cluster);
+    }
+  }
+  return names;
+}
+
+absl::flat_hash_map<std::string, std::vector<std::string>> GetClusterSets(
+    const Graph& g, std::vector<std::string>* cluster_names = nullptr) {
   CHECK(cluster_names == nullptr || cluster_names->empty());
-  absl::flat_hash_map<string, std::vector<string>> cluster_sets;
+  absl::flat_hash_map<std::string, std::vector<std::string>> cluster_sets;
   for (const auto& p : GetClusters(g)) {
     cluster_sets[p.second].push_back(p.first);
   }
@@ -88,7 +138,6 @@ absl::flat_hash_map<string, std::vector<string>> GetClusterSets(
 
 TEST(XlaCompilationTest, Chains) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a =
@@ -114,7 +163,6 @@ TEST(XlaCompilationTest, Chains) {
 
 TEST(XlaCompilationTest, UncompilableCycles) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a = ops::SourceOp("Const", builder.opts()
@@ -135,7 +183,6 @@ TEST(XlaCompilationTest, UncompilableCycles) {
 
 TEST(XlaCompilationTest, CompilableCycles) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a = ops::SourceOp("Const", builder.opts()
@@ -157,7 +204,6 @@ TEST(XlaCompilationTest, CompilableCycles) {
 
 TEST(XlaCompilationTest, StringUnsupported) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a = ops::SourceOp(
@@ -175,9 +221,26 @@ TEST(XlaCompilationTest, StringUnsupported) {
   EXPECT_TRUE(clusters.empty());
 }
 
+TEST(XlaCompilationTest, WhereUnsupported) {
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+  {
+    GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
+    Node* a = ops::SourceOp("Const", builder.opts()
+                                         .WithName("A")
+                                         .WithAttr("dtype", DT_INT32)
+                                         .WithAttr("value", Tensor()));
+    Node* b = ops::UnaryOp("Where", a, builder.opts().WithName("B"));
+    ops::BinaryOp("Gather", b, a, builder.opts().WithName("C"));
+    TF_EXPECT_OK(GraphDefBuilderToGraph(builder, graph.get()));
+  }
+
+  TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
+  auto clusters = GetClusters(*graph);
+  EXPECT_TRUE(!clusters.empty());
+}
+
 TEST(XlaCompilationTest, HalfSupported) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Tensor t(DT_HALF, TensorShape());
@@ -253,7 +316,6 @@ TEST(XlaCompilationTest, FunctionCalls) {
   FunctionLibraryDefinition flib_def(OpRegistry::Global(), flib);
 
   std::unique_ptr<Graph> graph(new Graph(&flib_def));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately, &flib_def);
     Node* a =
@@ -291,7 +353,6 @@ TEST(XlaCompilationTest, CallXlaDeviceFuncWithResourceOp) {
   FunctionLibraryDefinition flib_def(OpRegistry::Global(), flib);
 
   std::unique_ptr<Graph> graph(new Graph(&flib_def));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately, &flib_def);
     Node* resource =
@@ -315,7 +376,7 @@ TEST(XlaCompilationTest, CallXlaDeviceFuncWithResourceOp) {
     TF_EXPECT_OK(GraphDefBuilderToGraph(builder, graph.get()));
   }
 
-  string xla_cpu_device = "/job:worker/replica:0/task:0/device:XLA_CPU:0";
+  std::string xla_cpu_device = "/job:worker/replica:0/task:0/device:XLA_CPU:0";
   testing::FindNodeByName(graph.get(), "A")
       ->set_assigned_device_name(xla_cpu_device);
   testing::FindNodeByName(graph.get(), "tanh0")
@@ -332,8 +393,8 @@ TEST(XlaCompilationTest, CallXlaDeviceFuncWithResourceOp) {
   EXPECT_NE(clusters["A"], "");
 }
 
-static Status GradForUnaryCwise(FunctionDef* g,
-                                std::vector<FunctionDefHelper::Node> nodes) {
+static absl::Status GradForUnaryCwise(
+    FunctionDef* g, std::vector<FunctionDefHelper::Node> nodes) {
   for (auto& n : nodes) {
     if (n.attr.empty()) {
       n.attr = {{"T", DT_FLOAT}};
@@ -348,11 +409,11 @@ static Status GradForUnaryCwise(FunctionDef* g,
       {},
       // Nodes
       nodes);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 // A gradient containing only supported operators
-Status SupportedGrad(const AttrSlice& attrs, FunctionDef* g) {
+absl::Status SupportedGrad(const AttrSlice& attrs, FunctionDef* g) {
   // clang-format off
   return GradForUnaryCwise(g, {
       {{"y"}, "Tanh", {"x"}},
@@ -366,7 +427,7 @@ Status SupportedGrad(const AttrSlice& attrs, FunctionDef* g) {
 REGISTER_OP_GRADIENT("Supported", SupportedGrad);
 
 // A gradient containing an unsupported operator.
-Status UnsupportedGrad(const AttrSlice& attrs, FunctionDef* g) {
+absl::Status UnsupportedGrad(const AttrSlice& attrs, FunctionDef* g) {
   // clang-format off
   return GradForUnaryCwise(g, {
       {{"y"}, "Tanh", {"x"}},
@@ -381,7 +442,6 @@ REGISTER_OP_GRADIENT("Unsupported", UnsupportedGrad);
 
 TEST(XlaCompilationTest, SymbolicGradients) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a =
@@ -449,7 +509,6 @@ TEST(XlaCompilationTest, Loops) {
 
 TEST(XlaCompilationTest, CyclesWithAllDifferentScopesGlobalJitOverridden) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a = ops::SourceOp("Const", builder.opts()
@@ -463,7 +522,7 @@ TEST(XlaCompilationTest, CyclesWithAllDifferentScopesGlobalJitOverridden) {
     ops::BinaryOp(
         "MatMul", a, b,
         builder.opts().WithName("C").WithAttr(kXlaScopeAttr, "ScopeC"));
-    TF_CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
+    CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
   }
 
   FunctionDefLibrary flib;
@@ -483,7 +542,6 @@ TEST(XlaCompilationTest, CyclesWithAllDifferentScopesGlobalJitOverridden) {
 
 TEST(XlaCompilationTest, CyclesWithAllDifferentScopes) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a = ops::SourceOp("Const", builder.opts()
@@ -497,7 +555,7 @@ TEST(XlaCompilationTest, CyclesWithAllDifferentScopes) {
     ops::BinaryOp(
         "MatMul", a, b,
         builder.opts().WithName("C").WithAttr(kXlaScopeAttr, "ScopeC"));
-    TF_CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
+    CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
   }
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(
@@ -512,7 +570,6 @@ TEST(XlaCompilationTest, CyclesWithAllDifferentScopes) {
 
 TEST(XlaCompilationTest, CyclesWithSplittingScopes) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a = ops::SourceOp("Const", builder.opts()
@@ -536,7 +593,7 @@ TEST(XlaCompilationTest, CyclesWithSplittingScopes) {
                       .WithName("D")
                       .WithAttr(kXlaCompileAttr, true)
                       .WithAttr(kXlaScopeAttr, "Scope2"));
-    TF_CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
+    CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
   }
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(
@@ -555,7 +612,6 @@ TEST(XlaCompilationTest, CyclesWithSplittingScopes) {
 
 TEST(XlaCompilationTest, CyclesWithDifferentScopesAndBridge) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a = ops::SourceOp("Const", builder.opts()
@@ -570,7 +626,7 @@ TEST(XlaCompilationTest, CyclesWithDifferentScopesAndBridge) {
                                .WithAttr(kXlaCompileAttr, true)
                                .WithAttr(kXlaScopeAttr, "ScopeB"));
     ops::BinaryOp("MatMul", a, b, builder.opts().WithName("C"));
-    TF_CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
+    CHECK_OK(GraphDefBuilderToGraph(builder, graph.get()));
   }
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(
@@ -580,9 +636,9 @@ TEST(XlaCompilationTest, CyclesWithDifferentScopesAndBridge) {
   // The computation is: C = A @ relu(A)
   // where A sits in ScopeA, relu(A) sits in ScopeB, and C sits in ScopeC.
   // In this case, we cannot fuse anything.
-  EXPECT_EQ(3, clusters.size());
+  EXPECT_EQ(2, clusters.size());
   EXPECT_NE(clusters["A"], clusters["B"]);
-  EXPECT_EQ(clusters["B"], clusters["C"]);
+  EXPECT_NE(clusters["B"], clusters["C"]);
 }
 
 TEST(XlaCompilationTest, DontClusterNodesWithMismatchingDeadness) {
@@ -657,7 +713,7 @@ TEST(XlaCompilationTest, ClusterNodesWithMismatchingInputDeadness) {
 }
 
 namespace {
-Node* MakeRead(const Scope& scope, const string& id,
+Node* MakeRead(const Scope& scope, const std::string& id,
                Node** var_handle_op = nullptr) {
   Output var_handle =
       ops::VarHandleOp(scope.WithOpName("Var" + id), DT_FLOAT, TensorShape({}));
@@ -669,7 +725,7 @@ Node* MakeRead(const Scope& scope, const string& id,
   return read.node();
 }
 
-Node* MakeWrite(const Scope& scope, const string& id) {
+Node* MakeWrite(const Scope& scope, const std::string& id) {
   Output var_handle =
       ops::VarHandleOp(scope.WithOpName("Var" + id), DT_FLOAT, TensorShape({}));
   Output value_to_write =
@@ -679,7 +735,7 @@ Node* MakeWrite(const Scope& scope, const string& id) {
   return assign_op.operation.node();
 }
 
-Node* MakeNeutral(const Scope& scope, const string& id) {
+Node* MakeNeutral(const Scope& scope, const std::string& id) {
   return ops::Const(scope.WithOpName("Const" + id), 42.0f).node();
 }
 }  // namespace
@@ -696,11 +752,11 @@ TEST(XlaCompilationTest, ResourcesClusteringAllowed) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
   TF_EXPECT_OK(root.ToGraph(graph.get()));
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
-  absl::flat_hash_map<string, std::vector<string>> cluster_sets =
+  absl::flat_hash_map<std::string, std::vector<std::string>> cluster_sets =
       GetClusterSets(*graph);
   ASSERT_EQ(cluster_sets.size(), 1);
-  std::vector<string> expected_clustered_nodes = {"AssignmentW", "ReadR",
-                                                  "ValueToAssignW"};
+  std::vector<std::string> expected_clustered_nodes = {"AssignmentW", "ReadR",
+                                                       "ValueToAssignW"};
   ASSERT_EQ(cluster_sets.begin()->second, expected_clustered_nodes);
 }
 
@@ -716,7 +772,7 @@ TEST(XlaCompilationTest, ResourcesClusteringDisallowed) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
   TF_EXPECT_OK(root.ToGraph(graph.get()));
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
-  absl::flat_hash_map<string, std::vector<string>> cluster_sets =
+  absl::flat_hash_map<std::string, std::vector<std::string>> cluster_sets =
       GetClusterSets(*graph);
   ASSERT_EQ(cluster_sets.size(), 0);
 }
@@ -742,13 +798,13 @@ TEST(XlaCompilationTest, ChainOfOps) {
   TF_EXPECT_OK(root.ToGraph(graph.get()));
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::vector<string> cluster_names;
-  absl::flat_hash_map<string, std::vector<string>> cluster_sets =
+  std::vector<std::string> cluster_names;
+  absl::flat_hash_map<std::string, std::vector<std::string>> cluster_sets =
       GetClusterSets(*graph, &cluster_names);
 
   ASSERT_EQ(cluster_sets.size(), 1);
 
-  std::vector<string> expected_clustered_nodes_a = {
+  std::vector<std::string> expected_clustered_nodes_a = {
       "AssignmentW1", "ConstN0", "ReadR0", "ValueToAssignW1"};
   ASSERT_EQ(cluster_sets[cluster_names[0]], expected_clustered_nodes_a);
 }
@@ -760,11 +816,11 @@ TEST(XlaCompilationTest, IllegalCycle_UsefulErrorMessage) {
     auto BuildNoopNode = [](absl::string_view name, Graph* graph) {
       NodeDefBuilder builder(name, "NoOp");
       NodeDef def;
-      TF_CHECK_OK(builder.Finalize(&def));
+      CHECK_OK(builder.Finalize(&def));
 
-      Status status;
+      absl::Status status;
       Node* node = graph->AddNode(def, &status);
-      TF_CHECK_OK(status);
+      CHECK_OK(status);
       return node;
     };
 
@@ -778,7 +834,8 @@ TEST(XlaCompilationTest, IllegalCycle_UsefulErrorMessage) {
 
   TF_EXPECT_OK(root.ToGraph(graph.get()));
 
-  Status status = MarkForCompilationPassTestHelper::MarkForCompilation(&graph);
+  absl::Status status =
+      MarkForCompilationPassTestHelper::MarkForCompilation(&graph);
   EXPECT_FALSE(status.ok());
   EXPECT_TRUE(absl::StrContains(status.ToString(),
                                 "Edge from c to a would create a cycle.\n"
@@ -789,7 +846,6 @@ TEST(XlaCompilationTest, IllegalCycle_UsefulErrorMessage) {
 
 TEST(XlaCompilationTest, Retval) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
-  GraphDef graphdef;
   {
     GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
     Node* a = ops::SourceOp("Const", builder.opts()
@@ -844,7 +900,7 @@ TEST(XlaCompilationTest, ConstOp) {
   {
     std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
     Scope root = Scope::NewRootScope().ExitOnError();
-    auto c = ops::Const(root.WithOpName("const"), string("string"));
+    auto c = ops::Const(root.WithOpName("const"), std::string("string"));
     c.node()->AddAttr(kXlaCompileAttr, true);
     TF_ASSERT_OK(root.ToGraph(graph.get()));
     TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
@@ -864,12 +920,12 @@ TEST(XlaCompilationTest, DontClusterIdentityWithRefInput) {
   TF_ASSERT_OK(root.ToGraph(graph.get()));
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   ASSERT_FALSE(clusters.empty());
-  string cluster_name = clusters.begin()->second;
+  std::string cluster_name = clusters.begin()->second;
 
-  std::unordered_map<string, string> expected_clusters(
+  std::unordered_map<std::string, std::string> expected_clusters(
       {{"negate", cluster_name}, {"add", cluster_name}});
   EXPECT_EQ(clusters, expected_clusters);
 }
@@ -887,12 +943,12 @@ TEST(XlaCompilationTest, ClusterIdentityWithNonRefInput) {
   TF_ASSERT_OK(root.ToGraph(graph.get()));
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   ASSERT_FALSE(clusters.empty());
-  string cluster_name = clusters.begin()->second;
+  std::string cluster_name = clusters.begin()->second;
 
-  std::unordered_map<string, string> expected_clusters(
+  std::unordered_map<std::string, std::string> expected_clusters(
       {{"negate", cluster_name},
        {"identity", cluster_name},
        {"add", cluster_name}});
@@ -919,7 +975,7 @@ TEST(XlaCompilationTest, ClusterControlTrigger) {
   TF_ASSERT_OK(root.ToGraph(graph.get()));
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   // TODO(b/118970344): ctrl_trigger_a has inputs with mismatching deadness so
   // it won't be clustered.  ctrl_trigger_b is okay to cluster but we don't
@@ -945,7 +1001,7 @@ TEST(XlaCompilationTest, RandomShape) {
   TF_ASSERT_OK(root.ToGraph(graph.get()));
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_EQ(clusters["shape"], "");
 }
 
@@ -973,7 +1029,7 @@ TEST(XlaCompilationTest, RandomShapeWithFunc) {
   NodeDef call_node;
   call_node.set_name("fn_call");
   call_node.set_op("Stateful_func");
-  Status status;
+  absl::Status status;
   Node* call = root.graph()->AddNode(call_node, &status);
   TF_ASSERT_OK(status);
 
@@ -986,12 +1042,12 @@ TEST(XlaCompilationTest, RandomShapeWithFunc) {
 
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
   TF_ASSERT_OK(root.ToGraph(graph.get()));
-  auto fld = absl::make_unique<FunctionLibraryDefinition>(OpRegistry::Global(),
+  auto fld = std::make_unique<FunctionLibraryDefinition>(OpRegistry::Global(),
                                                           flib_def);
   TF_ASSERT_OK(
       MarkForCompilationPassTestHelper::MarkForCompilation(&graph, fld.get()));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_EQ(clusters["fn_call"], "");
 }
 
@@ -1017,12 +1073,12 @@ TEST(XlaCompilationTest, RandomShapeOnXlaDevice) {
 
   for (Node* n : graph->nodes()) {
     if (absl::StartsWith(n->name(), /*prefix=*/"test/")) {
-      n->set_assigned_device_name(string(xla_gpu_device));
+      n->set_assigned_device_name(std::string(xla_gpu_device));
     }
   }
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_EQ(clusters["test/shape_rng"], "");
   EXPECT_EQ(clusters["test/reshape"], "");
 }
@@ -1050,12 +1106,12 @@ TEST(XlaCompilationTest, TensorArrayShapeOnXlaDevice) {
 
   for (Node* n : graph->nodes()) {
     if (absl::StartsWith(n->name(), /*prefix=*/"test/")) {
-      n->set_assigned_device_name(string(xla_gpu_device));
+      n->set_assigned_device_name(std::string(xla_gpu_device));
     }
   }
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_NE(clusters["test/read"], "");
   EXPECT_EQ(clusters["test/read"], clusters["test/reshape"]);
 }
@@ -1096,15 +1152,15 @@ TEST(XlaCompilationTest, DontClusterMergingNodes) {
 
   for (Node* n : graph->nodes()) {
     if (absl::EndsWith(n->name(), /*suffix=*/"dev0")) {
-      n->set_assigned_device_name(string(xla_gpu_dev0));
+      n->set_assigned_device_name(std::string(xla_gpu_dev0));
     } else if (absl::EndsWith(n->name(), /*suffix=*/"dev1")) {
-      n->set_assigned_device_name(string(xla_gpu_dev1));
+      n->set_assigned_device_name(std::string(xla_gpu_dev1));
     }
   }
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
   // Each of the MatMuls should be in a separate cluster.
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_NE(clusters["MatMul0_dev0"], clusters["MatMul1_dev1"]);
   EXPECT_NE(clusters["MatMulCombined_dev1"], clusters["MatMul0_dev0"]);
   EXPECT_NE(clusters["MatMulCombined_dev1"], clusters["MatMul1_dev1"]);
@@ -1133,17 +1189,17 @@ TEST(XlaCompilationTest, DontClusterMergingNodesOnCPU) {
 
   for (Node* n : graph->nodes()) {
     if (absl::EndsWith(n->name(), /*suffix=*/"cpu")) {
-      n->set_assigned_device_name(string(xla_cpu_dev0));
+      n->set_assigned_device_name(std::string(xla_cpu_dev0));
     } else if (absl::EndsWith(n->name(), /*suffix=*/"dev0")) {
-      n->set_assigned_device_name(string(xla_gpu_dev0));
+      n->set_assigned_device_name(std::string(xla_gpu_dev0));
     } else if (absl::EndsWith(n->name(), /*suffix=*/"dev1")) {
-      n->set_assigned_device_name(string(xla_gpu_dev1));
+      n->set_assigned_device_name(std::string(xla_gpu_dev1));
     }
   }
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
   // Each of the MatMuls should be in a separate cluster.
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_NE(clusters["MatMul0_dev0"], clusters["MatMul1_dev1"]);
   EXPECT_NE(clusters["MatMulCombined_cpu"], clusters["MatMul0_dev0"]);
   EXPECT_NE(clusters["MatMulCombined_cpu"], clusters["MatMul1_dev1"]);
@@ -1186,14 +1242,14 @@ TEST(XlaCompilationTest, NOT_DontClusterSpreadingNodes) {
   TF_ASSERT_OK(root.ToGraph(graph.get()));
   for (Node* n : graph->nodes()) {
     if (absl::EndsWith(n->name(), /*suffix=*/"dev0")) {
-      n->set_assigned_device_name(string(xla_gpu_dev0));
+      n->set_assigned_device_name(std::string(xla_gpu_dev0));
     } else if (absl::EndsWith(n->name(), /*suffix=*/"dev1")) {
-      n->set_assigned_device_name(string(xla_gpu_dev1));
+      n->set_assigned_device_name(std::string(xla_gpu_dev1));
     }
   }
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_EQ(clusters["A_dev0"], clusters["MatMulSource_dev0"]);
   EXPECT_NE(clusters["MatMul0_dev0"], clusters["MatMul1_dev1"]);
   EXPECT_NE(clusters["MatMulSource_dev0"], clusters["MatMul1_dev1"]);
@@ -1217,12 +1273,12 @@ TEST(XlaCompilationTest, ClusterStatefulRandomOpOnXlaDevice) {
 
   for (Node* n : graph->nodes()) {
     if (absl::StartsWith(n->name(), /*prefix=*/"test/")) {
-      n->set_assigned_device_name(string(xla_cpu_device));
+      n->set_assigned_device_name(std::string(xla_cpu_device));
     }
   }
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_NE(clusters["test/a"], "");
   EXPECT_NE(clusters["test/b"], "");
   EXPECT_NE(clusters["test/c"], "");
@@ -1240,7 +1296,7 @@ TEST(XlaCompilationTest, DontAutoClusterStatefulRandomOp) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_EQ(clusters["test/a"], "");
   EXPECT_EQ(clusters["test/b"], "");
 }
@@ -1262,12 +1318,12 @@ TEST(XlaCompilationTest, ClusterDummyOpsOnXlaDevice) {
 
   for (Node* n : graph->nodes()) {
     if (absl::StartsWith(n->name(), /*prefix=*/"test/")) {
-      n->set_assigned_device_name(string(xla_cpu_device));
+      n->set_assigned_device_name(std::string(xla_cpu_device));
     }
   }
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_NE(clusters["test/check"], "");
   EXPECT_NE(clusters["test/greaterequal"], "");
   EXPECT_NE(clusters["test/assert"], "");
@@ -1287,7 +1343,7 @@ TEST(XlaCompilationTest, DontAutoClusterDummyOps) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_EQ(clusters["test/assert"], "");
   EXPECT_EQ(clusters["test/check"], "");
 }
@@ -1308,7 +1364,7 @@ TEST(XlaCompilationTest, DontAutoClusterOpsProducingVariant) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_EQ(clusters["test/tensor_list_reserve"], "");
 }
 
@@ -1336,7 +1392,7 @@ TEST(XlaCompilationTest, DontAutoClusterOpsConsumingVariant) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_EQ(clusters["test/tensor_list_element_shape"], "");
 }
 
@@ -1354,7 +1410,7 @@ TEST(XlaCompilationTest, ClusterOpsProducingVariantIfOnXlaDevice) {
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
   TF_ASSERT_OK(root.ToGraph(graph.get()));
 
-  string xla_cpu_device = "/job:worker/replica:0/task:0/device:XLA_CPU:0";
+  std::string xla_cpu_device = "/job:worker/replica:0/task:0/device:XLA_CPU:0";
   for (Node* n : graph->nodes()) {
     if (absl::StartsWith(n->name(), /*prefix=*/"test/")) {
       n->set_assigned_device_name(xla_cpu_device);
@@ -1363,7 +1419,7 @@ TEST(XlaCompilationTest, ClusterOpsProducingVariantIfOnXlaDevice) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
   EXPECT_NE(clusters["test/tensor_list_reserve"], "");
 }
 
@@ -1390,7 +1446,7 @@ TEST(XlaCompilationTest, CreateCombinedCpuGpuClusters) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   EXPECT_NE(clusters["test/x"], "");
 
@@ -1414,7 +1470,7 @@ TEST(XlaCompilationTest, DontCreateGpu0AndGpu1Clusters) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   EXPECT_EQ(clusters["test/x"], "");
   EXPECT_EQ(clusters["test/y"], "");
@@ -1436,7 +1492,7 @@ TEST(XlaCompilationTest, DontCreateCombinedCpuUnknownClusters) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   EXPECT_EQ(clusters["test/x"], "");
   EXPECT_EQ(clusters["test/y"], "");
@@ -1449,8 +1505,8 @@ TEST(XlaCompilationTest, ClusterResourceOpsWhenSafe) {
   Node* resource_read = MakeRead(root, "read", &var_handle);
   Output b = ops::Add(root.WithOpName("test/b"), Output(resource_read, 0), a);
 
-  string resource_read_name = resource_read->name();
-  string var_handle_name = var_handle->name();
+  std::string resource_read_name = resource_read->name();
+  std::string var_handle_name = var_handle->name();
 
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
   TF_ASSERT_OK(root.ToGraph(graph.get()));
@@ -1462,7 +1518,7 @@ TEST(XlaCompilationTest, ClusterResourceOpsWhenSafe) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   EXPECT_NE(clusters["test/b"], "");
   EXPECT_EQ(clusters["test/b"], clusters[resource_read_name]);
@@ -1475,8 +1531,8 @@ TEST(XlaCompilationTest, DontClusterResourceOpsWhenUnsafe) {
   Node* resource_read = MakeRead(root, "read", &var_handle);
   Output b = ops::Add(root.WithOpName("test/b"), Output(resource_read, 0), a);
 
-  string resource_read_name = resource_read->name();
-  string var_handle_name = var_handle->name();
+  std::string resource_read_name = resource_read->name();
+  std::string var_handle_name = var_handle->name();
 
   std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
   TF_ASSERT_OK(root.ToGraph(graph.get()));
@@ -1488,7 +1544,7 @@ TEST(XlaCompilationTest, DontClusterResourceOpsWhenUnsafe) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   EXPECT_EQ(clusters["test/b"], "");
   EXPECT_EQ(clusters[resource_read_name], "");
@@ -1518,7 +1574,7 @@ TEST(XlaCompilationTest, DontClusterNodesWithScopedAllocatorAttr) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   EXPECT_EQ(clusters["test/z"], "");
 }
@@ -1543,10 +1599,426 @@ TEST(XlaCompilationTest, DontClusterNodesWithForwardFromAttr) {
 
   TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
 
-  std::unordered_map<string, string> clusters = GetClusters(*graph);
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
 
   EXPECT_EQ(clusters["test/z"], "");
 }
 
+// Note, this relies on other implementation details to test the
+// specific heuristic we care about here, so other changes might be at fault if
+// this CL breaks. What we care about is that if a ShapeConsumingOp can be
+// connected with a producer or consumer and cannot be clustered with both, it
+// should be clustered with the producer.
+TEST(XlaCompilationTest, ClusterShapeConsumerWithProducer) {
+  Scope root = Scope::NewRootScope().ExitOnError();
+  Output a = ops::Placeholder(root.WithOpName("test/a"), DT_FLOAT);
+  Output b = ops::Placeholder(root.WithOpName("test/b"), DT_FLOAT);
+
+  Output x = ops::MatMul(root.WithOpName("test/x"), a, b);
+  Output y = ops::Size(root.WithOpName("test/y"), x);
+  Output z = ops::Add(root.WithOpName("test/z"), y, y);
+
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+  TF_ASSERT_OK(root.ToGraph(graph.get()));
+
+  // Ensure that the "Size" op can only be clustered with either the producer or
+  // consumer by putting them on different devices.
+  FindNodeByName(graph.get(), "test/x")->set_assigned_device_name(kGPU0);
+  FindNodeByName(graph.get(), "test/y")->set_assigned_device_name(kCPU0);
+  FindNodeByName(graph.get(), "test/z")->set_assigned_device_name(kGPU1);
+
+  TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
+
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
+
+  EXPECT_NE(clusters["test/y"], "");
+  EXPECT_EQ(clusters["test/x"], clusters["test/y"]);
+  EXPECT_NE(clusters["test/z"], clusters["test/y"]);
+}
+
+// Test that ShapeConsuming ops are still fully clustered whenever possible.
+TEST(XlaCompilationTest, ClusterShapeConsumerWithProducerAndConsumer) {
+  Scope root = Scope::NewRootScope().ExitOnError();
+  Output a = ops::Placeholder(root.WithOpName("test/a"), DT_FLOAT);
+  Output b = ops::Placeholder(root.WithOpName("test/b"), DT_FLOAT);
+
+  Output x = ops::MatMul(root.WithOpName("test/x"), a, b);
+  Output y = ops::Size(root.WithOpName("test/y"), x);
+  Output z = ops::Add(root.WithOpName("test/z"), y, y);
+
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+  TF_ASSERT_OK(root.ToGraph(graph.get()));
+
+  TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
+
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
+
+  EXPECT_NE(clusters["test/y"], "");
+  EXPECT_EQ(clusters["test/y"], clusters["test/x"]);
+  EXPECT_EQ(clusters["test/y"], clusters["test/z"]);
+}
+
+void AddCtrlEdge(const Scope& scope, Operation a, Operation b) {
+  scope.graph()->AddControlEdge(a.node(), b.node());
+}
+
+void AddCtrlEdge(const Scope& scope, Output a, Operation b) {
+  AddCtrlEdge(scope, a.op(), b);
+}
+
+void AddCtrlEdge(const Scope& scope, Operation a, Output b) {
+  AddCtrlEdge(scope, a, b.op());
+}
+
+// Tests that we pick a good clustering for graphs that have an integer
+// increment operation control dependent on gradient update operations.
+TEST(XlaCompilationTest, IterationIncrementAndGroupDeps) {
+  Scope scope = Scope::NewRootScope().ExitOnError();
+
+  Output iter =
+      ops::VarHandleOp(scope.WithOpName("iter"), DT_INT64, TensorShape({}));
+  Output weights_0 = ops::VarHandleOp(scope.WithOpName("weights_0"), DT_FLOAT,
+                                      TensorShape({1000}));
+  Output weights_1 = ops::VarHandleOp(scope.WithOpName("weights_1"), DT_FLOAT,
+                                      TensorShape({1000}));
+
+  // We update the weights by adding delta to them (to "simulate" a
+  // ResourceApplyGradientDescent and similar things).
+  Output delta = ops::Placeholder(scope.WithOpName("delta"), DT_FLOAT);
+
+  ops::AssignAddVariableOp increment_op(
+      scope.WithOpName("IncrementIteration"), iter,
+      ops::Const(scope.WithOpName("one"), static_cast<int64_t>(1)));
+
+  ops::AssignAddVariableOp weights_0_update_op(
+      scope.WithOpName("weights_0_update"), weights_0, delta);
+  ops::AssignAddVariableOp weights_1_update_op(
+      scope.WithOpName("weights_1_update"), weights_1, delta);
+
+  ops::NoOp group_deps(scope.WithOpName("group_deps"));
+
+  ops::NoOp some_ctrl_input(scope.WithOpName("some_ctrl_input"));
+
+  Output matmul_input =
+      ops::Placeholder(scope.WithOpName("matmul_input"), DT_FLOAT);
+  Output matmul_0 =
+      ops::MatMul(scope.WithOpName("matmul_0"), matmul_input, matmul_input);
+  Output matmul_1 =
+      ops::MatMul(scope.WithOpName("matmul_1"), matmul_input, matmul_input);
+
+  AddCtrlEdge(scope, increment_op, group_deps);
+  AddCtrlEdge(scope, weights_0_update_op, increment_op);
+  AddCtrlEdge(scope, weights_1_update_op, increment_op);
+
+  AddCtrlEdge(scope, some_ctrl_input, weights_0_update_op);
+  AddCtrlEdge(scope, some_ctrl_input, weights_1_update_op);
+
+  AddCtrlEdge(scope, matmul_0, group_deps);
+  AddCtrlEdge(scope, matmul_1, group_deps);
+
+  AddCtrlEdge(scope, weights_0_update_op, matmul_0);
+  AddCtrlEdge(scope, weights_1_update_op, matmul_1);
+
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+  TF_ASSERT_OK(scope.ToGraph(graph.get()));
+
+  TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
+
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
+
+  EXPECT_NE(clusters["some_ctrl_input"], "");
+  EXPECT_EQ(clusters["some_ctrl_input"], clusters["weights_0_update"]);
+  EXPECT_EQ(clusters["some_ctrl_input"], clusters["weights_1_update"]);
+  EXPECT_EQ(clusters["some_ctrl_input"], clusters["matmul_0"]);
+  EXPECT_EQ(clusters["some_ctrl_input"], clusters["matmul_0"]);
+}
+
+// Test a pattern where a special Identity node is driving consts in a loop.
+// Expect that the Identity node will not go into any clusters.  Note that we
+// create an incomplete graph here (e.g., lacking Enter/Exit/NextIteration,
+// etc.) just enough to test the pattern, as a complete graph may be too
+// cumbersome and unnecessary.
+TEST(XlaCompilationTest, DontClusterTheSpecialIdentityDrivingConstsInLoop) {
+  Scope root = Scope::NewRootScope().ExitOnError();
+
+  Output cond = ops::Placeholder(root.WithOpName("cond"), DT_BOOL);
+  Output value = ops::Placeholder(root.WithOpName("value"), DT_FLOAT);
+  Output loop_cond = ops::LoopCond(root.WithOpName("loop_cond"), cond);
+  ops::Switch switch_node(root.WithOpName("switch"), value, loop_cond);
+
+  Output identity =
+      ops::Identity(root.WithOpName("identity"), switch_node.output_true);
+  Output const_node = ops::Const(root.WithOpName("const"), 1.0f);
+  root.graph()->AddControlEdge(identity.node(), const_node.node());
+  Output tanh0 = ops::Tanh(root.WithOpName("tanh0"), const_node);
+  Output tanh1 = ops::Tanh(root.WithOpName("tanh1"), tanh0);
+  Output add = ops::Add(root.WithOpName("add"), const_node, tanh1);
+
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+  TF_EXPECT_OK(root.ToGraph(graph.get()));
+
+  TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(
+      &graph,
+      MarkForCompilationPassTestHelper::Options().WithDeadnessAnalysis()));
+  auto clusters = GetClusters(*graph);
+
+  EXPECT_EQ(clusters["identity"], "");
+}
+
+TEST(XlaCompilationTest, UnsupportedEnterExitPattern) {
+  // Regression test for b/32350199, where the autoclustering code introduced a
+  // deadlock in a graph containing a while loop.
+  Scope root = Scope::NewRootScope().ExitOnError();
+  auto a = ops::Placeholder(root.WithOpName("A"), DT_FLOAT);
+  auto enter_0 = ops::internal::Enter(root.WithOpName("enter_a"), a, "frame");
+  auto exit_0 = ops::internal::Exit(root.WithOpName("exit_a"), enter_0);
+  auto tanh = ops::Tanh(root.WithOpName("tanh"), exit_0);
+  auto enter_1 =
+      ops::internal::Enter(root.WithOpName("enter_1"), tanh, "frame");
+  auto exit_1 = ops::internal::Exit(root.WithOpName("exit_1"), enter_1);
+
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+  TF_EXPECT_OK(root.ToGraph(graph.get()));
+
+  TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
+  auto clusters = GetClusters(*graph);
+
+  // Nothing should be compiled.
+  EXPECT_EQ(0, clusters.size());
+}
+
+TEST(XlaCompilationTest, DeterministicClusterNames) {
+  auto create_graph =
+      [](absl::string_view output_name) -> std::unique_ptr<Graph> {
+    std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+    GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
+    Tensor t(DT_FLOAT, TensorShape());
+    t.scalar<float>()() = 0.0f;
+    Node* a = ops::SourceOp("Const", builder.opts()
+                                         .WithName("A")
+                                         .WithAttr("dtype", DT_FLOAT)
+                                         .WithAttr("value", t));
+    Node* b = ops::UnaryOp("Neg", a, builder.opts().WithName("B"));
+    ops::BinaryOp("MatMul", a, b, builder.opts().WithName(output_name));
+    TF_EXPECT_OK(GraphDefBuilderToGraph(builder, graph.get()));
+    return graph;
+  };
+
+  // Checks if two cluster names match for all parts except their sequence
+  // number. Names are expected as: cluster_fp_seq#
+  auto cluster_names_match = [](absl::string_view lhs_cluster_name,
+                                absl::string_view rhs_cluster_name) {
+    std::vector<absl::string_view> lhs_cluster_name_parts =
+        absl::StrSplit(lhs_cluster_name, '_');
+    std::vector<absl::string_view> rhs_cluster_name_parts =
+        absl::StrSplit(rhs_cluster_name, '_');
+
+    if (lhs_cluster_name_parts.size() != 3) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("unexpected lhs cluster name: ", lhs_cluster_name));
+    }
+
+    if (rhs_cluster_name_parts.size() != 3) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("unexpected rhs cluster name: ", rhs_cluster_name));
+    }
+
+    if (lhs_cluster_name_parts[0] != rhs_cluster_name_parts[0] ||
+        lhs_cluster_name_parts[1] != rhs_cluster_name_parts[1]) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("Cluster names mismatch: lhs: ", lhs_cluster_name,
+                       " rhs: ", rhs_cluster_name));
+    }
+
+    if (lhs_cluster_name_parts[2] == rhs_cluster_name_parts[2]) {
+      return absl::FailedPreconditionError(absl::StrCat(
+          "cluster sequence numbers are the same: lhs: ", lhs_cluster_name,
+          " rhs: ", rhs_cluster_name));
+    }
+
+    return absl::OkStatus();
+  };
+
+  testing::ResetClusterSequenceNumber();
+  auto options = MarkForCompilationPassTestHelper::Options()
+                     .WithDeterministicClusterNames();
+
+  // Cluster the same graphs twice so we can observe that the prefix contains
+  // the stable fingerprint.
+  auto graph0 = create_graph("out");
+  auto graph1 = create_graph("differs");
+  auto graph2 = create_graph("out");      // same as graph0
+  auto graph3 = create_graph("differs");  // same as graph1
+
+  TF_ASSERT_OK(
+      MarkForCompilationPassTestHelper::MarkForCompilation(&graph0, options));
+  auto clusters0 = GetClusterNames(*graph0);
+  ASSERT_EQ(clusters0.size(), 1);
+
+  TF_ASSERT_OK(
+      MarkForCompilationPassTestHelper::MarkForCompilation(&graph1, options));
+  auto clusters1 = GetClusterNames(*graph1);
+  ASSERT_EQ(clusters1.size(), 1);
+
+  TF_ASSERT_OK(
+      MarkForCompilationPassTestHelper::MarkForCompilation(&graph2, options));
+  auto clusters2 = GetClusterNames(*graph2);
+  ASSERT_EQ(clusters2.size(), 1);
+
+  TF_ASSERT_OK(
+      MarkForCompilationPassTestHelper::MarkForCompilation(&graph3, options));
+  auto clusters3 = GetClusterNames(*graph3);
+  ASSERT_EQ(clusters3.size(), 1);
+
+  // clusters0 and clusters2 should be the same
+  TF_EXPECT_OK(cluster_names_match(*clusters0.begin(), *clusters2.begin()));
+
+  // clusters1 and clusters3 should also be the same
+  TF_EXPECT_OK(cluster_names_match(*clusters1.begin(), *clusters3.begin()));
+
+  // clusters0/2 should differ from clusters1/3
+}
+
+TEST(XlaCompilationTest, ClusterSessionName) {
+  Scope root = Scope::NewRootScope().ExitOnError();
+  Output variable = ops::Variable(root.WithOpName("variable"),
+                                  PartialTensorShape{}, DT_FLOAT);
+  Output read = ops::Identity(root.WithOpName("read"), variable);
+  Output neg = ops::Negate(root.WithOpName("negate"), read);
+  Output add = ops::Add(root.WithOpName("add"), neg, neg);
+  std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+
+  TF_ASSERT_OK(root.ToGraph(graph.get()));
+  auto options = MarkForCompilationPassTestHelper::Options().WithSessionName(
+      "test_session_name");
+  TF_ASSERT_OK(
+      MarkForCompilationPassTestHelper::MarkForCompilation(&graph, options));
+
+  std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
+
+  ASSERT_FALSE(clusters.empty());
+  std::string cluster_name = clusters.begin()->second;
+
+  std::unordered_map<std::string, std::string> expected_clusters(
+      {{"negate", cluster_name}, {"add", cluster_name}});
+  EXPECT_EQ(clusters, expected_clusters);
+  EXPECT_THAT(cluster_name, ::testing::StartsWith("test_session_name"));
+}
+
+namespace {
+Node* MakeStageNode(GraphDefBuilder& builder, std::string name,
+                    std::initializer_list<DataType> dtypes,
+                    absl::Span<const ops::NodeOut> values) {
+  auto opts = builder.opts()
+                  .WithName(std::move(name))
+                  .WithAttr("dtypes", std::move(dtypes));
+  if (opts.HaveError()) {
+    return nullptr;
+  }
+
+  NodeBuilder node_builder(name, "Stage", opts.op_registry());
+  node_builder.Input(values);
+  return opts.FinalizeBuilder(&node_builder);
+}
+}  // namespace
+
+TEST(XlaCompilationTest, StagePipelinePreservedByClusterScopingPass) {
+  auto build_staged_graph = [](std::unique_ptr<Graph>* graph) -> absl::Status {
+    // Construct a graph as below with two pipeline stages and test that nodes
+    // in different stages will not be merged if ClusterScopingPass is on.
+    //
+    //       b
+    //       |
+    //       v
+    // a -> add0 -> relu0 -> stage
+    //
+    //             b
+    //             |
+    //             v
+    // unstage -> add1 -> relu1
+    GraphDefBuilder builder(GraphDefBuilder::kFailImmediately);
+    Node* a = ops::SourceOp("Const", builder.opts()
+                                         .WithName("a")
+                                         .WithAttr("dtype", DT_FLOAT)
+                                         .WithAttr("value", Tensor()));
+    Node* b = ops::SourceOp("Const", builder.opts()
+                                         .WithName("b")
+                                         .WithAttr("dtype", DT_FLOAT)
+                                         .WithAttr("value", Tensor()));
+    Node* unstage = ops::SourceOp(
+        "Unstage",
+        builder.opts().WithName("unstage").WithAttr("dtypes", {DT_FLOAT}));
+
+    Node* add0 = ops::BinaryOp("Add", a, b, builder.opts().WithName("add0"));
+    Node* add1 =
+        ops::BinaryOp("Add", unstage, b, builder.opts().WithName("add1"));
+    Node* relu0 = ops::UnaryOp("Relu", add0, builder.opts().WithName("relu0"));
+    ops::UnaryOp("Relu", add1, builder.opts().WithName("relu1"));
+    MakeStageNode(builder, "stage", {DT_FLOAT}, {relu0});
+
+    return GraphDefBuilderToGraph(builder, graph->get());
+  };
+
+  // All nodes go into the same cluster if ClusterScopingPass is off.
+  {
+    std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+    TF_ASSERT_OK(build_staged_graph(&graph));
+
+    TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(
+        &graph,
+        MarkForCompilationPassTestHelper::Options().WithNoClusterScoping()));
+
+    std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
+    EXPECT_EQ(clusters["add0"], clusters["add1"]);
+    EXPECT_EQ(clusters["add0"], clusters["relu1"]);
+    EXPECT_EQ(clusters["relu0"], clusters["add1"]);
+    EXPECT_EQ(clusters["relu0"], clusters["relu1"]);
+  }
+
+  // By default, ClusterScopingPass is on and different pipeline stages should
+  // not be merged.
+  {
+    std::unique_ptr<Graph> graph(new Graph(OpRegistry::Global()));
+    TF_ASSERT_OK(build_staged_graph(&graph));
+
+    TF_ASSERT_OK(MarkForCompilationPassTestHelper::MarkForCompilation(&graph));
+
+    std::unordered_map<std::string, std::string> clusters = GetClusters(*graph);
+    EXPECT_NE(clusters["add0"], clusters["add1"]);
+    EXPECT_NE(clusters["add0"], clusters["relu1"]);
+    EXPECT_NE(clusters["relu0"], clusters["add1"]);
+    EXPECT_NE(clusters["relu0"], clusters["relu1"]);
+  }
+}
+TEST(XlaCompilationTest, XLALiteAllowlist) {
+  auto* allowlist_table = tensorflow::GetAllowlistTable();
+  absl::flat_hash_set<std::string> hallowlist;
+  std::vector<std::string> vall_ops = XlaOpRegistry::GetAllRegisteredOps();
+  absl::flat_hash_set<std::string> all_ops(vall_ops.begin(), vall_ops.end());
+
+  // Check that all the operations in the table are existing TF operations
+  for (auto pair : *allowlist_table) {
+    hallowlist.insert(pair.second.begin(), pair.second.end());
+    for (auto op : pair.second) {
+      ASSERT_TRUE(all_ops.contains(op));
+    }
+  }
+
+  // Check that all registered XLA operation are in the allowlist
+  // table or are known to not be in it.
+
+  absl::flat_hash_set<std::string> known_not_in_list =
+      tensorflow::testing::GetKnownXLAAllowlistOp();
+  std::vector<std::string> unknow_op;
+  for (std::string op : vall_ops) {
+    if (!hallowlist.contains(op) && !known_not_in_list.contains(op)) {
+      unknow_op.push_back(op);
+    }
+  }
+  EXPECT_TRUE(unknow_op.empty())
+      << "Someone added support for a new TF operations inside XLA. They must "
+         "be included in the XLALite allowlist or denylist:\n"
+      << absl::StrJoin(unknow_op, "\n");
+}
 }  // namespace
 }  // namespace tensorflow

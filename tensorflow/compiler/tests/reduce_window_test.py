@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for xla.reduce_window."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
@@ -32,7 +28,7 @@ class ReduceWindowTest(xla_test.XLATestCase):
   """Test cases for xla.reduce_window."""
 
   def _reduce_window(self, operand, init, reducer, **kwargs):
-    with self.cached_session():
+    with self.session():
       placeholder = array_ops.placeholder(operand.dtype)
       with self.test_scope():
         output = xla.reduce_window(placeholder, init, reducer, **kwargs)

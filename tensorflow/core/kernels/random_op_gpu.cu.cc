@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #define EIGEN_USE_GPU
 
@@ -22,7 +22,7 @@ limitations under the License.
 
 #include "tensorflow/core/kernels/random_op_gpu.h"
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/lib/random/philox_random.h"
 #include "tensorflow/core/lib/random/random_distributions.h"
@@ -41,15 +41,31 @@ typedef Eigen::GpuDevice GPUDevice;
 template struct FillPhiloxRandom<
     GPUDevice, random::UniformDistribution<random::PhiloxRandom, Eigen::half> >;
 template struct FillPhiloxRandom<
+    GPUDevice, random::UniformDistribution<random::PhiloxRandom, Eigen::bfloat16> >;
+template struct FillPhiloxRandom<
     GPUDevice, random::UniformDistribution<random::PhiloxRandom, float> >;
 template struct FillPhiloxRandom<
     GPUDevice, random::UniformDistribution<random::PhiloxRandom, double> >;
 template struct FillPhiloxRandom<
-    GPUDevice, random::UniformDistribution<random::PhiloxRandom, int32> >;
+    GPUDevice, random::UniformDistribution<random::PhiloxRandom, int32_t> >;
 template struct FillPhiloxRandom<
-    GPUDevice, random::UniformDistribution<random::PhiloxRandom, int64> >;
+    GPUDevice, random::UniformDistribution<random::PhiloxRandom, int64_t> >;
+template struct FillPhiloxRandom<
+    GPUDevice,
+    random::UniformFullIntDistribution<random::PhiloxRandom, int32_t> >;
+template struct FillPhiloxRandom<
+    GPUDevice,
+    random::UniformFullIntDistribution<random::PhiloxRandom, int64_t> >;
+template struct FillPhiloxRandom<
+    GPUDevice,
+    random::UniformFullIntDistribution<random::PhiloxRandom, uint32_t> >;
+template struct FillPhiloxRandom<
+    GPUDevice,
+    random::UniformFullIntDistribution<random::PhiloxRandom, uint64_t> >;
 template struct FillPhiloxRandom<
     GPUDevice, random::NormalDistribution<random::PhiloxRandom, Eigen::half> >;
+template struct FillPhiloxRandom<
+    GPUDevice, random::NormalDistribution<random::PhiloxRandom, Eigen::bfloat16> >;
 template struct FillPhiloxRandom<
     GPUDevice, random::NormalDistribution<random::PhiloxRandom, float> >;
 template struct FillPhiloxRandom<
@@ -57,6 +73,9 @@ template struct FillPhiloxRandom<
 template struct FillPhiloxRandom<
     GPUDevice, random::TruncatedNormalDistribution<
         random::SingleSampleAdapter<random::PhiloxRandom>, Eigen::half> >;
+template struct FillPhiloxRandom<
+    GPUDevice, random::TruncatedNormalDistribution<
+        random::SingleSampleAdapter<random::PhiloxRandom>, Eigen::bfloat16> >;
 template struct FillPhiloxRandom<
     GPUDevice, random::TruncatedNormalDistribution<
                    random::SingleSampleAdapter<random::PhiloxRandom>, float> >;
@@ -68,4 +87,4 @@ template struct FillPhiloxRandom<
 }  // namespace functor
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

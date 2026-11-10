@@ -18,6 +18,7 @@ limitations under the License.
 
 #include "absl/strings/numbers.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
+#include "tensorflow/core/grappler/mutable_graph_view.h"
 #include "tensorflow/core/grappler/optimizers/data/optimizer_base.h"
 
 namespace tensorflow {
@@ -30,30 +31,34 @@ class Slack : public TFDataOptimizerBase {
   Slack() = default;
   ~Slack() override = default;
 
-  string name() const override { return "slack"; };
+  std::string name() const override { return "slack"; };
 
-  Status Init(
+  bool UsesFunctionLibrary() const override { return false; }
+
+  absl::Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override {
-    if (!config) return errors::InvalidArgument("Config parameter required.");
+    if (!config)
+      return absl::InvalidArgumentError("Config parameter required.");
 
-    const string& slack_period_param =
+    const std::string& slack_period_param =
         config->parameter_map().at("slack_period").s();
     if (!absl::SimpleAtoi(slack_period_param, &slack_period_)) {
-      return errors::InvalidArgument("Invalid `slack_period` parameter: ",
-                                     slack_period_param);
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Invalid `slack_period` parameter: ", slack_period_param));
     }
-    return Status::OK();
+    return absl::OkStatus();
   }
 
-  Status OptimizeAndCollectStats(Cluster* cluster, const GrapplerItem& item,
-                                 GraphDef* output,
-                                 OptimizationStats* stats) override;
-
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimize_output, double result) override;
+  absl::Status OptimizeAndCollectStats(Cluster* cluster,
+                                       const GrapplerItem& item,
+                                       GraphDef* output,
+                                       OptimizationStats* stats) override;
 
  private:
-  int64 slack_period_ = -1;
+  int64_t slack_period_ = -1;
+
+  absl::Status RecursivelyHandleOp(const MutableGraphView& graph,
+                                   NodeDef* dataset_node);
 };
 
 }  // namespace grappler

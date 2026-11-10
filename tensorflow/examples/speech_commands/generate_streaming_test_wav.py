@@ -35,10 +35,6 @@ bazel run tensorflow/examples/speech_commands:generate_streaming_test_wav -- \
 Once you've created a streaming audio file, you can then use the
 test_streaming_accuracy tool to calculate accuracy metrics for a model.
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import argparse
 import math
 import sys
@@ -160,12 +156,14 @@ def main(_):
 
   input_data.save_wav_file(FLAGS.output_audio_file, output_audio,
                            FLAGS.sample_rate)
-  tf.logging.info('Saved streaming test wav to %s', FLAGS.output_audio_file)
+  tf.compat.v1.logging.info('Saved streaming test wav to %s',
+                            FLAGS.output_audio_file)
 
   with open(FLAGS.output_labels_file, 'w') as f:
     for output_label in output_labels:
       f.write('%s, %f\n' % (output_label['label'], output_label['time']))
-  tf.logging.info('Saved streaming test labels to %s', FLAGS.output_labels_file)
+  tf.compat.v1.logging.info('Saved streaming test labels to %s',
+                            FLAGS.output_labels_file)
 
 
 if __name__ == '__main__':
@@ -174,7 +172,7 @@ if __name__ == '__main__':
       '--data_url',
       type=str,
       # pylint: disable=line-too-long
-      default='http://download.tensorflow.org/data/speech_commands_v0.01.tar.gz',
+      default='https://storage.googleapis.com/download.tensorflow.org/data/speech_commands_v0.01.tar.gz',
       # pylint: enable=line-too-long
       help='Location of speech training data')
   parser.add_argument(
@@ -280,4 +278,4 @@ if __name__ == '__main__':
       help='What percentage of words should be unknown.')
 
   FLAGS, unparsed = parser.parse_known_args()
-  tf.app.run(main=main, argv=[sys.argv[0]] + unparsed)
+  tf.compat.v1.app.run(main=main, argv=[sys.argv[0]] + unparsed)

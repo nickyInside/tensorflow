@@ -20,6 +20,7 @@ limitations under the License.
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/ops_testutil.h"
 #include "tensorflow/core/kernels/ops_util.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/strcat.h"
 
@@ -28,9 +29,9 @@ namespace {
 
 class StringFormatGraphTest : public OpsTestBase {
  protected:
-  Status Init(int num_inputs, DataType input_type,
-              const string& template_ = "%s", const string& placeholder = "%s",
-              int summarize = 3) {
+  absl::Status Init(int num_inputs, DataType input_type,
+                    const std::string& template_ = "%s",
+                    const std::string& placeholder = "%s", int summarize = 3) {
     TF_CHECK_OK(NodeDefBuilder("op", "StringFormat")
                     .Input(FakeInput(num_inputs, input_type))
                     .Attr("template", template_)
@@ -44,22 +45,22 @@ class StringFormatGraphTest : public OpsTestBase {
 TEST_F(StringFormatGraphTest, Int32Success_7) {
   TF_ASSERT_OK(Init(1, DT_INT32, "First tensor: %s"));
 
-  AddInputFromArray<int32>(TensorShape({7}), {1, 2, 3, 4, 5, 6, 7});
+  AddInputFromArray<int32_t>(TensorShape({7}), {1, 2, 3, 4, 5, 6, 7});
   TF_ASSERT_OK(RunOpKernel());
   Tensor expected(allocator(), DT_STRING, TensorShape({}));
-  test::FillValues<string>(&expected, {"First tensor: [1 2 3 ... 5 6 7]"});
-  test::ExpectTensorEqual<string>(expected, *GetOutput(0));
+  test::FillValues<tstring>(&expected, {"First tensor: [1 2 3 ... 5 6 7]"});
+  test::ExpectTensorEqual<tstring>(expected, *GetOutput(0));
 }
 
 TEST_F(StringFormatGraphTest, Int32Success_3_3) {
   TF_ASSERT_OK(Init(1, DT_INT32, "First tensor: %s", "%s", 1));
 
-  AddInputFromArray<int32>(TensorShape({3, 3}), {1, 2, 3, 4, 5, 6, 7, 8, 9});
+  AddInputFromArray<int32_t>(TensorShape({3, 3}), {1, 2, 3, 4, 5, 6, 7, 8, 9});
   TF_ASSERT_OK(RunOpKernel());
   Tensor expected(allocator(), DT_STRING, TensorShape({}));
-  test::FillValues<string>(&expected, {"First tensor: [[1 ... 3]\n ..."
-                                       "\n [7 ... 9]]"});
-  test::ExpectTensorEqual<string>(expected, *GetOutput(0));
+  test::FillValues<tstring>(&expected, {"First tensor: [[1 ... 3]\n ..."
+                                        "\n [7 ... 9]]"});
+  test::ExpectTensorEqual<tstring>(expected, *GetOutput(0));
 }
 
 }  // end namespace

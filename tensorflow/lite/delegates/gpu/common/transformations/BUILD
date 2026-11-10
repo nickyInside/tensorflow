@@ -1,6 +1,27 @@
-package(default_visibility = ["//visibility:public"])
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-licenses(["notice"])  # Apache 2.0
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//tensorflow/core/platform:build_config.bzl", "tf_platform_alias")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],
+)
 
 cc_library(
     name = "add_bias",
@@ -11,10 +32,42 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/types:any",
+    ],
+)
+
+cc_library(
+    name = "add_quant_adjustments",
+    srcs = ["add_quant_adjustments.cc"],
+    hdrs = ["add_quant_adjustments.h"],
+    deps = [
+        "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:model_transformer",
+        "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:status",
-        "@com_google_absl//absl/memory",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:any",
+    ],
+)
+
+cc_test(
+    name = "add_quant_adjustments_test",
+    srcs = ["add_quant_adjustments_test.cc"],
+    deps = [
+        ":add_quant_adjustments",
+        "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:model_transformer",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:any",
+        "@com_google_absl//absl/types:optional",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -24,10 +77,14 @@ cc_library(
     hdrs = ["fuse_add_to_conv.h"],
     deps = [
         "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
-        "@com_google_absl//absl/strings",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/types:any",
+        "@com_google_absl//absl/types:variant",
     ],
 )
 
@@ -36,8 +93,14 @@ cc_test(
     srcs = ["fuse_add_to_conv_test.cc"],
     deps = [
         ":fuse_add_to_conv",
+        "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:any",
         "@com_google_googletest//:gtest_main",
     ],
 )
@@ -51,8 +114,11 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/types:any",
+        "@com_google_absl//absl/types:variant",
     ],
 )
 
@@ -61,26 +127,44 @@ cc_test(
     srcs = ["fuse_mul_to_conv_test.cc"],
     deps = [
         ":fuse_mul_to_conv",
+        "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
     ],
 )
 
 cc_library(
-    name = "general_transformations",
-    srcs = ["general_transformations.cc"],
-    hdrs = ["general_transformations.h"],
+    name = "global_pooling_to_reduce_op",
+    srcs = ["global_pooling_to_reduce_op.cc"],
+    hdrs = ["global_pooling_to_reduce_op.h"],
     deps = [
-        ":fuse_add_to_conv",
-        ":fuse_mul_to_conv",
-        ":make_fully_connected",
-        ":make_padding",
-        ":match_dilated_convolution",
-        ":merge_padding_with",
-        ":remove_noop",
+        "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/types:any",
+    ],
+)
+
+cc_test(
+    name = "global_pooling_to_reduce_op_test",
+    srcs = ["global_pooling_to_reduce_op_test.cc"],
+    deps = [
+        ":global_pooling_to_reduce_op",
+        "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:model_transformer",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/types:any",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -92,8 +176,8 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
-        "//tensorflow/lite/delegates/gpu/common:status",
-        "@com_google_absl//absl/memory",
+        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
         "@com_google_absl//absl/types:any",
     ],
 )
@@ -107,6 +191,8 @@ cc_test(
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:any",
         "@com_google_googletest//:gtest_main",
     ],
@@ -120,8 +206,9 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
-        "@com_google_absl//absl/memory",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
         "@com_google_absl//absl/types:any",
     ],
 )
@@ -134,6 +221,9 @@ cc_test(
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:any",
         "@com_google_googletest//:gtest_main",
     ],
@@ -142,34 +232,21 @@ cc_test(
 cc_library(
     name = "matching",
     hdrs = ["matching.h"],
-    deps = ["//tensorflow/lite/delegates/gpu/common:model"],
 )
 
 cc_library(
-    name = "match_dilated_convolution",
-    srcs = ["match_dilated_convolution.cc"],
-    hdrs = ["match_dilated_convolution.h"],
+    name = "merge_densify",
+    srcs = ["merge_densify.cc"],
+    hdrs = ["merge_densify.h"],
     deps = [
-        "//tensorflow/lite/delegates/gpu/common:model",
-        "//tensorflow/lite/delegates/gpu/common:model_transformer",
-        "//tensorflow/lite/delegates/gpu/common:operations",
-        "//tensorflow/lite/delegates/gpu/common:status",
-        "@com_google_absl//absl/memory",
-        "@com_google_absl//absl/types:any",
-    ],
-)
-
-cc_test(
-    name = "match_dilated_convolution_test",
-    srcs = ["match_dilated_convolution_test.cc"],
-    deps = [
-        ":match_dilated_convolution",
+        "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/memory",
         "@com_google_absl//absl/types:any",
-        "@com_google_googletest//:gtest_main",
     ],
 )
 
@@ -183,10 +260,13 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/types:any",
+        "@com_google_absl//absl/types:variant",
     ],
 )
 
@@ -195,13 +275,33 @@ cc_test(
     srcs = ["merge_padding_with_test.cc"],
     deps = [
         ":merge_padding_with",
+        "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
         "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/types:any",
         "@com_google_googletest//:gtest_main",
     ],
+)
+
+cc_library(
+    name = "model_transformations",
+    srcs = ["model_transformations.cc"],
+    hdrs = ["model_transformations.h"],
+    deps = [
+        ":add_quant_adjustments",
+        ":fuse_add_to_conv",
+        ":fuse_mul_to_conv",
+        ":make_fully_connected",
+        ":make_padding",
+        ":merge_densify",
+        ":merge_padding_with",
+        ":remove_noop",
+        "//tensorflow/lite/delegates/gpu/common:model_transformer",
+    ] + tf_platform_alias("custom_transformations", "//tensorflow/lite/delegates/gpu/common/"),
 )
 
 cc_library(
@@ -213,8 +313,12 @@ cc_library(
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
         "@com_google_absl//absl/memory",
+        "@com_google_absl//absl/types:any",
+        "@com_google_absl//absl/types:variant",
     ],
 )
 
@@ -227,6 +331,9 @@ cc_test(
         "//tensorflow/lite/delegates/gpu/common:model",
         "//tensorflow/lite/delegates/gpu/common:model_transformer",
         "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:shape",
+        "//tensorflow/lite/delegates/gpu/common:tensor",
+        "@com_google_absl//absl/status",
         "@com_google_googletest//:gtest_main",
     ],
 )

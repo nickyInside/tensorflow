@@ -14,17 +14,13 @@
 # ==============================================================================
 """`LinearOperator` acting like a lower triangular matrix."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
-from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops.linalg import linalg_impl as linalg
 from tensorflow.python.ops.linalg import linear_operator
 from tensorflow.python.ops.linalg import linear_operator_util
+from tensorflow.python.ops.linalg import property_hint_util
 from tensorflow.python.util.tf_export import tf_export
 
 __all__ = [
@@ -33,6 +29,7 @@ __all__ = [
 
 
 @tf_export("linalg.LinearOperatorLowerTriangular")
+@linear_operator.make_composite_tensor
 class LinearOperatorLowerTriangular(linear_operator.LinearOperator):
   """`LinearOperator` acting like a [batch] square lower triangular matrix.
 
@@ -138,6 +135,14 @@ class LinearOperatorLowerTriangular(linear_operator.LinearOperator):
     Raises:
       ValueError:  If `is_square` is `False`.
     """
+    parameters = dict(
+        tril=tril,
+        is_non_singular=is_non_singular,
+        is_self_adjoint=is_self_adjoint,
+        is_positive_definite=is_positive_definite,
+        is_square=is_square,
+        name=name
+    )
 
     if is_square is False:
       raise ValueError(
@@ -145,69 +150,100 @@ class LinearOperatorLowerTriangular(linear_operator.LinearOperator):
     is_square = True
 
     with ops.name_scope(name, values=[tril]):
-      self._tril = ops.convert_to_tensor(tril, name="tril")
+      self._tril = linear_operator_util.convert_nonref_to_tensor(tril,
+                                                                 name="tril")
       self._check_tril(self._tril)
-      self._tril = array_ops.matrix_band_part(tril, -1, 0)
-      self._diag = array_ops.matrix_diag_part(self._tril)
 
       super(LinearOperatorLowerTriangular, self).__init__(
           dtype=self._tril.dtype,
-          graph_parents=[self._tril],
           is_non_singular=is_non_singular,
           is_self_adjoint=is_self_adjoint,
           is_positive_definite=is_positive_definite,
           is_square=is_square,
+          parameters=parameters,
           name=name)
+
+  @property
+  def tril(self):
+    """The lower triangular matrix defining this operator."""
+    return self._tril
 
   def _check_tril(self, tril):
     """Static check of the `tril` argument."""
-    allowed_dtypes = [
-        dtypes.float16,
-        dtypes.float32,
-        dtypes.float64,
-        dtypes.complex64,
-        dtypes.complex128,
-    ]
-    dtype = tril.dtype
-    if dtype not in allowed_dtypes:
-      raise TypeError(
-          "Argument tril must have dtype in %s.  Found: %s"
-          % (allowed_dtypes, dtype))
 
-    if tril.get_shape().ndims is not None and tril.get_shape().ndims < 2:
+    if tril.shape.ndims is not None and tril.shape.ndims < 2:
       raise ValueError(
           "Argument tril must have at least 2 dimensions.  Found: %s"
           % tril)
 
+  def _get_tril(self):
+    """Gets the `tril` kwarg, with upper part zero-d out."""
+    return array_ops.matrix_band_part(self._tril, -1, 0)
+
+  def _get_diag(self):
+    """Gets the diagonal part of `tril` kwarg."""
+    return array_ops.matrix_diag_part(self._tril)
+
   def _shape(self):
-    return self._tril.get_shape()
+    return self._tril.shape
 
   def _shape_tensor(self):
     return array_ops.shape(self._tril)
 
   def _assert_non_singular(self):
     return linear_operator_util.assert_no_entries_with_modulus_zero(
-        self._diag,
+        self._get_diag(),
         message="Singular operator:  Diagonal contained zero values.")
 
   def _matmul(self, x, adjoint=False, adjoint_arg=False):
     return math_ops.matmul(
-        self._tril, x, adjoint_a=adjoint, adjoint_b=adjoint_arg)
+        self._get_tril(), x, adjoint_a=adjoint, adjoint_b=adjoint_arg)
+
+  def _linop_matmul(
+      self,
+      left_operator: linear_operator.LinearOperator,
+      right_operator: linear_operator.LinearOperator,
+  ) -> linear_operator.LinearOperator:
+    # instance check of linear_operator_diag.LinearOperatorDiag
+    if (hasattr(right_operator, "_check_diag") and
+        isinstance(left_operator, LinearOperatorLowerTriangular)):
+      is_non_singular = property_hint_util.combined_non_singular_hint(
+          left_operator, right_operator)
+      is_self_adjoint = property_hint_util.combined_commuting_self_adjoint_hint(
+          left_operator, right_operator)
+      return LinearOperatorLowerTriangular(
+          tril=left_operator.to_dense() * array_ops.expand_dims(
+              right_operator.diag, axis=-2),
+          is_non_singular=is_non_singular,
+          # This is safe to do since the Triangular matrix is only self-adjoint
+          # when it is a diagonal matrix, and hence commutes.
+          is_self_adjoint=is_self_adjoint,
+          is_positive_definite=None,
+          is_square=True)
+    return super()._linop_matmul(left_operator, right_operator)
 
   def _determinant(self):
-    return math_ops.reduce_prod(self._diag, axis=[-1])
+    return math_ops.reduce_prod(self._get_diag(), axis=[-1])
 
   def _log_abs_determinant(self):
     return math_ops.reduce_sum(
-        math_ops.log(math_ops.abs(self._diag)), axis=[-1])
+        math_ops.log(math_ops.abs(self._get_diag())), axis=[-1])
 
   def _solve(self, rhs, adjoint=False, adjoint_arg=False):
     rhs = linalg.adjoint(rhs) if adjoint_arg else rhs
-    return linear_operator_util.matrix_triangular_solve_with_broadcast(
-        self._tril, rhs, lower=True, adjoint=adjoint)
+    return linalg.triangular_solve(
+        self._get_tril(), rhs, lower=True, adjoint=adjoint)
 
   def _to_dense(self):
-    return self._tril
+    return self._get_tril()
 
-  def _add_to_tensor(self, x):
-    return self._tril + x
+  def _eigvals(self):
+    return self._get_diag()
+
+  @property
+  def _composite_tensor_fields(self):
+    return ("tril",)
+
+  @property
+  def _experimental_parameter_ndims_to_matrix_ndims(self):
+    return {"tril": 2}

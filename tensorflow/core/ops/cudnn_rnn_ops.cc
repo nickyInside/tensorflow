@@ -41,7 +41,7 @@ REGISTER_OP("CudnnRNNParamsSize")
     .Input("num_layers: int32")
     .Input("num_units: int32")
     .Input("input_size: int32")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr("S: {int32, int64}")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
@@ -49,6 +49,7 @@ REGISTER_OP("CudnnRNNParamsSize")
     .Attr("dropout: float = 0.0")
     .Attr("seed: int = 0")
     .Attr("seed2: int = 0")
+    .Attr("num_proj: int = 0")
     .Output("params_size: S")
     .SetShapeFn([](InferenceContext* c) {
       ShapeHandle unused;
@@ -58,7 +59,7 @@ REGISTER_OP("CudnnRNNParamsSize")
       TF_RETURN_IF_ERROR(c->WithRank(c->input(2), 0, &unused));
 
       c->set_output(0, c->Vector(1));
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("CudnnRNN")
@@ -71,7 +72,7 @@ REGISTER_OP("CudnnRNN")
     .Output("output_h: T")
     .Output("output_c: T")
     .Output("reserve_space: T")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
     .Attr(kRNNDirectionAttrs)
@@ -80,14 +81,20 @@ REGISTER_OP("CudnnRNN")
     .Attr("seed2: int = 0")
     .Attr("is_training: bool = true")
     .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle unused;
       auto input_shape = c->input(0);
       auto input_h_shape = c->input(1);
+      TF_RETURN_IF_ERROR(c->WithRank(input_shape, 3, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(input_h_shape, 3, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 1, &unused));
+
       auto seq_length = c->Dim(input_shape, 0);
       auto batch_size = c->Dim(input_shape, 1);
       auto num_units = c->Dim(input_h_shape, 2);
-      string direction;
+
+      std::string direction;
       TF_RETURN_IF_ERROR(c->GetAttr("direction", &direction));
-      string rnn_mode;
+      std::string rnn_mode;
       TF_RETURN_IF_ERROR(c->GetAttr("rnn_mode", &rnn_mode));
       int dir_count = (direction == "bidirectional") ? 2 : 1;
       DimensionHandle output_size;
@@ -100,7 +107,7 @@ REGISTER_OP("CudnnRNN")
       c->set_output(1, output_h_shape);
       c->set_output(2, output_c_shape);
       c->set_output(3, c->UnknownShape());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("CudnnRNNV2")
@@ -114,7 +121,7 @@ REGISTER_OP("CudnnRNNV2")
     .Output("output_c: T")
     .Output("reserve_space: T")
     .Output("host_reserved: int8")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
     .Attr(kRNNDirectionAttrs)
@@ -123,14 +130,19 @@ REGISTER_OP("CudnnRNNV2")
     .Attr("seed2: int = 0")
     .Attr("is_training: bool = true")
     .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle unused;
       auto input_shape = c->input(0);
       auto input_h_shape = c->input(1);
+      TF_RETURN_IF_ERROR(c->WithRank(input_shape, 3, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(input_h_shape, 3, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 1, &unused));
+
       auto seq_length = c->Dim(input_shape, 0);
       auto batch_size = c->Dim(input_shape, 1);
       auto num_units = c->Dim(input_h_shape, 2);
-      string direction;
+      std::string direction;
       TF_RETURN_IF_ERROR(c->GetAttr("direction", &direction));
-      string rnn_mode;
+      std::string rnn_mode;
       TF_RETURN_IF_ERROR(c->GetAttr("rnn_mode", &rnn_mode));
       int dir_count = (direction == "bidirectional") ? 2 : 1;
       DimensionHandle output_size;
@@ -144,7 +156,7 @@ REGISTER_OP("CudnnRNNV2")
       c->set_output(2, output_c_shape);
       c->set_output(3, c->UnknownShape());
       c->set_output(4, c->UnknownShape());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("CudnnRNNV3")
@@ -159,25 +171,37 @@ REGISTER_OP("CudnnRNNV3")
     .Output("output_c: T")
     .Output("reserve_space: T")
     .Output("host_reserved: int8")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
     .Attr(kRNNDirectionAttrs)
     .Attr("dropout: float = 0.0")
     .Attr("seed: int = 0")
     .Attr("seed2: int = 0")
+    .Attr("num_proj: int = 0")
     .Attr("is_training: bool = true")
     .Attr("time_major: bool = true")
     .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle unused;
       auto input_shape = c->input(0);
       auto input_h_shape = c->input(1);
+      auto input_c_shape = c->input(2);
+      TF_RETURN_IF_ERROR(c->WithRank(input_shape, 3, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(input_h_shape, 3, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 1, &unused));
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(4), 1, &unused));
+
       auto max_seq_length = c->Dim(input_shape, 0);
       auto batch_size = c->Dim(input_shape, 1);
       auto num_units = c->Dim(input_h_shape, 2);
-      string direction;
+
+      std::string direction;
       TF_RETURN_IF_ERROR(c->GetAttr("direction", &direction));
-      string rnn_mode;
+      std::string rnn_mode;
       TF_RETURN_IF_ERROR(c->GetAttr("rnn_mode", &rnn_mode));
+      if (rnn_mode == "lstm") {
+        TF_RETURN_IF_ERROR(c->WithRank(input_c_shape, 3, &unused));
+      }
       int dir_count = (direction == "bidirectional") ? 2 : 1;
       DimensionHandle output_size;
       TF_RETURN_IF_ERROR(c->Multiply(num_units, dir_count, &output_size));
@@ -185,13 +209,13 @@ REGISTER_OP("CudnnRNNV3")
           c->MakeShape({max_seq_length, batch_size, output_size});
       auto output_h_shape = input_h_shape;
       auto output_c_shape TF_ATTRIBUTE_UNUSED =
-          (rnn_mode == "lstm") ? output_h_shape : c->MakeShape({});
+          (rnn_mode == "lstm") ? input_c_shape : c->MakeShape({});
       c->set_output(0, output_shape);
       c->set_output(1, output_h_shape);
       c->set_output(2, output_c_shape);
       c->set_output(3, c->UnknownShape());
       c->set_output(4, c->UnknownShape());
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("CudnnRNNBackprop")
@@ -211,7 +235,7 @@ REGISTER_OP("CudnnRNNBackprop")
     .Output("input_h_backprop: T")
     .Output("input_c_backprop: T")
     .Output("params_backprop: T")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
     .Attr(kRNNDirectionAttrs)
@@ -227,7 +251,7 @@ REGISTER_OP("CudnnRNNBackprop")
       c->set_output(1, input_h_shape);
       c->set_output(2, input_c_shape);
       c->set_output(3, params_shape);
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("CudnnRNNBackpropV2")
@@ -248,7 +272,7 @@ REGISTER_OP("CudnnRNNBackpropV2")
     .Output("input_h_backprop: T")
     .Output("input_c_backprop: T")
     .Output("params_backprop: T")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
     .Attr(kRNNDirectionAttrs)
@@ -264,7 +288,7 @@ REGISTER_OP("CudnnRNNBackpropV2")
       c->set_output(1, input_h_shape);
       c->set_output(2, input_c_shape);
       c->set_output(3, params_shape);
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("CudnnRNNBackpropV3")
@@ -286,13 +310,14 @@ REGISTER_OP("CudnnRNNBackpropV3")
     .Output("input_h_backprop: T")
     .Output("input_c_backprop: T")
     .Output("params_backprop: T")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
     .Attr(kRNNDirectionAttrs)
     .Attr("dropout: float = 0.0")
     .Attr("seed: int = 0")
     .Attr("seed2: int = 0")
+    .Attr("num_proj: int = 0")
     .Attr("time_major: bool = true")
     .SetShapeFn([](InferenceContext* c) {
       auto input_shape = c->input(0);
@@ -303,7 +328,7 @@ REGISTER_OP("CudnnRNNBackpropV3")
       c->set_output(1, input_h_shape);
       c->set_output(2, input_c_shape);
       c->set_output(3, params_shape);
-      return Status::OK();
+      return absl::OkStatus();
     });
 
 REGISTER_OP("CudnnRNNParamsToCanonical")
@@ -313,7 +338,7 @@ REGISTER_OP("CudnnRNNParamsToCanonical")
     .Input("params: T")
     .Output("weights: num_params * T")
     .Output("biases: num_params * T")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr("num_params: int")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
@@ -335,7 +360,44 @@ REGISTER_OP("CudnnRNNParamsToCanonical")
       for (int i = 0; i < num_params; i++) {
         c->set_output(num_params + i, c->Vector(InferenceContext::kUnknownDim));
       }
-      return Status::OK();
+      return absl::OkStatus();
+    });
+
+REGISTER_OP("CudnnRNNParamsToCanonicalV2")
+    .Input("num_layers: int32")
+    .Input("num_units: int32")
+    .Input("input_size: int32")
+    .Input("params: T")
+    .Output("weights: num_params_weights * T")
+    .Output("biases: num_params_biases * T")
+    .Attr("T: {bfloat16, float16, float32, float64}")
+    .Attr("num_params_weights: int")
+    .Attr("num_params_biases: int")
+    .Attr(kRNNModeAttrs)
+    .Attr(kRNNInputModeAttrs)
+    .Attr(kRNNDirectionAttrs)
+    .Attr("dropout: float = 0.0")
+    .Attr("seed: int = 0")
+    .Attr("seed2: int = 0")
+    .Attr("num_proj: int = 0")
+    .SetShapeFn([](InferenceContext* c) {
+      ShapeHandle unused;
+      TF_RETURN_IF_ERROR(c->WithRank(c->input(3), 1, &unused));
+      int num_params_weights;
+      int num_params_biases;
+      TF_RETURN_IF_ERROR(c->GetAttr("num_params_weights", &num_params_weights));
+      TF_RETURN_IF_ERROR(c->GetAttr("num_params_biases", &num_params_biases));
+      // Set shape for weight matrices
+      for (int i = 0; i < num_params_weights; i++) {
+        c->set_output(i, c->Matrix(InferenceContext::kUnknownDim,
+                                   InferenceContext::kUnknownDim));
+      }
+      // Set shape for bias vectors
+      for (int i = 0; i < num_params_biases; i++) {
+        c->set_output(num_params_weights + i,
+                      c->Vector(InferenceContext::kUnknownDim));
+      }
+      return absl::OkStatus();
     });
 
 REGISTER_OP("CudnnRNNCanonicalToParams")
@@ -345,7 +407,7 @@ REGISTER_OP("CudnnRNNCanonicalToParams")
     .Input("weights: num_params * T")
     .Input("biases: num_params * T")
     .Output("params: T")
-    .Attr("T: {float16, float32, float64}")
+    .Attr("T: {bfloat16, float16, float32, float64}")
     .Attr("num_params: int")
     .Attr(kRNNModeAttrs)
     .Attr(kRNNInputModeAttrs)
@@ -355,7 +417,29 @@ REGISTER_OP("CudnnRNNCanonicalToParams")
     .Attr("seed2: int = 0")
     .SetShapeFn([](InferenceContext* c) {
       c->set_output(0, c->Vector(InferenceContext::kUnknownDim));
-      return Status::OK();
+      return absl::OkStatus();
+    });
+
+REGISTER_OP("CudnnRNNCanonicalToParamsV2")
+    .Input("num_layers: int32")
+    .Input("num_units: int32")
+    .Input("input_size: int32")
+    .Input("weights: num_params_weights * T")
+    .Input("biases: num_params_biases * T")
+    .Output("params: T")
+    .Attr("T: {bfloat16, float16, float32, float64}")
+    .Attr("num_params_weights: int")
+    .Attr("num_params_biases: int")
+    .Attr(kRNNModeAttrs)
+    .Attr(kRNNInputModeAttrs)
+    .Attr(kRNNDirectionAttrs)
+    .Attr("dropout: float = 0.0")
+    .Attr("seed: int = 0")
+    .Attr("seed2: int = 0")
+    .Attr("num_proj: int = 0")
+    .SetShapeFn([](InferenceContext* c) {
+      c->set_output(0, c->Vector(InferenceContext::kUnknownDim));
+      return absl::OkStatus();
     });
 
 }  // namespace tensorflow

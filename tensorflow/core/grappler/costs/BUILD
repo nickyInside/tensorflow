@@ -1,37 +1,83 @@
-licenses(["notice"])  # Apache 2.0
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-load("//tensorflow:tensorflow.bzl", "tf_cuda_library", "tf_cc_test")
+load("@rules_python//python:proto.bzl", "py_proto_library")
 load(
-    "//tensorflow/core:platform/default/build_config.bzl",
-    "tf_protos_grappler",
+    "//tensorflow:tensorflow.bzl",
+    "tf_cc_test",
+    "tf_cuda_library",
 )
-
-filegroup(
-    name = "graph_properties_testdata",
-    srcs = glob([
-        "graph_properties_testdata/*.pbtxt",
-        "graph_properties_testdata/*.pbtxt.html",
-    ]),
-    visibility = ["//visibility:public"],
-)
-
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
 load(
-    "//tensorflow/core:platform/default/build_config.bzl",
+    "//tensorflow/core/platform:build_config.bzl",
     "tf_proto_library",
-    "tf_additional_all_protos",
+    "tf_protos_grappler",
+    "tf_pyclif_proto_library",
 )
-load(
-    "@local_config_cuda//cuda:build_defs.bzl",
-    "if_cuda",
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    licenses = ["notice"],
+)
+
+alias(
+    name = "graph_properties_testdata",
+    actual = "//tensorflow/core/grappler/costs/graph_properties_testdata:graph_properties_testdata",
+    visibility = ["//visibility:public"],
 )
 
 tf_proto_library(
     name = "op_performance_data",
     srcs = ["op_performance_data.proto"],
-    cc_api_version = 2,
-    default_header = True,
-    protodeps = tf_additional_all_protos(),
+    make_default_target_header_only = True,
+    protodeps = [
+        "//tensorflow/core/framework:attr_value_proto",
+        "//tensorflow/core/framework:resource_handle_proto",
+        "//tensorflow/core/framework:tensor_proto",
+        "//tensorflow/core/framework:tensor_shape_proto",
+        "//tensorflow/core/framework:types_proto",
+        "//tensorflow/core/protobuf:for_core_protos",
+    ],
     visibility = ["//visibility:public"],
+)
+
+tf_pyclif_proto_library(
+    name = "op_performance_data_pyclif",
+    proto_lib = ":op_performance_data",
+    proto_srcfile = "op_performance_data.proto",
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "pywrap_required_hdrs",
+    srcs = [
+        "analytical_cost_estimator.h",
+        "cost_estimator.h",
+        "graph_memory.h",
+        "graph_properties.h",
+        "measuring_cost_estimator.h",
+        "op_context.h",
+        "op_level_cost_estimator.h",
+        "utils.h",
+        "virtual_placer.h",
+        "virtual_scheduler.h",
+    ],
+    visibility = [
+        "//tensorflow/python/grappler:__pkg__",
+    ],
 )
 
 cc_library(
@@ -41,38 +87,45 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":utils",
-        "@com_google_absl//absl/types:optional",
-        "//tensorflow/core/grappler/utils:functions",
-        "//tensorflow/core/grappler/utils:topological_sort",
-        "//tensorflow/core/grappler:mutable_graph_view",
-        "//tensorflow/core/grappler:op_types",
         "//tensorflow/core:core_cpu_base",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/grappler:grappler_item",
+        "//tensorflow/core/grappler:mutable_graph_view",
+        "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler:utils",
         "//tensorflow/core/grappler/clusters:cluster",
         "//tensorflow/core/grappler/optimizers:evaluation_utils",
+        "//tensorflow/core/grappler/utils:functions",
+        "//tensorflow/core/grappler/utils:topological_sort",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/hash",
+        "@com_google_absl//absl/types:optional",
     ] + tf_protos_grappler(),
 )
 
 tf_cc_test(
     name = "graph_properties_test",
     srcs = ["graph_properties_test.cc"],
-    args = ["--heap_check=local"],  # The GPU tracer leaks memory
+    args = ["--heap_check="],  # The GPU tracer leaks memory. TODO(b/185483595): use a dependency instead of a flag
     data = [":graph_properties_testdata"],
+    tags = [
+        "nomsan",  # TODO(b/160921160): broken by NOAUTOROLLBACK CL
+    ],
     deps = [
         ":graph_properties",
         "//tensorflow/cc:cc_ops",
+        "//tensorflow/cc:functional_ops",
         "//tensorflow/cc:scope",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_proto_parsing",
         "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core:tensor_testutil",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/framework:tensor_testutil",
+        "//tensorflow/core/graph:mkl_graph_util",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler/clusters:single_machine",
         "//tensorflow/core/grappler/inputs:trivial_test_graph_input_yielder",
@@ -100,7 +153,7 @@ cc_library(
 tf_cc_test(
     name = "graph_memory_test",
     srcs = ["graph_memory_test.cc"],
-    args = ["--heap_check=local"],  # The GPU tracer leaks memory
+    args = ["--heap_check="],  # The GPU tracer leaks memory. TODO(b/185483595): use a dependency instead of a flag
     deps = [
         ":graph_memory",
         "//tensorflow/cc:cc_ops",
@@ -134,15 +187,20 @@ tf_cuda_library(
     hdrs = ["utils.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//third_party/eigen3",
+        ":cost_estimator",
         "//tensorflow/core:framework",
         "//tensorflow/core:graph",
-        "//tensorflow/core:gpu_id",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_proto_parsing",
         "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/common_runtime/gpu:gpu_id",
         "//tensorflow/core/grappler:utils",
         "//tensorflow/core/grappler/clusters:utils",
+        "//tensorflow/core/util:overflow",
+        "@com_google_absl//absl/container:node_hash_map",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
+        "@eigen_archive//:eigen3",
     ] + tf_protos_grappler(),
 )
 
@@ -157,10 +215,10 @@ tf_cc_test(
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:framework",
         "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core:tensor_testutil",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
+        "//tensorflow/core/framework:tensor_testutil",
     ],
 )
 
@@ -172,6 +230,8 @@ cc_library(
     deps = [
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
     ],
 )
 
@@ -182,6 +242,7 @@ tf_cc_test(
         ":cost_estimator",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "@com_google_googletest//:gtest",
     ],
 )
 
@@ -219,6 +280,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/container:flat_hash_map",
     ] + tf_protos_grappler(),
 )
 
@@ -228,6 +290,7 @@ cc_library(
     hdrs = ["virtual_scheduler.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":cost_estimator",
         ":graph_properties",
         ":op_context",
         ":utils",
@@ -239,7 +302,11 @@ cc_library(
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler:utils",
         "//tensorflow/core/grappler/clusters:utils",
-        "//tensorflow/core/grappler/costs:cost_estimator",
+        "//tensorflow/core/grappler/utils:transitive_fanin",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/strings:str_format",
     ],
 )
 
@@ -247,6 +314,7 @@ tf_cc_test(
     name = "virtual_scheduler_test",
     srcs = ["virtual_scheduler_test.cc"],
     deps = [
+        ":graph_properties",
         ":utils",
         ":virtual_placer",
         ":virtual_scheduler",
@@ -256,6 +324,7 @@ tf_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core/grappler/clusters:virtual_cluster",
+        "@com_google_absl//absl/strings",
     ],
 )
 
@@ -277,6 +346,7 @@ cc_library(
         "//tensorflow/core/grappler/costs:cost_estimator",
         "//tensorflow/core/kernels:ops_util",
     ],
+    alwayslink = 1,
 )
 
 cc_library(
@@ -287,22 +357,36 @@ cc_library(
     deps = [
         ":cost_estimator",
         ":op_context",
-        "//third_party/eigen3",
+        ":utils",
         "//tensorflow/core:framework",
+        "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/grappler/clusters:utils",
+        "//tensorflow/core/util:overflow",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/log:check",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings",
+        "@eigen_archive//:eigen3",
+        "@tsl//tsl/platform:statusor",
     ] + tf_protos_grappler(),
 )
 
 tf_cc_test(
     name = "op_level_cost_estimator_test",
     srcs = ["op_level_cost_estimator_test.cc"],
+    tags = [
+        "no_oss",
+        "not_run:arm",
+    ],
     deps = [
         ":op_level_cost_estimator",
         "//tensorflow/core:framework",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:status_matchers",
     ],
 )
 
@@ -325,7 +409,9 @@ cc_library(
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler:utils",
+        "//tensorflow/core/util:overflow",
     ] + tf_protos_grappler(),
+    alwayslink = 1,
 )
 
 tf_cc_test(
@@ -342,3 +428,12 @@ tf_cc_test(
         "//tensorflow/core/grappler/clusters:virtual_cluster",
     ],
 )
+
+# copybara:uncomment_begin(google-only)
+# py_proto_library(
+#     name = "op_performance_data_py_pb2",
+#     has_services = 0,
+#     visibility = ["//visibility:public"],
+#     deps = [":op_performance_data"],
+# )
+# copybara:uncomment_end

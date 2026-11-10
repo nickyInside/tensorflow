@@ -14,10 +14,6 @@
 # ==============================================================================
 """`LinearOperator` acting like a zero matrix."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.python.framework import dtypes
@@ -26,6 +22,7 @@ from tensorflow.python.framework import ops
 from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import tensor_util
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import array_ops_stack
 from tensorflow.python.ops import check_ops
 from tensorflow.python.ops import control_flow_ops
 from tensorflow.python.ops import math_ops
@@ -40,6 +37,7 @@ __all__ = [
 
 
 @tf_export("linalg.LinearOperatorZeros")
+@linear_operator.make_composite_tensor
 class LinearOperatorZeros(linear_operator.LinearOperator):
   """`LinearOperator` acting like a [batch] zero matrix.
 
@@ -176,6 +174,19 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
       ValueError:  If any of the following is not `True`:
         `{is_self_adjoint, is_non_singular, is_positive_definite}`.
     """
+    parameters = dict(
+        num_rows=num_rows,
+        num_columns=num_columns,
+        batch_shape=batch_shape,
+        dtype=dtype,
+        is_non_singular=is_non_singular,
+        is_self_adjoint=is_self_adjoint,
+        is_positive_definite=is_positive_definite,
+        is_square=is_square,
+        assert_proper_shapes=assert_proper_shapes,
+        name=name
+    )
+
     dtype = dtype or dtypes.float32
     self._assert_proper_shapes = assert_proper_shapes
 
@@ -194,7 +205,12 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
           is_self_adjoint=is_self_adjoint,
           is_positive_definite=is_positive_definite,
           is_square=is_square,
+          parameters=parameters,
           name=name)
+
+      linear_operator_util.assert_not_ref_type(num_rows, "num_rows")
+      linear_operator_util.assert_not_ref_type(num_columns, "num_columns")
+      linear_operator_util.assert_not_ref_type(batch_shape, "batch_shape")
 
       self._num_rows = linear_operator_util.shape_tensor(
           num_rows, name="num_rows")
@@ -237,7 +253,8 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
     return batch_shape.concatenate(matrix_shape)
 
   def _shape_tensor(self):
-    matrix_shape = array_ops.stack((self._num_rows, self._num_columns), axis=0)
+    matrix_shape = array_ops_stack.stack(
+        (self._num_rows, self._num_columns), axis=0)
     if self._batch_shape_arg is None:
       return matrix_shape
 
@@ -273,10 +290,10 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
     #   Also, the final dimension of 'x' can have any shape.
     #   Therefore, the final two dimensions of special_shape are 1's.
     special_shape = self.batch_shape.concatenate([1, 1])
-    bshape = array_ops.broadcast_static_shape(x.get_shape(), special_shape)
+    bshape = array_ops.broadcast_static_shape(x.shape, special_shape)
     if special_shape.is_fully_defined():
       # bshape.is_fully_defined iff special_shape.is_fully_defined.
-      if bshape == x.get_shape():
+      if bshape == x.shape:
         return x
       # Use the built in broadcasting of addition.
       zeros = array_ops.zeros(shape=special_shape, dtype=self.dtype)
@@ -314,6 +331,16 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
 
     zeros = array_ops.zeros(shape=output_shape, dtype=x.dtype)
     return self._possibly_broadcast_batch_shape(zeros)
+
+  def _linop_matmul(
+      self,
+      left_operator: "LinearOperatorZeros",
+      right_operator: linear_operator.LinearOperator
+    ) -> linear_operator.LinearOperator:
+    if not left_operator.is_square or not right_operator.is_square:
+      raise ValueError("Matmul with non-square `LinearOperator`s or non-square "
+                       "`LinearOperatorZeros` not supported at this time.")
+    return left_operator
 
   def _determinant(self):
     if self.batch_shape.is_fully_defined():
@@ -450,3 +477,24 @@ class LinearOperatorZeros(linear_operator.LinearOperator):
            [self._min_matrix_dim_tensor()]], axis=0)
 
     return array_ops.zeros(shape=d_shape, dtype=self.dtype)
+
+  def _eigvals(self):
+    return self._zeros_diag()
+
+  @property
+  def _composite_tensor_prefer_static_fields(self):
+    return ("num_rows", "num_columns", "batch_shape")
+
+  @property
+  def _composite_tensor_fields(self):
+    return ("num_rows", "num_columns", "batch_shape", "dtype",
+            "assert_proper_shapes")
+
+  def __getitem__(self, slices):
+    # Slice the batch shape and return a new LinearOperatorIdentity.
+    # Use a proxy shape and slice it. Use this as the new batch shape
+    new_batch_shape = array_ops.shape(
+        array_ops.ones(self._batch_shape_arg)[slices])
+    parameters = dict(self.parameters, batch_shape=new_batch_shape)
+    return LinearOperatorZeros(**parameters)
+

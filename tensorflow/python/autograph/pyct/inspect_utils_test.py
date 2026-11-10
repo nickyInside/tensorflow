@@ -14,29 +14,18 @@
 # ==============================================================================
 """Tests for inspect_utils module."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+import abc
 import collections
 import functools
-import imp
 import textwrap
 import types
-import weakref
-
-import six
 
 from tensorflow.python import lib
 from tensorflow.python.autograph.pyct import inspect_utils
+from tensorflow.python.autograph.pyct.testing import basic_definitions
 from tensorflow.python.autograph.pyct.testing import decorators
-from tensorflow.python.autograph.pyct.testing import future_import_module
-from tensorflow.python.eager import function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.platform import test
-
-future_import_module_statements = ('absolute_import', 'division',
-                                   'print_function', 'with_statement')
 
 
 def decorator(f):
@@ -61,7 +50,7 @@ def wrapping_decorator():
   return dec
 
 
-class TestClass(object):
+class TestClass:
 
   def member_function(self):
     pass
@@ -109,6 +98,11 @@ class InspectUtilsTest(test.TestCase):
 
     self.assertTrue(inspect_utils.islambda(lambda x: x))
     self.assertFalse(inspect_utils.islambda(test_fn))
+
+  def test_islambda_renamed_lambda(self):
+    l = lambda x: 1
+    l.__name__ = 'f'
+    self.assertTrue(inspect_utils.islambda(l))
 
   def test_isnamedtuple(self):
     nt = collections.namedtuple('TestNamedTuple', ['a', 'b'])
@@ -258,6 +252,21 @@ class InspectUtilsTest(test.TestCase):
     ns = inspect_utils.getnamespace(factory)
     self.assertEqual(ns['free_function'], free_function)
 
+  def test_getnamespace_closure_with_undefined_var(self):
+    if False:  # pylint:disable=using-constant-test
+      a = 1
+
+    def test_fn():
+      return a
+
+    ns = inspect_utils.getnamespace(test_fn)
+    self.assertNotIn('a', ns)
+
+    a = 2
+    ns = inspect_utils.getnamespace(test_fn)
+
+    self.assertEqual(ns['a'], 2)
+
   def test_getnamespace_hermetic(self):
 
     # Intentionally hiding the global function to make sure we don't overwrite
@@ -268,7 +277,7 @@ class InspectUtilsTest(test.TestCase):
       return free_function
 
     ns = inspect_utils.getnamespace(test_fn)
-    globs = six.get_function_globals(test_fn)
+    globs = test_fn.__globals__
     self.assertTrue(ns['free_function'] is free_function)
     self.assertFalse(globs['free_function'] is free_function)
 
@@ -293,8 +302,8 @@ class InspectUtilsTest(test.TestCase):
 
   def test_getqualifiedname(self):
     foo = object()
-    qux = imp.new_module('quxmodule')
-    bar = imp.new_module('barmodule')
+    qux = types.ModuleType('quxmodule')
+    bar = types.ModuleType('barmodule')
     baz = object()
     bar.baz = baz
 
@@ -322,7 +331,7 @@ class InspectUtilsTest(test.TestCase):
       current_level = []
       for j in range(10):
         mod_name = 'mod_{}_{}'.format(i, j)
-        mod = imp.new_module(mod_name)
+        mod = types.ModuleType(mod_name)
         current_level.append(mod)
         if i == 9 and j == 9:
           mod.foo = foo
@@ -349,7 +358,7 @@ class InspectUtilsTest(test.TestCase):
     ns = {}
     mods = []
     for i in range(10):
-      mod = imp.new_module('mod_{}'.format(i))
+      mod = types.ModuleType('mod_{}'.format(i))
       if i == 9:
         mod.foo = foo
       # Module i refers to module i+1
@@ -425,7 +434,7 @@ class InspectUtilsTest(test.TestCase):
     def local_function():
       pass
 
-    class LocalClass(object):
+    class LocalClass:
 
       def member_function(self):
         pass
@@ -473,25 +482,14 @@ class InspectUtilsTest(test.TestCase):
         LocalClass)
 
   def test_getmethodclass_callables(self):
-    class TestCallable(object):
+
+    class TestCallable:
 
       def __call__(self):
         pass
 
     c = TestCallable()
     self.assertEqual(inspect_utils.getmethodclass(c), TestCallable)
-
-  def test_getmethodclass_weakref_mechanism(self):
-    test_obj = TestClass()
-
-    def test_fn(self):
-      return self
-
-    bound_method = types.MethodType(
-        test_fn,
-        function.TfMethodTarget(
-            weakref.ref(test_obj), test_obj.member_function))
-    self.assertEqual(inspect_utils.getmethodclass(bound_method), TestClass)
 
   def test_getmethodclass_no_bool_conversion(self):
 
@@ -500,7 +498,8 @@ class InspectUtilsTest(test.TestCase):
         inspect_utils.getmethodclass(tensor.get_shape), type(tensor))
 
   def test_getdefiningclass(self):
-    class Superclass(object):
+
+    class Superclass:
 
       def foo(self):
         pass
@@ -520,18 +519,19 @@ class InspectUtilsTest(test.TestCase):
       def baz(self):
         pass
 
-    self.assertTrue(
-        inspect_utils.getdefiningclass(Subclass.foo, Subclass) is Subclass)
-    self.assertTrue(
-        inspect_utils.getdefiningclass(Subclass.bar, Subclass) is Superclass)
-    self.assertTrue(
-        inspect_utils.getdefiningclass(Subclass.baz, Subclass) is Subclass)
-    self.assertTrue(
-        inspect_utils.getdefiningclass(Subclass.class_method, Subclass) is
+    self.assertIs(
+        inspect_utils.getdefiningclass(Subclass.foo, Subclass), Subclass)
+    self.assertIs(
+        inspect_utils.getdefiningclass(Subclass.bar, Subclass), Superclass)
+    self.assertIs(
+        inspect_utils.getdefiningclass(Subclass.baz, Subclass), Subclass)
+    self.assertIs(
+        inspect_utils.getdefiningclass(Subclass.class_method, Subclass),
         Superclass)
 
   def test_isbuiltin(self):
     self.assertTrue(inspect_utils.isbuiltin(enumerate))
+    self.assertTrue(inspect_utils.isbuiltin(eval))
     self.assertTrue(inspect_utils.isbuiltin(float))
     self.assertTrue(inspect_utils.isbuiltin(int))
     self.assertTrue(inspect_utils.isbuiltin(len))
@@ -539,50 +539,73 @@ class InspectUtilsTest(test.TestCase):
     self.assertTrue(inspect_utils.isbuiltin(zip))
     self.assertFalse(inspect_utils.isbuiltin(function_decorator))
 
+  def test_isconstructor(self):
+
+    class OrdinaryClass:
+      pass
+
+    class OrdinaryCallableClass:
+
+      def __call__(self):
+        pass
+
+    class Metaclass(type):
+      pass
+
+    class CallableMetaclass(type):
+
+      def __call__(cls):
+        pass
+
+    self.assertTrue(inspect_utils.isconstructor(OrdinaryClass))
+    self.assertTrue(inspect_utils.isconstructor(OrdinaryCallableClass))
+    self.assertTrue(inspect_utils.isconstructor(Metaclass))
+    self.assertTrue(inspect_utils.isconstructor(Metaclass('TestClass', (), {})))
+    self.assertTrue(inspect_utils.isconstructor(CallableMetaclass))
+
+    self.assertFalse(inspect_utils.isconstructor(
+        CallableMetaclass('TestClass', (), {})))
+
+  def test_isconstructor_abc_callable(self):
+
+    class AbcBase(metaclass=abc.ABCMeta):
+
+      @abc.abstractmethod
+      def __call__(self):
+        pass
+
+    class AbcSubclass(AbcBase):
+
+      def __init__(self):
+        pass
+
+      def __call__(self):
+        pass
+
+    self.assertTrue(inspect_utils.isconstructor(AbcBase))
+    self.assertTrue(inspect_utils.isconstructor(AbcSubclass))
+
   def test_getfutureimports_functions(self):
-    self.assertEqual(inspect_utils.getfutureimports(future_import_module.f),
-                     future_import_module_statements)
+    imps = inspect_utils.getfutureimports(basic_definitions.function_with_print)
+    self.assertNotIn('absolute_import', imps)
+    self.assertNotIn('division', imps)
+    self.assertNotIn('print_function', imps)
+    self.assertNotIn('generators', imps)
 
   def test_getfutureimports_lambdas(self):
-    self.assertEqual(
-        inspect_utils.getfutureimports(future_import_module.lambda_f),
-        future_import_module_statements)
+    imps = inspect_utils.getfutureimports(basic_definitions.simple_lambda)
+    self.assertNotIn('absolute_import', imps)
+    self.assertNotIn('division', imps)
+    self.assertNotIn('print_function', imps)
+    self.assertNotIn('generators', imps)
 
   def test_getfutureimports_methods(self):
-    self.assertEqual(inspect_utils.getfutureimports(future_import_module.Foo.f),
-                     future_import_module_statements)
-
-  def test_super_wrapper_for_dynamic_attrs(self):
-
-    a = object()
-    b = object()
-
-    class Base(object):
-
-      def __init__(self):
-        self.a = a
-
-    class Subclass(Base):
-
-      def __init__(self):
-        super(Subclass, self).__init__()
-        self.b = b
-
-    base = Base()
-    sub = Subclass()
-
-    sub_super = super(Subclass, sub)
-    sub_super_wrapped = inspect_utils.SuperWrapperForDynamicAttrs(sub_super)
-
-    self.assertIs(base.a, a)
-    self.assertIs(sub.a, a)
-
-    self.assertFalse(hasattr(sub_super, 'a'))
-    self.assertIs(sub_super_wrapped.a, a)
-
-    # TODO(mdan): Is this side effect harmful? Can it be avoided?
-    # Note that `b` was set in `Subclass.__init__`.
-    self.assertIs(sub_super_wrapped.b, b)
+    imps = inspect_utils.getfutureimports(
+        basic_definitions.SimpleClass.method_with_print)
+    self.assertNotIn('absolute_import', imps)
+    self.assertNotIn('division', imps)
+    self.assertNotIn('print_function', imps)
+    self.assertNotIn('generators', imps)
 
 
 if __name__ == '__main__':

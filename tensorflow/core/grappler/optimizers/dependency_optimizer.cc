@@ -15,10 +15,13 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/optimizers/dependency_optimizer.h"
 
-#include <unordered_map>
+#include <memory>
 #include <unordered_set>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/strings/match.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/grappler/costs/graph_properties.h"
 #include "tensorflow/core/grappler/grappler_item.h"
@@ -38,10 +41,11 @@ namespace grappler {
 
 namespace {
 
-bool RemoveControlInput(NodeDef* node, const string& control_input_to_remove,
+bool RemoveControlInput(NodeDef* node,
+                        const std::string& control_input_to_remove,
                         NodeMap* node_map) {
   for (int pos = node->input_size() - 1; pos >= 0; --pos) {
-    const string& input = node->input(pos);
+    const std::string& input = node->input(pos);
     if (input[0] != '^') break;
     if (input == control_input_to_remove) {
       node->mutable_input()->SwapElements(pos, node->input_size() - 1);
@@ -67,9 +71,17 @@ bool DependencyOptimizer::SafeToRemoveIdentity(const NodeDef& node) const {
     // The output values of this node may be needed.
     return false;
   }
+
+  if (node.input_size() < 1) {
+    // Node lacks input, is invalid
+    return false;
+  }
+
   const NodeDef* input = node_map_->GetNode(NodeName(node.input(0)));
-  CHECK(input != nullptr) << "node = " << node.name()
-                          << " input = " << node.input(0);
+  if (input == nullptr) {
+    VLOG(1) << "node = " << node.name() << " input = " << node.input(0);
+    return false;
+  }
   // Don't remove Identity nodes corresponding to Variable reads or following
   // Recv.
   if (IsVariable(*input) || IsRecv(*input)) {
@@ -80,7 +92,7 @@ bool DependencyOptimizer::SafeToRemoveIdentity(const NodeDef& node) const {
       return false;
     }
     if (IsSwitch(*input)) {
-      for (const string& consumer_input : consumer->input()) {
+      for (const std::string& consumer_input : consumer->input()) {
         if (consumer_input == AsControlDependency(node.name())) {
           return false;
         }
@@ -91,23 +103,50 @@ bool DependencyOptimizer::SafeToRemoveIdentity(const NodeDef& node) const {
 }
 
 bool DependencyOptimizer::SafeToConvertToNoOp(const NodeDef& node) const {
-  if (!fetch_nodes_known_ ||
-      nodes_to_preserve_.find(node.name()) != nodes_to_preserve_.end()) {
+  if (HasRegularOutputs(node, *node_map_)) {
+    // The output values of this node may be needed.
+    VLOG(3) << "Not safe to convert '" << node.name()
+            << " to NoOp. Node has outputs.";
     return false;
   }
-  if (IsMerge(node) || IsSwitch(node) || ModifiesFrameInfo(node) ||
-      !IsFreeOfSideEffect(node)) {
+  if (!fetch_nodes_known_) {
+    VLOG(3) << "Not safe to convert '" << node.name()
+            << " to NoOp. Fetches unknown.";
     return false;
   }
-  if (node.op().rfind("Submodel", 0) == 0) {
+  if (nodes_to_preserve_.find(node.name()) != nodes_to_preserve_.end()) {
+    VLOG(3) << "Not safe to convert to NoOp: " << node.name()
+            << " is in preserve set.";
+    return false;
+  }
+  if (IsMerge(node) || IsSwitch(node) || ModifiesFrameInfo(node)) {
+    VLOG(3) << "Not safe to convert '" << node.name()
+            << " to NoOp. Node modifies frame info.";
+    return false;
+  }
+  // Ops reading variables are marked as stateful, but are safe to remove if
+  // redundant.
+  static const absl::flat_hash_set<std::string>* gather_ops =
+      new absl::flat_hash_set<std::string>{"Gather", "GatherV2", "GatherNd",
+                                           "ResourceGather",
+                                           "ResourceGatherNd"};
+  const bool is_variable_read =
+      IsReadVariableOp(node) || IsReadVariablesOp(node) ||
+      gather_ops->find(node.op()) != gather_ops->end();
+  if (!is_variable_read && !IsFreeOfSideEffect(node)) {
+    VLOG(3) << "Not safe to convert '" << node.name()
+            << " to NoOp. Node has side effect.";
+    return false;
+  }
+  if (absl::StartsWith(node.op(), "Submodel")) {
     return false;
   }
   const OpDef* op_def = nullptr;
-  Status status = OpRegistry::Global()->LookUpOpDef(node.op(), &op_def);
+  absl::Status status = OpRegistry::Global()->LookUpOpDef(node.op(), &op_def);
   if (!status.ok() || op_def->output_arg_size() == 0) {
     return false;
   }
-  const std::unordered_set<string> do_not_rewrite_ops{
+  const std::unordered_set<std::string> do_not_rewrite_ops{
       "Assert",     "CheckNumerics",         "_Retval",
       "_Arg",       "_ParallelConcatUpdate", "TPUExecute",
       "TPUCompile", "ControlTrigger"};
@@ -115,10 +154,6 @@ bool DependencyOptimizer::SafeToConvertToNoOp(const NodeDef& node) const {
     return false;
   }
   if (!SafeToRemoveIdentity(node)) {
-    return false;
-  }
-  if (NumNonControlOutputs(node, *node_map_) > 0) {
-    // The output values of this node may be needed.
     return false;
   }
   return true;
@@ -135,7 +170,7 @@ int DependencyOptimizer::NumEdgesIfBypassed(
     // multi-input identity_n with input/output control dependencies will likely
     // increase number of edges after optimization.
     int num_edges_if_bypassed(0);
-    for (string input_node_name : node.input()) {
+    for (const std::string& input_node_name : node.input()) {
       if (IsControlInput(input_node_name)) {
         num_edges_if_bypassed += num_outputs;
       } else {
@@ -186,7 +221,7 @@ bool DependencyOptimizer::BypassingNodeIsBeneficial(
   // TODO(rmlarsen): Not all device crossings are equally expensive.
   // Assign a cost to each based on device affinity and compute a
   // cost before and after.
-  const string& node_dev = node.device();
+  const std::string& node_dev = node.device();
   int num_cross_in = 0;
   for (NodeDef* input_node : input_nodes) {
     num_cross_in += static_cast<int>(input_node->device() != node_dev);
@@ -212,7 +247,7 @@ bool DependencyOptimizer::BypassingNodeIsBeneficial(
   if ((is_identity || is_multi_input_identity_n) && num_cross_in > 0 &&
       num_cross_out > 0 && num_cross_after > 0) {
     // This identity node follows a device crossing, so it might be
-    // following a _Recv node after partioning. Do not remove such nodes,
+    // following a _Recv node after partitioning. Do not remove such nodes,
     // unless they only have consumers on the same device as themselves.
     return false;
   }
@@ -228,11 +263,11 @@ void DependencyOptimizer::OptimizeNode(int node_idx,
   const bool is_identity = IsIdentity(*node) || IsIdentityNSingleInput(*node);
   const bool is_multi_input_identity =
       IsIdentityN(*node) && !IsIdentityNSingleInput(*node);
-  const string node_name = node->name();
+  const std::string node_name = node->name();
   // Constant nodes with no input control dependency are always executed early,
   // so we can prune all their output control dependencies.
   if (IsConstant(*node) && node->input_size() == 0) {
-    const std::set<NodeDef*> output_nodes = node_map_->GetOutputs(node_name);
+    const auto output_nodes = node_map_->GetOutputs(node_name);
     for (NodeDef* fanout : output_nodes) {
       bool optimize_fanout = false;
       bool data_connection = false;
@@ -265,14 +300,14 @@ void DependencyOptimizer::OptimizeNode(int node_idx,
 
   // Change ops that only have control dependencies as outputs to NoOps.
   if (!is_noop && SafeToConvertToNoOp(*node)) {
-    VLOG(1) << "***** Replacing  " << node_name << " (" << node->op()
+    VLOG(2) << "***** Replacing  " << node_name << " (" << node->op()
             << ") with NoOp.";
     // The outputs of this node are not consumed. Replace its inputs with
     // control dependencies and replace the op itself with the NoOp op.
-    std::unordered_set<string> ctrl_inputs;
+    std::unordered_set<std::string> ctrl_inputs;
     int pos = 0;
     while (pos < node->input_size()) {
-      const string old_input = node->input(pos);
+      const std::string old_input = node->input(pos);
       if (IsControlInput(old_input)) {
         if (!ctrl_inputs.insert(old_input).second) {
           // We found a duplicate control input. Remove it.
@@ -284,7 +319,7 @@ void DependencyOptimizer::OptimizeNode(int node_idx,
         continue;
       }
       // Replace a normal input with a control input.
-      const string ctrl_input = ConstantFolding::AddControlDependency(
+      const std::string ctrl_input = ConstantFolding::AddControlDependency(
           old_input, optimized_graph_, node_map_.get());
       ctrl_inputs.insert(ctrl_input);
       node->set_input(pos, ctrl_input);
@@ -293,8 +328,8 @@ void DependencyOptimizer::OptimizeNode(int node_idx,
       nodes_to_simplify->PushBack(node_to_idx_[old_input_node]);
       ++pos;
     }
-    node->set_op("NoOp");
-    node->clear_attr();
+    ChangeToNoOp(node);
+    EraseRegularNodeAttributes(node);
     DedupControlInputs(node);
     nodes_to_simplify->PushBack(node_to_idx_[node]);
     return;
@@ -368,11 +403,11 @@ void DependencyOptimizer::OptimizeNode(int node_idx,
       return;
     }
 
-    VLOG(1) << "***** Rerouting input around\n" << node->DebugString();
+    VLOG(2) << "***** Rerouting input around\n" << node->DebugString();
     // Now remove the node and re-wire its inputs to its outputs.
     for (auto consumer : output_nodes) {
       bool updated_consumer = false;
-      VLOG(1) << "consumer before:\n" << consumer->DebugString();
+      VLOG(2) << "consumer before:\n" << consumer->DebugString();
       // Remove dependency on node from consumer.
       for (int i = 0; i < num_inputs; ++i) {
         const NodeDef* input = input_nodes[i];
@@ -381,8 +416,8 @@ void DependencyOptimizer::OptimizeNode(int node_idx,
         if ((is_identity && i == 0) ||
             (is_multi_input_identity && !IsControlInput(node->input(i)))) {
           // Replace regular input from Identity node.
-          string new_input;
-          const string& input_to_forward = node->input(i);
+          std::string new_input;
+          const std::string& input_to_forward = node->input(i);
           CHECK(!IsControlInput(input_to_forward));
           for (int j = 0; j < consumer->input_size(); ++j) {
             const TensorId old_input = ParseTensorName(consumer->input(j));
@@ -390,14 +425,14 @@ void DependencyOptimizer::OptimizeNode(int node_idx,
               if (old_input.index() == i) {
                 // Regular input
                 new_input = input_to_forward;
-                node_map_->UpdateInput(consumer->name(), old_input.ToString(),
-                                       new_input);
+                node_map_->UpdateInput(
+                    consumer->name(), std::string(old_input.node()), new_input);
                 consumer->set_input(j, new_input);
               } else if (old_input.index() == -1) {
                 // Control dependency
                 new_input = AsControlDependency(NodeName(input_to_forward));
-                node_map_->UpdateInput(consumer->name(), old_input.ToString(),
-                                       new_input);
+                node_map_->UpdateInput(
+                    consumer->name(), std::string(old_input.node()), new_input);
                 consumer->set_input(j, new_input);
               }
             }
@@ -419,7 +454,7 @@ void DependencyOptimizer::OptimizeNode(int node_idx,
       if (updated_consumer) {
         nodes_to_simplify->PushBack(node_to_idx_[consumer]);
       }
-      VLOG(1) << "consumer after:\n" << consumer->DebugString();
+      VLOG(2) << "consumer after:\n" << consumer->DebugString();
     }
     node_map_->RemoveOutputs(node_name);
     if (fetch_nodes_known_ &&
@@ -440,7 +475,7 @@ void DependencyOptimizer::CleanControlInputs() {
   }
 }
 
-Status DependencyOptimizer::OptimizeDependencies() {
+absl::Status DependencyOptimizer::OptimizeDependencies() {
   SetVector<int> nodes_to_simplify;
   std::set<int> nodes_to_delete;
   for (int i = 0; i < optimized_graph_->node_size(); ++i) {
@@ -463,22 +498,56 @@ Status DependencyOptimizer::OptimizeDependencies() {
     VLOG(1) << "Deleted " << nodes_to_delete.size() << " out of "
             << optimized_graph_->node_size() << " nodes.";
     EraseNodesFromGraph(nodes_to_delete, optimized_graph_);
-    node_map_.reset(new NodeMap(optimized_graph_));
+    node_map_ = std::make_unique<NodeMap>(optimized_graph_);
     BuildNodeToIdx();
   }
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status DependencyOptimizer::TransitiveReduction() {
+namespace {
+
+enum DistanceFromSource : uint8_t { ZERO = 0, ONE = 1, TWO_OR_GREATER = 2 };
+
+void LongestPathsLowerBounds(
+    int source, const std::pair<int, int>& target_range,
+    const std::vector<std::vector<int>>& outputs,
+    std::vector<DistanceFromSource>* longest_distance) {
+  std::deque<int> queue;
+  queue.emplace_front(source);
+  while (!queue.empty()) {
+    int node = queue.front();
+    queue.pop_front();
+    for (int fanout : outputs[node]) {
+      // 1) Only nodes in the target range can be on paths from source to one of
+      //    its control outputs.
+      // 2) Since we only need a lower bound on the longest distance, we can
+      //    skip nodes for which we have already proven have a path of
+      //    length > 1 from the source.
+      if (fanout >= target_range.first && fanout <= target_range.second &&
+          (*longest_distance)[fanout] != TWO_OR_GREATER) {
+        (*longest_distance)[fanout] =
+            (*longest_distance)[fanout] == ZERO ? ONE : TWO_OR_GREATER;
+        queue.emplace_front(fanout);
+      }
+    }
+  }
+}
+
+}  // namespace
+
+absl::Status DependencyOptimizer::TransitiveReduction() {
   // PRECONDITION: optimized_graph_ must be sorted topologically.
   const int num_nodes = optimized_graph_->node_size();
   // Set up a compressed version of the graph to save a constant factor in the
   // expensive algorithm below. Also cache the set of control outputs and the
   // highest index of a target of any control output from each node.
   int num_controls = 0;
-  std::vector<gtl::InlinedVector<int, 4>> inputs(num_nodes);
-  std::vector<gtl::InlinedVector<std::pair<int, int>, 2>> control_outputs(
+  std::vector<std::vector<int>> outputs(num_nodes);
+  std::vector<absl::InlinedVector<std::pair<int, int>, 2UL>> control_outputs(
       num_nodes);
+  // target_range[i] contains the range of node indices for which to compute
+  // longest paths starting from node i.
+  std::vector<std::pair<int, int>> target_range(num_nodes, {num_nodes, -1});
   for (int node_idx = 0; node_idx < num_nodes; ++node_idx) {
     const NodeDef& node = optimized_graph_->node(node_idx);
     if (ModifiesFrameInfo(node) || !HasOpDef(node)) {
@@ -486,7 +555,7 @@ Status DependencyOptimizer::TransitiveReduction() {
       continue;
     }
     for (int input_slot = 0; input_slot < node.input_size(); ++input_slot) {
-      const string& input = node.input(input_slot);
+      const std::string& input = node.input(input_slot);
       const NodeDef* input_node = node_map_->GetNode(input);
       if (ModifiesFrameInfo(*input_node) || IsMerge(*input_node)) {
         // Ignore edges from nodes that modify frame info and from Merge nodes,
@@ -494,10 +563,14 @@ Status DependencyOptimizer::TransitiveReduction() {
         continue;
       }
       const int input_node_idx = node_to_idx_[input_node];
-      inputs[node_idx].push_back(input_node_idx);
+      outputs[input_node_idx].push_back(node_idx);
+      target_range[input_node_idx].first =
+          std::min(target_range[input_node_idx].first, node_idx);
       if (IsControlInput(input)) {
         ++num_controls;
         control_outputs[input_node_idx].emplace_back(node_idx, input_slot);
+        target_range[input_node_idx].second =
+            std::max(target_range[input_node_idx].second, node_idx);
       }
     }
   }
@@ -506,57 +579,39 @@ Status DependencyOptimizer::TransitiveReduction() {
   // outputs. If, for any target node of a control output, there exists a path
   // of length > 1, we can drop that control dependency.
   int num_controls_removed = 0;
-  std::vector<int> longest_distance(num_nodes);
+  std::vector<DistanceFromSource> longest_distance(num_nodes);
   // Map from target_index -> set of (input_slot, source_index), representing
   // the control edges to remove. We sort them in reverse order by input slot,
   // such that when we swap them out so we don't clobber the
   // node(target).input() repeated field.
   typedef std::pair<int, int> InputSlotAndSource;
-  std::unordered_map<
+  absl::flat_hash_map<
       int, std::set<InputSlotAndSource, std::greater<InputSlotAndSource>>>
       control_edges_to_remove;
   for (int source = 0; source < num_nodes; ++source) {
-    int highest_control_target = -1;
-    for (const auto& control_output : control_outputs[source]) {
-      if (control_output.first > highest_control_target) {
-        highest_control_target = control_output.first;
-      }
-    }
-    if (highest_control_target <= source) {
+    if (target_range[source].first >= target_range[source].second ||
+        target_range[source].second <= source) {
       continue;
     }
-    std::fill(longest_distance.begin() + source,
-              longest_distance.begin() + highest_control_target + 1, 0);
-    for (int target = source + 1; target <= highest_control_target; ++target) {
-      for (int input : inputs[target]) {
-        // If the input node is before source in the topo order, no path
-        // source -> input -> target can exits and we can skip it.
-        // Also only extend a path from the source itself or from nodes that
-        // have a path from source, indicated by longest_distance[input] > 0.
-        if (input == source ||
-            (input > source && longest_distance[input] > 0)) {
-          // If source -> input -> target is longer than the longest
-          // path so far from source -> target, update the longest_distance.
-          int candidate_longest_distance = longest_distance[input] + 1;
-          if (candidate_longest_distance > longest_distance[target]) {
-            longest_distance[target] = candidate_longest_distance;
-          }
-        }
-      }
-    }
+    // Compute the set of nodes in the transitive fanout of source with
+    // topological sort index in [target_range.first : target_range.second]]
+    // to which there exists a path of length 2 or more from source.
+    std::fill(longest_distance.begin() + target_range[source].first,
+              longest_distance.begin() + target_range[source].second + 1, ZERO);
+    LongestPathsLowerBounds(source, target_range[source], outputs,
+                            &longest_distance);
 
     // If the longest path from source to target of a control dependency is
     // longer than 1, there exists an alternate path, and we can eliminate the
     // redundant direct control dependency.
     for (const auto& control_output : control_outputs[source]) {
       const int target = control_output.first;
-      if (longest_distance[target] > 1) {
+      if (longest_distance[target] == TWO_OR_GREATER) {
         const int input_slot = control_output.second;
         control_edges_to_remove[target].emplace(input_slot, source);
       }
     }
   }
-
   for (const auto& it : control_edges_to_remove) {
     const int target = it.first;
     NodeDef* target_node = optimized_graph_->mutable_node(target);
@@ -574,7 +629,7 @@ Status DependencyOptimizer::TransitiveReduction() {
   }
   VLOG(1) << "Removed " << num_controls_removed << " out of " << num_controls
           << " control dependencies";
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void DependencyOptimizer::BuildNodeToIdx() {
@@ -593,11 +648,18 @@ void DependencyOptimizer::BuildNodeToIdx() {
 // We can reduce cross-device communication by introducing an intermediate
 // NoOp node C' on device X and rewriting the control edges to:
 // A->C', B->C', C' -> C
-void DependencyOptimizer::GroupCrossDeviceControlEdges() {
+void DependencyOptimizer::GroupCrossDeviceControlEdges(bool host_granularity) {
+  VLOG(1)
+      << "DependencyOptimizer::GroupCrossDeviceControlEdges host_granularity="
+      << host_granularity;
   const int num_nodes = optimized_graph_->node_size();
   for (int i = 0; i < num_nodes; ++i) {
     NodeDef* node = optimized_graph_->mutable_node(i);
     if (node->device().empty()) continue;
+    std::string rest, node_device = node->device();
+    if (host_granularity) {
+      DeviceNameUtils::SplitDeviceName(node->device(), &node_device, &rest);
+    }
 
     // Creates new noop nodes for devices on which multiple control inputs are
     // located.
@@ -605,26 +667,34 @@ void DependencyOptimizer::GroupCrossDeviceControlEdges() {
     // Map keyed by device name to the newly introduced Noop node for that
     // device. A nullptr value means that we have only seen a single node on
     // that device.
-    std::map<string, NodeDef*> noops;
+    std::map<std::string, NodeDef*> noops;
     int num_noops = 0;
     for (int j = 0; j < node->input_size(); ++j) {
       if (IsControlInput(node->input(j))) {
         const NodeDef* input = node_map_->GetNode(node->input(j));
-        if (input != nullptr && !input->device().empty() &&
-            input->device() != node->device()) {
-          auto emplace_result = noops.emplace(input->device(), nullptr);
+        if (input == nullptr || input->device().empty()) continue;
+        std::string input_device = input->device();
+        if (host_granularity) {
+          DeviceNameUtils::SplitDeviceName(input->device(), &input_device,
+                                           &rest);
+        }
+        if (input_device != node_device) {
+          VLOG(2) << "Cross-device " << node->name() << " " << input->device()
+                  << " -> " << node->device();
+          auto emplace_result = noops.emplace(input_device, nullptr);
           if (!emplace_result.second &&
               emplace_result.first->second == nullptr) {
+            VLOG(2) << "Duplicate input device from " << node->name();
             // This is the second cross-device control input from the same
             // device. Creates an intermediate noop node on that device.
-            string group_name;
+            std::string group_name;
             NodeDef* noop;
             // Creates a fresh node name; there may be conflicting names from
             // a previous iteration of the optimizer.
             do {
               group_name = AddPrefixToNodeName(
                   node->name(),
-                  strings::StrCat("GroupCrossDeviceControlEdges_", num_noops));
+                  absl::StrCat("GroupCrossDeviceControlEdges_", num_noops));
               noop = node_map_->GetNode(group_name);
               ++num_noops;
             } while (noop != nullptr);
@@ -634,6 +704,8 @@ void DependencyOptimizer::GroupCrossDeviceControlEdges() {
             noop->set_op("NoOp");
             node_map_->AddNode(noop->name(), noop);
             emplace_result.first->second = noop;
+            VLOG(1) << "GroupCrossDeviceControlEdges: Added "
+                    << SummarizeNodeDef(*noop);
           }
         }
       }
@@ -642,16 +714,22 @@ void DependencyOptimizer::GroupCrossDeviceControlEdges() {
     // Reroute existing control edges to go via the newly introduced NoOp nodes.
     int pos = 0;
     while (pos < node->input_size()) {
-      const string& input_name = node->input(pos);
+      const std::string& input_name = node->input(pos);
       if (IsControlInput(input_name)) {
         NodeDef* input = node_map_->GetNode(input_name);
         if (input == nullptr) {
           ++pos;
         } else {
-          auto it = noops.find(input->device());
+          std::string input_device = input->device();
+          if (host_granularity) {
+            DeviceNameUtils::SplitDeviceName(input->device(), &input_device,
+                                             &rest);
+          }
+          auto it = noops.find(input_device);
           if (it == noops.end() || it->second == nullptr) {
             ++pos;
           } else {
+            VLOG(2) << "Rewriting input from " << input_name;
             node->mutable_input()->SwapElements(pos, node->input_size() - 1);
             node->mutable_input()->RemoveLast();
             it->second->add_input(AsControlDependency(*input));
@@ -672,8 +750,9 @@ void DependencyOptimizer::GroupCrossDeviceControlEdges() {
   }
 }
 
-Status DependencyOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
-                                     GraphDef* optimized_graph) {
+absl::Status DependencyOptimizer::Optimize(Cluster* cluster,
+                                           const GrapplerItem& item,
+                                           GraphDef* optimized_graph) {
   optimized_graph_ = optimized_graph;
   *optimized_graph_ = item.graph;
   nodes_to_preserve_ = item.NodesToPreserve();
@@ -683,11 +762,11 @@ Status DependencyOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
   const int num_iterations = 2;
   for (int iteration = 0; iteration < num_iterations; ++iteration) {
     GRAPPLER_RETURN_IF_DEADLINE_EXCEEDED();
-    Status topo_sort_status;
+    absl::Status topo_sort_status;
     // Perform topological sort to prepare the graph for transitive reduction.
     topo_sort_status = TopologicalSort(optimized_graph_);
     // Set up index-based graph datastructures to speed up analysis steps below.
-    node_map_.reset(new NodeMap(optimized_graph_));
+    node_map_ = std::make_unique<NodeMap>(optimized_graph_);
     BuildNodeToIdx();
 
     if (topo_sort_status.ok()) {
@@ -696,7 +775,7 @@ Status DependencyOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
     } else {
       LOG(ERROR) << "Iteration = " << iteration
                  << ", topological sort failed with message: "
-                 << topo_sort_status.error_message();
+                 << topo_sort_status.message();
     }
     // Turn nodes with only control outputs into NoOps, prune NoOp and Identity
     // nodes.
@@ -705,17 +784,14 @@ Status DependencyOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
     // Dedup control inputs.
     CleanControlInputs();
 
-    GroupCrossDeviceControlEdges();
+    // Merge multiple control edges from the same device.
+    GroupCrossDeviceControlEdges(/*host_granularity=*/false);
+
+    // Merge control edges from the same host to reduce RPC traffic.
+    GroupCrossDeviceControlEdges(/*host_granularity=*/true);
   }
 
-  return Status::OK();
-}
-
-void DependencyOptimizer::Feedback(Cluster* /*cluster*/,
-                                   const GrapplerItem& /*item*/,
-                                   const GraphDef& /*optimized_graph*/,
-                                   double /*result*/) {
-  // Nothing to do for DependencyOptimizer.
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

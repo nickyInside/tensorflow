@@ -1,6 +1,27 @@
-# -*- Python -*-
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
+"""
+Benchmark-related macros.
+"""
+
+load(
+    "//tensorflow:tensorflow.default.bzl",
+    "cuda_py_strict_test",
+    "tf_py_strict_test",
+)
 
 # Create a benchmark test target of a TensorFlow C++ test (tf_cc_*_test)
 def tf_cc_logged_benchmark(
@@ -8,8 +29,8 @@ def tf_cc_logged_benchmark(
         target = None,
         benchmarks = "..",
         tags = [],
-        test_log_output_prefix = "",
-        benchmark_type = "cpp_microbenchmark"):
+        benchmark_type = "cpp_microbenchmark",
+        **kwargs):
     if not name:
         fail("Must provide a name")
     if not target:
@@ -25,7 +46,7 @@ def tf_cc_logged_benchmark(
 
     all_tags = tags + ["benchmark-test", "local", "manual", "regression-test"]
 
-    tf_py_test(
+    tf_py_strict_test(
         name = name,
         tags = all_tags,
         size = "large",
@@ -39,11 +60,45 @@ def tf_cc_logged_benchmark(
         data = [
             target,
         ],
-        main = "run_and_gather_logs.py",
-        additional_deps = [
-            "//tensorflow/tools/test:run_and_gather_logs",
+        main = "//tensorflow/tools/test:run_and_gather_logs.py",
+        deps = [
+            "@absl_py//absl:app",
+            "@absl_py//absl/flags",
+            "@org_tensorflow//tensorflow/core:protos_all_py",
+            "//tensorflow/python/platform:gfile",
+            "//tensorflow/python/platform:test",
+            "//tensorflow/python/platform:tf_logging",
+            "//tensorflow/tools/test:run_and_gather_logs_main_lib",
         ],
+        **kwargs
     )
+
+def add_benchmark_tag_to_kwargs(kwargs):
+    """Adds the `benchmark-test` tag to the kwargs, if not already present.
+
+    Notes:
+      For benchmarks which are not technically tests, but whose class methods
+      can still be discovered, and run as such via `bazel run`.
+    Args:
+      kwargs: kwargs to be passed to a test wrapper/rule further down.
+    Returns:
+      kwargs: kwargs with the tags including the `benchmark-test` tags.
+    """
+    benchmark_tag = "benchmark-test"
+    if "tags" in kwargs and kwargs["tags"] != None:
+        if benchmark_tag not in kwargs["tags"]:
+            kwargs["tags"].append(benchmark_tag)
+    else:
+        kwargs["tags"] = [benchmark_tag]
+    return kwargs
+
+def tf_py_benchmark_test(**kwargs):
+    kwargs = add_benchmark_tag_to_kwargs(kwargs)
+    tf_py_strict_test(**kwargs)
+
+def cuda_py_benchmark_test(**kwargs):
+    kwargs = add_benchmark_tag_to_kwargs(kwargs)
+    cuda_py_strict_test(**kwargs)
 
 # Create a benchmark test target of a TensorFlow python test (*py_tests)
 def tf_py_logged_benchmark(
@@ -51,7 +106,7 @@ def tf_py_logged_benchmark(
         target = None,
         benchmarks = "..",
         tags = [],
-        test_log_output_prefix = ""):
+        **kwargs):
     # For now generating a py benchmark is the same as generating a C++
     # benchmark target. In the future this may change, so we have
     # two macros just in case
@@ -60,6 +115,6 @@ def tf_py_logged_benchmark(
         target = target,
         benchmarks = benchmarks,
         tags = tags,
-        test_log_output_prefix = test_log_output_prefix,
         benchmark_type = "python_benchmark",
+        **kwargs
     )

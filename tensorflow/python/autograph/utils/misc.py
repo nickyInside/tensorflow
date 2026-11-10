@@ -14,12 +14,11 @@
 # ==============================================================================
 """Miscellaneous utilities that don't fit anywhere else."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor
 from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import gen_math_ops
+from tensorflow.python.ops import math_ops
 
 
 def alias_tensors(*args):
@@ -38,7 +37,7 @@ def alias_tensors(*args):
   """
 
   def alias_if_tensor(a):
-    return array_ops.identity(a) if isinstance(a, ops.Tensor) else a
+    return array_ops.identity(a) if isinstance(a, tensor.Tensor) else a
 
   # TODO(mdan): Recurse into containers?
   # TODO(mdan): Anything we can do about variables? Fake a scope reuse?
@@ -50,8 +49,11 @@ def alias_tensors(*args):
   raise ValueError('at least one argument required')
 
 
-def capitalize_initial(s):
-  """Capitalizes the initial of a string only."""
-  if s:
-    return s[0].upper() + s[1:]
-  return s
+def get_range_len(start, limit, delta):
+  dist = ops.convert_to_tensor(limit - start)
+  unadjusted_len = dist // delta
+  adjustment = math_ops.cast(
+      gen_math_ops.not_equal(dist % delta,
+                             array_ops.zeros_like(unadjusted_len)), dist.dtype)
+  final_len = unadjusted_len + adjustment
+  return gen_math_ops.maximum(final_len, array_ops.zeros_like(final_len))

@@ -20,6 +20,7 @@ limitations under the License.
 #define TENSORFLOW_CORE_LIB_JPEG_JPEG_HANDLE_H_
 
 #include "tensorflow/core/platform/jpeg.h"
+#include "tensorflow/core/platform/tstring.h"
 #include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
@@ -33,7 +34,7 @@ typedef struct {
   JOCTET *buffer;
   int bufsize;
   int datacount;
-  string *dest;
+  tstring *dest;
 } MemDestMgr;
 
 typedef struct {
@@ -52,7 +53,7 @@ void SetDest(j_compress_ptr cinfo, void *buffer, int bufsize);
 // Same as above, except that buffer is only used as a temporary structure and
 // is emptied into "destination" as soon as it fills up.
 void SetDest(j_compress_ptr cinfo, void *buffer, int bufsize,
-             string *destination);
+             tstring *destination);
 
 }  // namespace jpeg
 }  // namespace tensorflow

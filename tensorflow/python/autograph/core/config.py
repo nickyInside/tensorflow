@@ -14,47 +14,49 @@
 # ==============================================================================
 """Global configuration."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+from tensorflow.python.autograph.core import config_lib
 
-from tensorflow.python.autograph import utils
-
-
-PYTHON_LITERALS = {
-    'None': None,
-    'False': False,
-    'True': True,
-    'float': float,
-}
+Action = config_lib.Action
+Convert = config_lib.Convert
+DoNotConvert = config_lib.DoNotConvert
 
 
-def _internal_name(name):
-  """This function correctly resolves internal and external names."""
-  reference_name = utils.__name__
+# This list is evaluated in order and stops at the first rule that tests True
+# for a definitely_convert of definitely_bypass call.
+CONVERSION_RULES = (
+    # Known packages
+    Convert('tensorflow.python.training.experimental'),
 
-  reference_root = 'tensorflow.'
-  # If the TF module is foo.tensorflow, then all other modules
-  # are then assumed to be prefixed by 'foo'.
+    # Builtin modules
+    DoNotConvert('collections'),
+    DoNotConvert('copy'),
+    DoNotConvert('cProfile'),
+    DoNotConvert('inspect'),
+    DoNotConvert('ipdb'),
+    DoNotConvert('linecache'),
+    DoNotConvert('mock'),
+    DoNotConvert('pathlib'),
+    DoNotConvert('pdb'),
+    DoNotConvert('posixpath'),
+    DoNotConvert('pstats'),
+    DoNotConvert('re'),
+    DoNotConvert('threading'),
+    DoNotConvert('urllib'),
 
-  if reference_name.startswith(reference_root):
-    return name
+    # Known libraries
+    DoNotConvert('matplotlib'),
+    DoNotConvert('numpy'),
+    DoNotConvert('pandas'),
+    DoNotConvert('tensorflow'),
+    DoNotConvert('PIL'),
+    DoNotConvert('absl.logging'),
 
-  reference_begin = reference_name.find('.' + reference_root)
-  assert reference_begin > 0
+    # TODO(b/133417201): Remove.
+    DoNotConvert('tensorflow_probability'),
 
-  root_prefix = reference_name[:reference_begin]
-  return root_prefix + '.' + name
+    # TODO(b/133842282): Remove.
+    DoNotConvert('tensorflow_datasets.core'),
 
-
-DEFAULT_UNCOMPILED_MODULES = set((
-    ('tensorflow',),
-    (_internal_name('tensorflow'),),
-    # TODO(mdan): Remove once the conversion process is optimized.
-    ('tensorflow_probability',),
-    (_internal_name('tensorflow_probability'),),
-    # TODO(b/130313089): Remove.
-    ('numpy',),
-    # TODO(mdan): Might need to add "thread" as well?
-    ('threading',),
-))
+    DoNotConvert('keras'),
+    DoNotConvert('tf_keras'),
+)

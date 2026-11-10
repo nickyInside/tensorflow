@@ -12,38 +12,41 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <cstddef>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/lite/toco/graph_transformations/graph_transformations.h"
 #include "tensorflow/lite/toco/model.h"
 #include "tensorflow/lite/toco/tooling_util.h"
-#include "tensorflow/core/platform/logging.h"
 
 namespace toco {
 
-::tensorflow::Status ResolveTensorFlowSwitch::Run(Model* model,
-                                                  std::size_t op_index,
-                                                  bool* modified) {
+absl::Status ResolveTensorFlowSwitch::Run(Model* model, std::size_t op_index,
+                                          bool* modified) {
   *modified = false;
   const auto switch_it = model->operators.begin() + op_index;
   const auto* switch_op = switch_it->get();
   if (switch_op->type != OperatorType::kSwitch) {
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   CHECK_EQ(switch_op->inputs.size(), 2);
   CHECK_EQ(switch_op->outputs.size(), 2);
-  const string& predicate_name = switch_op->inputs[1];
+  const std::string& predicate_name = switch_op->inputs[1];
   // If the predicate array hasn't been resolved to a constant yet,
   // we need to yield.
   if (!IsConstantParameterArray(*model, predicate_name)) {
     AddMessageF(
         "Waiting for the boolean predicate of %s to be resolved to a constant",
         LogName(*switch_op));
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   // The predicate should be boolean, and should consist of a single value.
@@ -60,7 +63,7 @@ namespace toco {
   const bool predicate_value = predicate_data[0];
 
   // From the TensorFlow docs on .switch() in
-  // third_party/tensorflow/python/ops/control_flow_ops.py
+  // tensorflow/python/ops/control_flow_ops.py
   //
   //    If `pred` is false, the `data` input is forwarded to the first output.
   //    Otherwise, the data goes to the second output.
@@ -95,9 +98,17 @@ namespace toco {
       if (*input_it == switch_op->outputs[nonselected_output_index]) {
         // Let us guard our assumption that only Merge nodes consume the outputs
         // of Switch nodes:
-        CHECK(other_op->type == OperatorType::kMerge)
-            << "Found " << HelpfulOperatorTypeName(*other_op)
-            << " as non-selected output from Switch, but only Merge supported.";
+        if (other_op->type != OperatorType::kMerge) {
+          return absl::Status(
+              absl::StatusCode::kFailedPrecondition,
+              ::absl::StrCat(
+                  "Found ", HelpfulOperatorTypeName(*other_op),
+                  " as non-selected output from Switch, but only "
+                  "Merge supported. Control flow ops like Switch and Merge are "
+                  "not generally supported. We are working on fixing this, "
+                  "please see the Github issue at "
+                  "https://github.com/tensorflow/tensorflow/issues/28485."));
+        }
         input_it = other_op->inputs.erase(input_it);
       } else {
         ++input_it;
@@ -121,9 +132,9 @@ namespace toco {
   }
   // Remove the switch node itself.
   AddMessageF("Removing already-resolved %s", LogName(*switch_op));
-  model->operators.erase(switch_it);
+  DeleteOpAndArrays(model, switch_op);
   *modified = true;
-  return ::tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace toco

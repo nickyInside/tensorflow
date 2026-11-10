@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # TensorFlow Debugger (tfdbg).
 #
@@ -12,31 +27,30 @@
 #    a watch state.
 # ":debug_node_key" - Defines a struct used for tracking tensors.
 
-package(
-    default_visibility = ["//tensorflow:internal"],
-)
-
-licenses(["notice"])  # Apache 2.0
-
+load("@rules_python//python:proto.bzl", "py_proto_library")
 load(
     "//tensorflow:tensorflow.bzl",
     "check_deps",
-    "tf_copts",
+    "if_windows",
+    "tf_cc_binary",
     "tf_cc_test",
+    "tf_copts",
     "tf_cuda_library",
 )
+load("//tensorflow:tensorflow.default.bzl", "tf_grpc_cc_dependencies")
 
 # For platform specific build config
 load(
-    "//tensorflow/core:platform/default/build_config.bzl",
-    "tf_kernel_tests_linkstatic",
-    "tf_proto_library",
-    "tf_proto_library_cc",
+    "//tensorflow/core/platform:build_config.bzl",
     "tf_additional_all_protos",
+    "tf_proto_library",
 )
-load(
-    "//tensorflow/core:platform/default/build_config_root.bzl",
-    "tf_cuda_tests_tags",
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    default_visibility = ["//tensorflow:internal"],
+    licenses = ["notice"],
 )
 
 # Check that tensorflow/core:tensorflow does not depend on grpc.
@@ -52,8 +66,7 @@ tf_proto_library(
         "debug_service.proto",
     ],
     has_services = 1,
-    cc_api_version = 2,
-    cc_grpc_version = 1,
+    create_grpc_library = True,
     protodeps = [
         ":debugger_event_metadata_proto",
         "//tensorflow/core/profiler:protos_all",
@@ -64,7 +77,6 @@ tf_proto_library(
 tf_proto_library(
     name = "debugger_event_metadata_proto",
     srcs = ["debugger_event_metadata.proto"],
-    cc_api_version = 2,
 )
 
 cc_library(
@@ -77,6 +89,9 @@ cc_library(
         ":debugger_state_impl",
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:debug_ops_op_lib",
+        # Depends on grpc and hence should stay out of
+        # //third_party/tensorflow/core.
+        "//tensorflow/core/kernels:debug_ops",
     ],
     alwayslink = 1,
 )
@@ -107,8 +122,9 @@ tf_cuda_library(
         "//tensorflow/core:graph",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:proto_text",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings",
     ],
     alwayslink = 1,
 )
@@ -118,21 +134,21 @@ tf_cuda_library(
     srcs = ["debug_io_utils.cc"],
     hdrs = ["debug_io_utils.h"],
     copts = tf_copts(),
+    linkopts = if_windows(["-DEFAULTLIB:ws2_32.lib"]),
     linkstatic = 1,
     deps = [
         ":debug_callback_registry",
         ":debug_node_key",
-        ":debug_service_proto_cc",
+        ":debug_service_cc_grpc_proto",
         ":debugger_event_metadata_proto_cc",
-        "//tensorflow:grpc++",
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:framework",
         "//tensorflow/core:graph",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:proto_text",
         "//tensorflow/core:protos_all_cc",
-    ],
+        "@com_google_absl//absl/strings",
+    ] + tf_grpc_cc_dependencies(),
     alwayslink = 1,
 )
 
@@ -145,14 +161,13 @@ tf_cuda_library(
     deps = [
         ":debug_graph_utils",
         ":debug_io_utils",
-        ":debug_service_proto_cc",
+        ":debug_service_cc_grpc_proto",
         ":debugger_event_metadata_proto_cc",
-        "//tensorflow:grpc++",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:protos_all_cc",
-    ],
+    ] + tf_grpc_cc_dependencies(),
     alwayslink = 1,
 )
 
@@ -172,17 +187,16 @@ tf_cc_test(
     name = "debug_io_utils_test",
     size = "small",
     srcs = ["debug_io_utils_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
+    tags = [
+        "no_oss",  # TODO(b/137652456): remove when fixed
+    ],
     deps = [
         ":debug_callback_registry",
         ":debug_grpc_testlib",
         ":debug_io_utils",
         ":debug_node_key",
-        ":debug_service_proto_cc",
         ":debugger_event_metadata_proto_cc",
-        "//tensorflow/core:core_cpu",
         "//tensorflow/core:core_cpu_internal",
-        "//tensorflow/core:framework",
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
@@ -190,7 +204,7 @@ tf_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
-        "//tensorflow/core/platform/default/build_config:platformlib",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -198,7 +212,6 @@ tf_cc_test(
     name = "debug_graph_utils_test",
     size = "small",
     srcs = ["debug_graph_utils_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
     deps = [
         ":debug_graph_utils",
         "//tensorflow/core:lib",
@@ -213,7 +226,6 @@ tf_cc_test(
     name = "grpc_session_debug_test",
     size = "medium",
     srcs = ["grpc_session_debug_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = [
         "no_oss",  # b/62956105: port conflicts.
         "nomac",  # b/38276817
@@ -226,7 +238,6 @@ tf_cc_test(
         "//tensorflow/core:framework",
         "//tensorflow/core:functional_ops_op_lib",
         "//tensorflow/core:lib",
-        "//tensorflow/core:master_proto_cc",
         "//tensorflow/core:math_ops_op_lib",
         "//tensorflow/core:nn_ops_op_lib",
         "//tensorflow/core:no_op_op_lib",
@@ -240,6 +251,7 @@ tf_cc_test(
         "//tensorflow/core/distributed_runtime/rpc:grpc_testlib",
         "//tensorflow/core/kernels:constant_op",
         "//tensorflow/core/kernels:matmul_op",
+        "//tensorflow/core/protobuf:master_proto_cc",
     ],
 )
 
@@ -247,7 +259,6 @@ tf_cc_test(
     name = "debug_grpc_io_utils_test",
     size = "small",
     srcs = ["debug_grpc_io_utils_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
     tags = [
         "no_oss",  # b/73962011
     ],
@@ -259,9 +270,9 @@ tf_cc_test(
         "//tensorflow/core:framework_internal",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
-        "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "@com_google_absl//absl/synchronization",
     ],
 )
 
@@ -277,6 +288,30 @@ cc_library(
         "//tensorflow/core:protos_all_cc",
     ],
 )
+
+tf_cc_binary(
+    name = "bfc_dump_reader",
+    srcs = ["bfc_dump_reader.cc"],
+    deps = [
+        "//tensorflow/core:framework_internal",
+        "//tensorflow/core:lib",
+        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/platform:regexp",
+    ],
+)
+
+# copybara:uncomment_begin(google-only)
+# py_proto_library(
+#     name = "debug_service_py_pb2",
+#     has_services = 1,
+#     deps = [":debug_service_proto"],
+# )
+#
+# py_proto_library(
+#     name = "debugger_event_metadata_py_pb2",
+#     deps = [":debugger_event_metadata_proto"],
+# )
+# copybara:uncomment_end
 
 # TODO(cais): Add the following back in when tfdbg is supported on Android.
 # filegroup(

@@ -14,12 +14,7 @@
 # ==============================================================================
 """Tests for the behavior of the auto-compilation pass."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
-from six.moves import xrange  # pylint: disable=redefined-builtin
 
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.framework import constant_op
@@ -38,7 +33,7 @@ class ClusteringTest(xla_test.XLATestCase):
     val1 = np.array([4, 3, 2, 1], dtype=np.float32)
     val2 = np.array([5, 6, 7, 8], dtype=np.float32)
     expected = val1 + val2
-    with self.cached_session():
+    with self.session():
       with self.test_scope():
         input1 = constant_op.constant(val1, name="const1")
         input2 = constant_op.constant(val2, name="const2")
@@ -50,13 +45,13 @@ class ClusteringTest(xla_test.XLATestCase):
     val1 = np.array([4, 3, 2, 1]).astype(np.float32)
     val2 = np.array([5, 6, 7, 8]).astype(np.float32)
     expected = val1 + val2
-    with self.cached_session():
+    with self.session():
       with ops.device(CPU_DEVICE):
         input1 = constant_op.constant(val1, name="const1")
         input2 = constant_op.constant(val2, name="const2")
       with self.test_scope():
         output = math_ops.add(input1, input2)
-      for _ in xrange(10):
+      for _ in range(10):
         result = self.evaluate(output)
         self.assertAllClose(result, expected, rtol=1e-3)
 
@@ -68,7 +63,7 @@ class ClusteringTest(xla_test.XLATestCase):
     # where x and z are placed on the CPU and y and w are placed on the XLA
     # device. If y and w are clustered for compilation, then the graph will
     # deadlock since the clustered graph will contain a self-loop.
-    with self.cached_session() as sess:
+    with self.session() as sess:
       with ops.device(CPU_DEVICE):
         x = array_ops.placeholder(dtypes.float32, [2])
       with self.test_scope():
@@ -81,7 +76,7 @@ class ClusteringTest(xla_test.XLATestCase):
     self.assertAllClose(result, [12., 2.], rtol=1e-3)
 
   def testHostMemory(self):
-    with self.cached_session() as sess:
+    with self.session() as sess:
       x = array_ops.placeholder(dtypes.int32)
       with self.test_scope():
         y = x + 1

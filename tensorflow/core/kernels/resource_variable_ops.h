@@ -16,8 +16,29 @@ limitations under the License.
 #define TENSORFLOW_CORE_KERNELS_RESOURCE_VARIABLE_OPS_H_
 
 #include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/resource_mgr.h"
+#include "tensorflow/core/framework/resource_var.h"
 
 namespace tensorflow {
+
+class VarHandleOp : public OpKernel {
+ public:
+  explicit VarHandleOp(OpKernelConstruction* c);
+  void Compute(OpKernelContext* ctx) override;
+  const Tensor* const_tensor() const override {
+    return is_anonymous_ ? nullptr : &const_tensor_;
+  }
+
+ private:
+  // Same fields as in ResourceHandleOp.
+  bool is_anonymous_;
+  std::string container_;
+  std::string name_;
+  std::string debug_name_;
+  Tensor const_tensor_;
+
+  DtypeAndPartialTensorShape dtype_and_shape_;
+};
 
 class ReadVariableOp : public OpKernel {
  public:
@@ -45,6 +66,33 @@ class DestroyResourceOp : public OpKernel {
 
  private:
   bool ignore_lookup_error_;
+};
+
+class DisableCopyOnReadOp : public OpKernel {
+ public:
+  explicit DisableCopyOnReadOp(OpKernelConstruction* c) : OpKernel(c) {}
+  void Compute(OpKernelContext* ctx) override;
+};
+
+template <typename T>
+class VariableShapeOp : public OpKernel {
+ public:
+  explicit VariableShapeOp(OpKernelConstruction* c) : OpKernel(c) {}
+
+  void Compute(OpKernelContext* ctx) override {
+    core::RefCountPtr<Var> variable;
+    ResourceHandle handle;
+    OP_REQUIRES_OK(ctx, HandleFromInput(ctx, 0, &handle));
+    OP_REQUIRES_OK(ctx, LookupResource(ctx, handle, &variable));
+    variable->mu()->lock_shared();
+    TensorShape shape = variable->tensor()->shape();
+    variable->mu()->unlock_shared();
+    Tensor* output;
+    OP_REQUIRES_OK(ctx, ctx->allocate_output(0, {shape.dims()}, &output));
+    for (int i = 0; i < shape.dims(); ++i) {
+      output->flat<T>()(i) = shape.dim_size(i);
+    }
+  }
 };
 
 }  // namespace tensorflow

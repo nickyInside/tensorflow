@@ -16,7 +16,6 @@ limitations under the License.
 #define TENSORFLOW_LITE_TOCO_PYTHON_TOCO_PYTHON_API_H_
 
 #include <Python.h>
-#include <string>
 
 namespace toco {
 
@@ -25,15 +24,14 @@ namespace toco {
 // parameters (see relevant .protos for more information). Returns a string
 // representing the contents of the converted model. When extended_return
 // flag is set to true returns a dictionary that contains string representation
-// of the converted model and some statitics like arithmetic ops count.
+// of the converted model and some statistics like arithmetic ops count.
 PyObject* TocoConvert(PyObject* model_flags_proto_txt_raw,
                       PyObject* toco_flags_proto_txt_raw,
                       PyObject* input_contents_txt_raw,
                       bool extended_return = false);
 
-// Returns a list of names of all ops potentially supported by tflite.
-PyObject* TocoGetPotentiallySupportedOps();
-
+// All the exported functions should be listed in
+// tensorflow/tools/def_file_filter/symbols_pybind.txt for the Windows build.
 }  // namespace toco
 
 #endif  // TENSORFLOW_LITE_TOCO_PYTHON_TOCO_PYTHON_API_H_

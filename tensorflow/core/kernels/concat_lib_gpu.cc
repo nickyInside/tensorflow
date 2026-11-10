@@ -17,14 +17,14 @@ limitations under the License.
 
 #include <vector>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/framework/types.h"
 
-#if GOOGLE_CUDA
+#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
 
 #include "tensorflow/core/kernels/concat_lib_gpu.h"
 #include "tensorflow/core/kernels/gpu_device_array.h"
@@ -74,19 +74,21 @@ void ConcatGPU(
         inputs_flat,
     Tensor* output, typename TTypes<T, 2>::Tensor* output_flat) {
   if (inputs_flat.size() < 16) {
-    if (output->NumElements() < std::numeric_limits<int32>::max()) {
-      ConcatGPUSlice<T, int32>(c->eigen_gpu_device(), inputs_flat, output_flat);
+    if (output->NumElements() < std::numeric_limits<int32_t>::max()) {
+      ConcatGPUSlice<T, int32_t>(c->eigen_gpu_device(), inputs_flat,
+                                 output_flat);
     } else {
-      ConcatGPUSlice<T, int64>(c->eigen_gpu_device(), inputs_flat, output_flat);
+      ConcatGPUSlice<T, int64_t>(c->eigen_gpu_device(), inputs_flat,
+                                 output_flat);
     }
   } else {
     // Switching indexing to int64 might cause performance issues.
     // Hence, we keep int32 indexing in the GPU kernel unless we need to
     // switch to int64.
-    if (output->NumElements() < std::numeric_limits<int32>::max()) {
-      ConcatGPUCall<T, int32>(c, inputs_flat, output_flat);
+    if (output->NumElements() < std::numeric_limits<int32_t>::max()) {
+      ConcatGPUCall<T, int32_t>(c, inputs_flat, output_flat);
     } else {
-      ConcatGPUCall<T, int64>(c, inputs_flat, output_flat);
+      ConcatGPUCall<T, int64_t>(c, inputs_flat, output_flat);
     }
   }
 }
@@ -98,18 +100,13 @@ void ConcatGPU(
           inputs_flat,                                                        \
       Tensor* output, typename TTypes<T, 2>::Tensor* output_flat);
 
-TF_CALL_GPU_NUMBER_TYPES(REGISTER);
-TF_CALL_complex64(REGISTER);
-TF_CALL_complex128(REGISTER);
-TF_CALL_int32(REGISTER);  // Needed for TensorLists.
-TF_CALL_int64(REGISTER);
-TF_CALL_int16(REGISTER);
-TF_CALL_bfloat16(REGISTER);
-TF_CALL_bool(REGISTER);
-TF_CALL_uint8(REGISTER);
+TF_CALL_INTEGRAL_TYPES(REGISTER);  // int32 Needed for TensorLists.
+TF_CALL_GPU_ALL_TYPES(REGISTER);
+TF_CALL_float8_e5m2(REGISTER);
+TF_CALL_float8_e4m3fn(REGISTER);
 
 #undef REGISTER
 
 }  // namespace tensorflow
 
-#endif  // GOOGLE_CUDA
+#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM

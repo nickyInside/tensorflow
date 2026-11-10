@@ -14,88 +14,144 @@
 # ==============================================================================
 """Bring in all of the public TensorFlow interface into this module."""
 
-from __future__ import absolute_import as _absolute_import
-from __future__ import division as _division
-from __future__ import print_function as _print_function
-
-import distutils as _distutils
+import importlib
 import inspect as _inspect
 import os as _os
 import site as _site
 import sys as _sys
+import sysconfig
 
-# pylint: disable=g-bad-import-order
+# pylint: disable=g-bad-import-order,protected-access,g-import-not-at-top
 from tensorflow.python import pywrap_tensorflow  # pylint: disable=unused-import
 from tensorflow.python.tools import module_util as _module_util
+from tensorflow.python.platform import tf_logging as _logging
+from tensorflow.python.util.lazy_loader import LazyLoader as _LazyLoader
+from tensorflow.python.util.lazy_loader import KerasLazyLoader as _KerasLazyLoader
 
 # API IMPORTS PLACEHOLDER
+
+# WRAPPER_PLACEHOLDER
+
+if "dev" in __version__:   # pylint: disable=undefined-variable
+  _logging.warning("""
+
+  TensorFlow's `tf-nightly` package will soon be updated to TensorFlow 2.0.
+
+  Please upgrade your code to TensorFlow 2.0:
+    * https://www.tensorflow.org/guide/migrate
+
+  Or install the latest stable TensorFlow 1.X release:
+    * `pip install -U "tensorflow==1.*"`
+
+  Otherwise your code may be broken by the change.
+
+  """)
 
 # Make sure directory containing top level submodules is in
 # the __path__ so that "from tensorflow.foo import bar" works.
 # We're using bitwise, but there's nothing special about that.
-_API_MODULE = bitwise  # pylint: disable=undefined-variable
+_API_MODULE = _sys.modules[__name__].bitwise  # pylint: disable=undefined-variable
 _current_module = _sys.modules[__name__]
 _tf_api_dir = _os.path.dirname(_os.path.dirname(_API_MODULE.__file__))
-if not hasattr(_current_module, '__path__'):
+if not hasattr(_current_module, "__path__"):
   __path__ = [_tf_api_dir]
 elif _tf_api_dir not in __path__:
   __path__.append(_tf_api_dir)
 
 # Hook external TensorFlow modules.
-try:
-  from tensorflow_estimator.python.estimator.api._v1 import estimator
-  _current_module.__path__ = (
-      [_module_util.get_parent_dir(estimator)] + _current_module.__path__)
-except ImportError:
-  pass
+# Import compat before trying to import summary from tensorboard, so that
+# reexport_tf_summary can get compat from sys.modules. Only needed if using
+# lazy loading.
+_current_module.compat.v2  # pylint: disable=pointless-statement
 
-try:
-  from tensorflow.python.keras.api._v1 import keras
-  _current_module.__path__ = (
-      [_module_util.get_parent_dir(keras)] + _current_module.__path__)
-except ImportError:
-  pass
+# Load tensorflow-io-gcs-filesystem if enabled
+if (_os.getenv("TF_USE_MODULAR_FILESYSTEM", "0") == "true" or
+    _os.getenv("TF_USE_MODULAR_FILESYSTEM", "0") == "1"):
+  import tensorflow_io_gcs_filesystem as _tensorflow_io_gcs_filesystem
 
+# Lazy-load Keras v1.
+_tf_uses_legacy_keras = (
+    _os.environ.get("TF_USE_LEGACY_KERAS", None) in ("true", "True", "1"))
+setattr(_current_module, "keras", _KerasLazyLoader(globals(), mode="v1"))
+_module_dir = _module_util.get_parent_dir_for_name("keras._tf_keras.keras")
+_current_module.__path__ = [_module_dir] + list(_current_module.__path__)
+if _tf_uses_legacy_keras:
+  _module_dir = _module_util.get_parent_dir_for_name("tf_keras.api._v1.keras")
+else:
+  _module_dir = _module_util.get_parent_dir_for_name("keras.api._v1.keras")
+_current_module.__path__ = [_module_dir] + list(_current_module.__path__)
 
-from tensorflow.python.util.lazy_loader import LazyLoader  # pylint: disable=g-import-not-at-top
 _CONTRIB_WARNING = """
-WARNING: The TensorFlow contrib module will not be included in TensorFlow 2.0.
+The TensorFlow contrib module will not be included in TensorFlow 2.0.
 For more information, please see:
   * https://github.com/tensorflow/community/blob/master/rfcs/20180907-contrib-sunset.md
   * https://github.com/tensorflow/addons
   * https://github.com/tensorflow/io (for I/O related ops)
 If you depend on functionality not listed there, please file an issue.
 """
-contrib = LazyLoader('contrib', globals(), 'tensorflow.contrib',
-                     _CONTRIB_WARNING)
-del LazyLoader
+contrib = _LazyLoader("contrib", globals(), "tensorflow.contrib",
+                      _CONTRIB_WARNING)
 # The templated code that replaces the placeholder above sometimes
 # sets the __all__ variable. If it does, we have to be sure to add
 # "contrib".
-if '__all__' in vars():
-  vars()['__all__'].append('contrib')
+if "__all__" in vars():
+  vars()["__all__"] = list(vars()["__all__"]) + ["contrib"]
 
-from tensorflow.python.platform import flags  # pylint: disable=g-import-not-at-top
-# The 'app' module will be imported as part of the placeholder section above.
-app.flags = flags  # pylint: disable=undefined-variable
+from tensorflow.python.platform import flags
+# The "app" module will be imported as part of the placeholder section above.
+_current_module.app.flags = flags  # pylint: disable=undefined-variable
+setattr(_current_module, "flags", flags)
+
+_major_api_version = 1
+
+# Add module aliases from Keras to TF.
+# Some tf endpoints actually lives under Keras.
+_current_module.layers = _KerasLazyLoader(
+    globals(),
+    submodule="__internal__.legacy.layers",
+    name="layers",
+    mode="v1")
+if _tf_uses_legacy_keras:
+  _module_dir = _module_util.get_parent_dir_for_name(
+      "tf_keras.api._v1.keras.__internal__.legacy.layers")
+else:
+  _module_dir = _module_util.get_parent_dir_for_name(
+      "keras.api._v1.keras.__internal__.legacy.layers")
+_current_module.__path__ = [_module_dir] + list(_current_module.__path__)
+
+_current_module.nn.rnn_cell = _KerasLazyLoader(
+    globals(),
+    submodule="__internal__.legacy.rnn_cell",
+    name="rnn_cell",
+    mode="v1")
+if _tf_uses_legacy_keras:
+  _module_dir = _module_util.get_parent_dir_for_name(
+      "tf_keras.api._v1.keras.__internal__.legacy.rnn_cell")
+else:
+  _module_dir = _module_util.get_parent_dir_for_name(
+      "keras.api._v1.keras.__internal__.legacy.rnn_cell")
+_current_module.nn.__path__ = [_module_dir] + list(_current_module.nn.__path__)
+
+del importlib
 
 # Load all plugin libraries from site-packages/tensorflow-plugins if we are
 # running under pip.
-# TODO(gunan): Enable setting an environment variable to define arbitrary plugin
-# directories.
 # TODO(gunan): Find a better location for this code snippet.
 from tensorflow.python.framework import load_library as _ll
 from tensorflow.python.lib.io import file_io as _fi
 
 # Get sitepackages directories for the python installation.
 _site_packages_dirs = []
-_site_packages_dirs += [_site.USER_SITE]
-_site_packages_dirs += [_p for _p in _sys.path if 'site-packages' in _p]
-if 'getsitepackages' in dir(_site):
+_site_packages_dirs += [] if _site.USER_SITE is None else [_site.USER_SITE]
+_site_packages_dirs += [str(p) for p in _sys.path if "site-packages" in str(p)]
+if "getsitepackages" in dir(_site):
   _site_packages_dirs += _site.getsitepackages()
 
-if 'sysconfig' in dir(_distutils):
-  _site_packages_dirs += [_distutils.sysconfig.get_python_lib()]
+for _scheme in sysconfig.get_scheme_names():
+  for _name in ["purelib", "platlib"]:
+    _path = sysconfig.get_path(_name, _scheme)
+    if _path is not None:
+      _site_packages_dirs.append(_path)
 
 _site_packages_dirs = list(set(_site_packages_dirs))
 
@@ -107,36 +163,45 @@ def _running_from_pip_package():
       _current_file_location.startswith(dir_) for dir_ in _site_packages_dirs)
 
 if _running_from_pip_package():
-  for s in _site_packages_dirs:
-    # TODO(gunan): Add sanity checks to loaded modules here.
-    plugin_dir = _os.path.join(s, 'tensorflow-plugins')
-    if _fi.file_exists(plugin_dir):
-      _ll.load_library(plugin_dir)
+  # TODO(gunan): Add sanity checks to loaded modules here.
 
-# These symbols appear because we import the python package which
-# in turn imports from tensorflow.core and tensorflow.python. They
-# must come from this module. So python adds these symbols for the
-# resolution to succeed.
-# pylint: disable=undefined-variable
+  # Load first party dynamic kernels.
+  _tf_dir = _os.path.dirname(_current_file_location)
+  _kernel_dir = _os.path.join(_tf_dir, "core", "kernels")
+  if _os.path.exists(_kernel_dir):
+    _ll.load_library(_kernel_dir)
+
+  # Load third party dynamic kernels.
+  for _s in _site_packages_dirs:
+    _plugin_dir = _os.path.join(_s, "tensorflow-plugins")
+    if _os.path.exists(_plugin_dir):
+      _ll.load_library(_plugin_dir)
+      # Load Pluggable Device Library
+      _ll.load_pluggable_device_library(_plugin_dir)
+
+if _os.getenv("TF_PLUGGABLE_DEVICE_LIBRARY_PATH", ""):
+  _ll.load_pluggable_device_library(
+      _os.getenv("TF_PLUGGABLE_DEVICE_LIBRARY_PATH")
+  )
+
+# Delete modules that should be hidden from dir().
+# Don't fail if these modules are not available.
+# For e.g. this file will be originally placed under tensorflow/_api/v1 which
+# does not have "python", "core" directories. Then, it will be copied
+# to tensorflow/ which does have these two directories.
+
 try:
   del python
-  if '__all__' in vars():
-    vars()['__all__'].remove('python')
-  del core
-  if '__all__' in vars():
-    vars()['__all__'].remove('core')
 except NameError:
-  # Don't fail if these modules are not available.
-  # For e.g. this file will be originally placed under tensorflow/_api/v1 which
-  # does not have 'python', 'core' directories. Then, it will be copied
-  # to tensorflow/ which does have these two directories.
   pass
-# Similarly for compiler. Do it separately to make sure we do this even if the
-# others don't exist.
+try:
+  del core
+except NameError:
+  pass
 try:
   del compiler
-  if '__all__' in vars():
-    vars()['__all__'].remove('compiler')
 except NameError:
   pass
-# pylint: enable=undefined-variable
+
+
+# __all__ PLACEHOLDER

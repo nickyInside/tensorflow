@@ -33,23 +33,24 @@ class EncodeWavOp : public OpKernel {
 
   void Compute(OpKernelContext* context) override {
     const Tensor& audio = context->input(0);
-    OP_REQUIRES(context, audio.dims() == 2,
-                errors::InvalidArgument("audio must be 2-dimensional",
-                                        audio.shape().DebugString()));
+    OP_REQUIRES(
+        context, audio.dims() == 2,
+        absl::InvalidArgumentError(absl::StrCat("audio must be 2-dimensional",
+                                                audio.shape().DebugString())));
     const Tensor& sample_rate_tensor = context->input(1);
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(sample_rate_tensor.shape()),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(absl::StrCat(
                     "Input sample_rate should be a scalar tensor, got ",
-                    sample_rate_tensor.shape().DebugString(), " instead."));
-    const int32 sample_rate = sample_rate_tensor.scalar<int32>()();
-    OP_REQUIRES(
-        context,
-        FastBoundsCheck(audio.NumElements(), std::numeric_limits<int32>::max()),
-        errors::InvalidArgument(
-            "Cannot encode audio with >= max int32 elements"));
+                    sample_rate_tensor.shape().DebugString(), " instead.")));
+    const int32_t sample_rate = sample_rate_tensor.scalar<int32_t>()();
+    OP_REQUIRES(context,
+                FastBoundsCheck(audio.NumElements(),
+                                std::numeric_limits<int32_t>::max()),
+                absl::InvalidArgumentError(
+                    "Cannot encode audio with >= max int32 elements"));
 
-    const int32 channel_count = static_cast<int32>(audio.dim_size(1));
-    const int32 sample_count = static_cast<int32>(audio.dim_size(0));
+    const int32_t channel_count = static_cast<int32_t>(audio.dim_size(1));
+    const int32_t sample_count = static_cast<int32_t>(audio.dim_size(0));
 
     // Encode audio to wav string.
     Tensor* output = nullptr;
@@ -58,7 +59,7 @@ class EncodeWavOp : public OpKernel {
     OP_REQUIRES_OK(context,
                    wav::EncodeAudioAsS16LEWav(
                        audio.flat<float>().data(), sample_rate, channel_count,
-                       sample_count, &output->scalar<string>()()));
+                       sample_count, &output->scalar<tstring>()()));
   }
 };
 REGISTER_KERNEL_BUILDER(Name("EncodeWav").Device(DEVICE_CPU), EncodeWavOp);

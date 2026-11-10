@@ -29,6 +29,7 @@ limitations under the License.
 #include "tensorflow/core/grappler/grappler_item.h"
 #include "tensorflow/core/grappler/op_types.h"
 #include "tensorflow/core/grappler/utils.h"
+#include "tensorflow/core/util/overflow.h"
 
 namespace tensorflow {
 namespace grappler {
@@ -36,12 +37,12 @@ namespace grappler {
 namespace {
 
 // Helper function in PredictCosts() to add cost node to cost_graph.
-void AddCostNode(ReadyNodeManager* node_manager, const OpContext& op_context,
-                 int node_id, const Costs& node_costs,
-                 gtl::FlatMap<string, CostGraphDef::Node*>* name_to_cost_node,
-                 gtl::FlatMap<string, int>* name_to_id,
-                 CostGraphDef* cost_graph) {
-  const string& op_name = op_context.name;
+absl::Status AddCostNode(
+    ReadyNodeManager* node_manager, const OpContext& op_context, int node_id,
+    const Costs& node_costs,
+    gtl::FlatMap<std::string, CostGraphDef::Node*>* name_to_cost_node,
+    gtl::FlatMap<std::string, int>* name_to_id, CostGraphDef* cost_graph) {
+  const std::string& op_name = op_context.name;
   auto it = name_to_cost_node->find(op_name);
   CostGraphDef::Node* node;
   if (it != name_to_cost_node->end()) {
@@ -61,11 +62,13 @@ void AddCostNode(ReadyNodeManager* node_manager, const OpContext& op_context,
   node->set_compute_cost(node_costs.execution_time.asMicroSeconds().count());
   node->set_compute_time(node_costs.compute_time.asMicroSeconds().count());
   node->set_memory_time(node_costs.memory_time.asMicroSeconds().count());
+  node->set_temporary_memory_size(node_costs.temporary_memory);
+  node->set_persistent_memory_size(node_costs.persistent_memory);
   node->set_inaccurate(node_costs.inaccurate);
 
-  for (const string& input : node_manager->GetCurrNode()->input()) {
+  for (const std::string& input : node_manager->GetCurrNode()->input()) {
     int input_port;
-    string input_name = ParseNodeName(input, &input_port);
+    std::string input_name = ParseNodeName(input, &input_port);
 
     // All inputs should have been seen already unless this is a Merge node.
     if (name_to_id->find(input_name) == name_to_id->end()) {
@@ -95,12 +98,17 @@ void AddCostNode(ReadyNodeManager* node_manager, const OpContext& op_context,
     output_info->set_dtype(output.dtype());
     *output_info->mutable_shape() = output.shape();
 
-    int64 size = DataTypeSize(output.dtype());
+    int64_t size = DataTypeSize(output.dtype());
     for (const auto& dim : output.shape().dim()) {
-      size *= std::max<int64>(1, dim.size());
+      size = MultiplyWithoutOverflow(size, std::max<int64_t>(1, dim.size()));
+      if (size < 0) {
+        return absl::InvalidArgumentError(
+            "Integer overflow encountered in dimension size.");
+      }
     }
     output_info->set_size(size);
   }
+  return absl::OkStatus();
 }
 
 }  // namespace
@@ -109,7 +117,7 @@ AnalyticalCostEstimator::AnalyticalCostEstimator(
     Cluster* cluster, bool use_static_shapes,
     bool use_aggressive_shape_inference)
     : AnalyticalCostEstimator(
-          cluster, absl::make_unique<OpLevelCostEstimator>(),
+          cluster, std::make_unique<OpLevelCostEstimator>(),
           ReadyNodeManagerFactory("FirstReady"), use_static_shapes,
           use_aggressive_shape_inference) {}
 
@@ -121,10 +129,10 @@ AnalyticalCostEstimator::AnalyticalCostEstimator(
       node_manager_(std::move(node_manager)),
       use_static_shapes_(use_static_shapes),
       use_aggressive_shape_inference_(use_aggressive_shape_inference) {
-  scheduler_ = absl::make_unique<VirtualScheduler>(
+  scheduler_ = std::make_unique<VirtualScheduler>(
       use_static_shapes_, use_aggressive_shape_inference_, cluster,
       node_manager_.get(),
-      absl::make_unique<VirtualPlacer>(cluster->GetDevices()));
+      std::make_unique<VirtualPlacer>(cluster->GetDevices()));
 }
 
 AnalyticalCostEstimator::AnalyticalCostEstimator(
@@ -136,29 +144,41 @@ AnalyticalCostEstimator::AnalyticalCostEstimator(
       node_manager_(std::move(node_manager)),
       use_static_shapes_(use_static_shapes),
       use_aggressive_shape_inference_(use_aggressive_shape_inference) {
-  scheduler_ = absl::make_unique<VirtualScheduler>(
+  scheduler_ = std::make_unique<VirtualScheduler>(
       use_static_shapes_, use_aggressive_shape_inference_, cluster,
       node_manager_.get(), std::move(placer));
 }
 
-Status AnalyticalCostEstimator::Initialize(const GrapplerItem& item) {
-  item_ = item;
-  return Status::OK();
+absl::Status AnalyticalCostEstimator::Initialize(const GrapplerItem& item) {
+  item_ = &item;
+  return absl::OkStatus();
 }
 
-Status AnalyticalCostEstimator::PredictCosts(const GraphDef& optimized_graph,
-                                             RunMetadata* run_metadata,
-                                             Costs* costs) const {
-  GrapplerItem item = item_;
-  item.graph = optimized_graph;
+absl::Status AnalyticalCostEstimator::PredictCosts(
+    const GraphDef& optimized_graph, RunMetadata* run_metadata,
+    Costs* costs) const {
+  std::unique_ptr<GrapplerItem> item_storage;
+  const GrapplerItem* item;
+  // Many callers to PredictCosts() pass the same optimized_graph as was used
+  // to initialize the estimator.
+  if (&optimized_graph == &item_->graph) {
+    item = item_;
+  } else {
+    GraphDef graph_copy = optimized_graph;
+    item_storage = std::make_unique<GrapplerItem>(
+        item_->WithGraph(std::move(graph_copy)));
+    item = item_storage.get();
+  }
 
-  auto status = scheduler_->Init(&item);
+  auto status = scheduler_->Init(item);
   if (!status.ok()) {
-    costs->execution_time = Costs::Duration::max();
+    if (costs) {
+      costs->execution_time = Costs::Duration::max();
+    }
     return status;
   }
 
-  gtl::FlatMap<string, CostGraphDef::Node*> name_to_cost_node;
+  gtl::FlatMap<std::string, CostGraphDef::Node*> name_to_cost_node;
   CostGraphDef* cost_graph = nullptr;
   if (run_metadata) {
     cost_graph = run_metadata->mutable_cost_graph();
@@ -169,10 +189,10 @@ Status AnalyticalCostEstimator::PredictCosts(const GraphDef& optimized_graph,
       name_to_cost_node[node.name()] = &node;
     }
   }
-  std::vector<string> inaccurate_nodes;
+  std::vector<std::string> inaccurate_nodes;
   int nodes_executed = 0;
   int node_id = 0;
-  gtl::FlatMap<string, int> name_to_id;
+  gtl::FlatMap<std::string, int> name_to_id;
 
   Costs node_costs;
   do {
@@ -189,8 +209,12 @@ Status AnalyticalCostEstimator::PredictCosts(const GraphDef& optimized_graph,
 
     // TODO(pcma): Add unit tests for generating CostGraphDef.
     if (cost_graph) {
-      AddCostNode(node_manager_.get(), op_context, node_id++, node_costs,
-                  &name_to_cost_node, &name_to_id, cost_graph);
+      absl::Status s =
+          AddCostNode(node_manager_.get(), op_context, node_id++, node_costs,
+                      &name_to_cost_node, &name_to_id, cost_graph);
+      if (!s.ok()) {
+        return s;
+      }
     }
   } while (scheduler_->MarkCurrNodeExecuted(node_costs));
 
@@ -203,7 +227,11 @@ Status AnalyticalCostEstimator::PredictCosts(const GraphDef& optimized_graph,
   }
 
   // run_metadata gets step_stats and partition_graphs from Summary.
-  *costs = scheduler_->Summary(run_metadata);
+  if (costs) {
+    *costs = scheduler_->Summary(run_metadata);
+  } else if (run_metadata) {
+    scheduler_->GenerateRunMetadata(run_metadata);
+  }
 
   if (VLOG_IS_ON(1)) {
     bool verbose = VLOG_IS_ON(2);
@@ -216,7 +244,7 @@ Status AnalyticalCostEstimator::PredictCosts(const GraphDef& optimized_graph,
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

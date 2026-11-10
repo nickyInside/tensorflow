@@ -17,8 +17,10 @@ limitations under the License.
 #define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_LOOP_OPTIMIZER_H_
 
 #include <unordered_set>
+
 #include "tensorflow/core/grappler/costs/graph_properties.h"
 #include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
+#include "tensorflow/core/grappler/utils.h"
 #include "tensorflow/core/grappler/utils/frame.h"
 #include "tensorflow/core/protobuf/rewriter_config.pb.h"
 
@@ -36,13 +38,12 @@ class LoopOptimizer : public GraphOptimizer {
 
   ~LoopOptimizer() override {}
 
-  string name() const override { return "loop_optimizer"; };
+  std::string name() const override { return "loop_optimizer"; };
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* optimized_graph) override;
+  bool UsesFunctionLibrary() const override { return false; }
 
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimized_graph, double result) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* optimized_graph) override;
 
  private:
   friend class LoopOptimizerTest;
@@ -59,10 +60,10 @@ class LoopOptimizer : public GraphOptimizer {
     }
   };
 
-  Status RemoveDeadBranches(const std::unordered_set<string>& nodes_to_preserve,
-                            const NodeMap& node_map,
-                            const absl::flat_hash_set<string>& feed_nodes,
-                            GraphDef* optimized_graph);
+  absl::Status RemoveDeadBranches(
+      const std::unordered_set<std::string>& nodes_to_preserve,
+      NodeMap& node_map, const absl::flat_hash_set<std::string>& feed_nodes,
+      GraphDef* optimized_graph);
 
   RewriterConfig::Toggle opt_level_;
   DeviceBase* cpu_device_;

@@ -1,26 +1,68 @@
-package(default_visibility = ["//visibility:public"])
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
 
-licenses(["notice"])  # Apache 2.0
+load("@build_bazel_rules_apple//apple:ios.bzl", "ios_application", "ios_unit_test")
+load("@flatbuffers//:build_defs.bzl", "flatbuffer_cc_library")
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
+load(
+    "//tensorflow/core/platform:build_config_root.bzl",
+    "tf_gpu_tests_tags",
+)
+load("//tensorflow/lite:build_def.bzl", "CXX17_BAZEL_ONLY_COPTS", "workspace_root")
+load(
+    "//tensorflow/lite:special_rules.bzl",
+    "tflite_ios_lab_runner",
+    "tflite_ios_per_kernel_test",
+    "tflite_portable_test_suite",
+)
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],
+)
 
 DEFAULT_COPTS = [
-    "-std=c++11",
     "-Wno-shorten-64-to-32",
-]
+] + CXX17_BAZEL_ONLY_COPTS
 
-cc_library(
-    name = "api",
-    srcs = ["api.cc"],
-    hdrs = ["api.h"],
+objc_library(
+    name = "buffer",
+    srcs = ["buffer.mm"],
+    hdrs = ["buffer.h"],
+    copts = DEFAULT_COPTS,
+    sdk_frameworks = ["Metal"],
     deps = [
-        ":compiled_model",
-        ":compute_task_descriptor",
-        ":environment",
-        ":runtime_options",
-        "//tensorflow/lite/delegates/gpu/common:model",
-        "//tensorflow/lite/delegates/gpu/common:operations",
-        "//tensorflow/lite/delegates/gpu/common:shape",
+        ":gpu_object",
         "//tensorflow/lite/delegates/gpu/common:status",
-        "//tensorflow/lite/delegates/gpu/metal/kernels",
+        "//tensorflow/lite/delegates/gpu/common/task:buffer_desc",
+        "@com_google_absl//absl/types:span",
+    ],
+)
+
+objc_library(
+    name = "buffer_test_lib",
+    testonly = 1,
+    srcs = ["buffer_test.mm"],
+    sdk_frameworks = [
+        "Metal",
+        "XCTest",
+    ],
+    deps = [
+        ":buffer",
+        "//tensorflow/lite/delegates/gpu/common:types",
     ],
 )
 
@@ -29,9 +71,7 @@ objc_library(
     srcs = ["buffer_convert.mm"],
     hdrs = ["buffer_convert.h"],
     copts = DEFAULT_COPTS,
-    sdk_frameworks = [
-        "Metal",
-    ],
+    sdk_frameworks = ["Metal"],
     deps = [
         ":common",
         "//tensorflow/lite/delegates/gpu/common:shape",
@@ -44,28 +84,32 @@ objc_library(
     srcs = ["common.mm"],
     hdrs = ["common.h"],
     copts = DEFAULT_COPTS,
-    sdk_frameworks = [
-        "Metal",
-        "UIKit",
-    ],
+    sdk_frameworks = ["Metal"],
     deps = [
+        "//tensorflow/lite/delegates/gpu/common:data_type",
         "//tensorflow/lite/delegates/gpu/common:status",
+        "@com_google_absl//absl/strings",
     ],
 )
 
-cc_library(
-    name = "compiled_model",
-    srcs = ["compiled_model.cc"],
-    hdrs = ["compiled_model.h"],
-    deps = [
-        ":compute_task_descriptor",
-        "//tensorflow/lite/delegates/gpu/common:model",
-        "//tensorflow/lite/delegates/gpu/common:shape",
-        "//tensorflow/lite/delegates/gpu/common:status",
-        "//tensorflow/lite/delegates/gpu/common:types",
-        "//tensorflow/lite/delegates/gpu/common:util",
-        "@com_google_absl//absl/strings",
+objc_library(
+    name = "common_test_lib",
+    testonly = 1,
+    srcs = ["common_test.mm"],
+    sdk_frameworks = ["XCTest"],
+    deps = [":common"],
+)
+
+ios_unit_test(
+    name = "common_test",
+    testonly = 1,
+    minimum_os_version = "12.0",
+    runner = tflite_ios_lab_runner("IOS_LATEST"),
+    tags = tf_gpu_tests_tags() + [
+        "notap",
+        "tflite_not_portable_android",
     ],
+    deps = [":common_test_lib"],
 )
 
 objc_library(
@@ -76,41 +120,31 @@ objc_library(
     sdk_frameworks = ["Metal"],
     deps = [
         ":common",
-        ":compute_task_descriptor",
-        ":runtime_options",
-        "//tensorflow/lite/delegates/gpu/common:model",
+        ":metal_arguments",
+        ":metal_device",
+        ":metal_spatial_tensor",
+        "//tensorflow/lite/delegates/gpu/common:kernel_info",
+        "//tensorflow/lite/delegates/gpu/common:precision",
         "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:types",
         "//tensorflow/lite/delegates/gpu/common:util",
+        "//tensorflow/lite/delegates/gpu/common/task:gpu_operation",
+        "//tensorflow/lite/delegates/gpu/common/task:tuning_type",
+        "@com_google_absl//absl/strings",
     ],
 )
 
 objc_library(
-    name = "compute_task_descriptor",
-    srcs = ["compute_task_descriptor.cc"],
-    hdrs = ["compute_task_descriptor.h"],
+    name = "gpu_object",
+    hdrs = ["gpu_object.h"],
     copts = DEFAULT_COPTS,
+    sdk_frameworks = ["Metal"],
     deps = [
-        "//tensorflow/lite/delegates/gpu/common:model",
-        "//tensorflow/lite/delegates/gpu/common:shape",
-        "//tensorflow/lite/delegates/gpu/common:types",
-        "//tensorflow/lite/delegates/gpu/common:util",
-        "@FP16",
-    ],
-)
-
-objc_library(
-    name = "environment",
-    srcs = ["environment.mm"],
-    hdrs = ["environment.h"],
-    copts = DEFAULT_COPTS,
-    sdk_frameworks = [
-        "Metal",
-        "UIKit",
-    ],
-    deps = [
-        ":common",
+        "//tensorflow/lite/delegates/gpu/common:access_type",
+        "//tensorflow/lite/delegates/gpu/common:data_type",
+        "//tensorflow/lite/delegates/gpu/common:status",
+        "//tensorflow/lite/delegates/gpu/common/task:gpu_object_desc",
     ],
 )
 
@@ -122,18 +156,161 @@ objc_library(
     sdk_frameworks = ["Metal"],
     deps = [
         ":compute_task",
-        ":compute_task_descriptor",
-        ":runtime_options",
+        ":inference_context_cc_fbs",
+        ":metal_device",
+        ":metal_spatial_tensor",
+        "//tensorflow/lite/delegates/gpu/common:gpu_model",
+        "//tensorflow/lite/delegates/gpu/common:gpu_model_cc_fbs",
         "//tensorflow/lite/delegates/gpu/common:memory_management",
         "//tensorflow/lite/delegates/gpu/common:model",
+        "//tensorflow/lite/delegates/gpu/common:model_hints",
+        "//tensorflow/lite/delegates/gpu/common:operations",
+        "//tensorflow/lite/delegates/gpu/common:precision",
         "//tensorflow/lite/delegates/gpu/common:shape",
         "//tensorflow/lite/delegates/gpu/common:status",
         "//tensorflow/lite/delegates/gpu/common:util",
+        "//tensorflow/lite/delegates/gpu/common/selectors:operation_selector",
+        "//tensorflow/lite/delegates/gpu/common/selectors:special_selector",
+        "//tensorflow/lite/delegates/gpu/common/selectors:subgraph",
+        "//tensorflow/lite/delegates/gpu/common/task:profiling_info",
+        "//tensorflow/lite/delegates/gpu/common/task:serialization_base",
+        "//tensorflow/lite/delegates/gpu/common/task:tuning_type",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/strings",
+        "@com_google_absl//absl/time",
+    ],
+)
+
+flatbuffer_cc_library(
+    name = "inference_context_cc_fbs",
+    srcs = ["inference_context.fbs"],
+    flatc_args = [
+        "--scoped-enums",
+        "-I " + workspace_root,
+    ],
+    includes = [
+        "//tensorflow/lite/delegates/gpu/common:gpu_model_cc_fbs_includes",
+        "//tensorflow/lite/delegates/gpu/common/task:serialization_base_cc_fbs_includes",
+    ],
+)
+
+objc_library(
+    name = "metal_arguments",
+    srcs = ["metal_arguments.mm"],
+    hdrs = ["metal_arguments.h"],
+    copts = DEFAULT_COPTS,
+    sdk_frameworks = ["Metal"],
+    deps = [
+        ":buffer",
+        ":gpu_object",
+        ":metal_device",
+        ":metal_spatial_tensor",
+        "//tensorflow/lite/delegates/gpu/common:status",
+        "//tensorflow/lite/delegates/gpu/common:util",
+        "//tensorflow/lite/delegates/gpu/common/task:arguments",
+        "//tensorflow/lite/delegates/gpu/common/task:gpu_object_desc",
+        "//tensorflow/lite/delegates/gpu/common/task:util",
         "@com_google_absl//absl/strings",
     ],
 )
 
-cc_library(
-    name = "runtime_options",
-    hdrs = ["runtime_options.h"],
+objc_library(
+    name = "metal_device",
+    srcs = ["metal_device.mm"],
+    hdrs = ["metal_device.h"],
+    copts = DEFAULT_COPTS,
+    sdk_frameworks = ["Metal"],
+    deps = ["//tensorflow/lite/delegates/gpu/common:gpu_info"],
 )
+
+objc_library(
+    name = "metal_spatial_tensor",
+    srcs = ["metal_spatial_tensor.mm"],
+    hdrs = ["metal_spatial_tensor.h"],
+    copts = DEFAULT_COPTS,
+    sdk_frameworks = ["Metal"],
+    deps = [
+        ":common",
+        ":gpu_object",
+        "//tensorflow/lite/delegates/gpu/common:status",
+        "//tensorflow/lite/delegates/gpu/common:util",
+        "//tensorflow/lite/delegates/gpu/common/task:buffer_desc",
+        "//tensorflow/lite/delegates/gpu/common/task:gpu_tensor",
+        "//tensorflow/lite/delegates/gpu/common/task:tensor_desc",
+    ],
+)
+
+objc_library(
+    name = "metal_spatial_tensor_test_lib",
+    testonly = 1,
+    srcs = ["metal_spatial_tensor_test.mm"],
+    sdk_frameworks = [
+        "Metal",
+        "XCTest",
+    ],
+    deps = [
+        ":metal_spatial_tensor",
+        "//tensorflow/lite/delegates/gpu/common:types",
+    ],
+)
+
+objc_library(
+    name = "TestBinary",
+    testonly = 1,
+    srcs = ["host.m"],
+    sdk_frameworks = ["UIKit"],
+)
+
+# Application for local testing in XCode
+ios_application(
+    name = "TestApplication",
+    testonly = 1,
+    bundle_id = "com.tensorflow.lite.delegates.gpu.metal.ComponentsTests",
+    families = [
+        "iphone",
+    ],
+    infoplists = ["Info.plist"],
+    minimum_os_version = "12.0",
+    provisioning_profile = "//tensorflow/lite/delegates/gpu/metal:provisioning_profile.mobileprovision",
+    tags = tf_gpu_tests_tags() + [
+        "local",
+        "notap",
+    ],
+    deps = [":TestBinary"],
+)
+
+objc_library(
+    name = "common_tests_lib",
+    testonly = 1,
+    srcs = [
+        "//tensorflow/lite/delegates/gpu/metal:buffer_test.mm",
+        "//tensorflow/lite/delegates/gpu/metal:common_test.mm",
+        "//tensorflow/lite/delegates/gpu/metal:metal_spatial_tensor_test.mm",
+    ],
+    hdrs = [
+    ],
+    sdk_frameworks = ["XCTest"],
+    deps = [
+        "//tensorflow/lite/delegates/gpu/common:types",
+        "//tensorflow/lite/delegates/gpu/metal:buffer",
+        "//tensorflow/lite/delegates/gpu/metal:common",
+        "//tensorflow/lite/delegates/gpu/metal:metal_spatial_tensor",
+    ],
+)
+
+ios_unit_test(
+    name = "ComponentsTests",
+    families = ["iphone"],
+    minimum_os_version = "12.0",
+    runner = tflite_ios_lab_runner("IOS_LATEST"),
+    tags = tf_gpu_tests_tags() + ["notap"],
+    test_host = ":TestApplication",
+    deps = [
+        ":common_tests_lib",
+        "//tensorflow/lite/delegates/gpu/metal/kernels:kernel_tests_lib",
+    ],
+)
+
+tflite_portable_test_suite()
+
+tflite_ios_per_kernel_test()

@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 """Repository rule for def file filter autoconfiguration.
 
 This repository reuses Bazel's VC detect mechanism to find undname.exe,
@@ -19,9 +34,13 @@ symbols through this python script.
   * `VS140COMNTOOLS`
 """
 
-load("@bazel_tools//tools/cpp:windows_cc_configure.bzl", "find_vc_path")
-load("@bazel_tools//tools/cpp:windows_cc_configure.bzl", "find_msvc_tool")
-load("@bazel_tools//tools/cpp:lib_cc_configure.bzl", "auto_configure_fail")
+load("@rules_cc//cc/private/toolchain:windows_cc_configure.bzl", "find_msvc_tool", "find_vc_path")  # buildifier: disable=bzl-visibility
+
+def auto_configure_fail(msg):
+    """Output failure message when def file filter configuration fails."""
+    red = "\033[0;31m"
+    no_color = "\033[0m"
+    fail("\n%sDef File Filter Configuration Error:%s %s\n" % (red, no_color, msg))
 
 def _def_file_filter_configure_impl(repository_ctx):
     if repository_ctx.os.name.lower().find("windows") == -1:
@@ -37,11 +56,17 @@ def _def_file_filter_configure_impl(repository_ctx):
         auto_configure_fail("Couldn't find undname.exe under %s, please check your VC installation and set BAZEL_VC environment variable correctly." % vc_path)
     undname_bin_path = undname.replace("\\", "\\\\")
 
+    dumpbin = find_msvc_tool(repository_ctx, vc_path, "dumpbin.exe")
+    if dumpbin == None:
+        auto_configure_fail("Couldn't find dumpbin.exe under %s, please check your VC installation and set BAZEL_VC environment variable correctly." % vc_path)
+    dumpbin_bin_path = dumpbin.replace("\\", "\\\\")
+
     repository_ctx.template(
         "def_file_filter.py",
         Label("//tensorflow/tools/def_file_filter:def_file_filter.py.tpl"),
         {
             "%{undname_bin_path}": undname_bin_path,
+            "%{dumpbin_bin_path}": dumpbin_bin_path,
         },
     )
     repository_ctx.symlink(Label("//tensorflow/tools/def_file_filter:BUILD.tpl"), "BUILD")
@@ -50,6 +75,7 @@ def_file_filter_configure = repository_rule(
     implementation = _def_file_filter_configure_impl,
     environ = [
         "BAZEL_VC",
+        "BAZEL_VC_FULL_VERSION",
         "BAZEL_VS",
         "VS90COMNTOOLS",
         "VS100COMNTOOLS",

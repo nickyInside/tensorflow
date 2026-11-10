@@ -13,25 +13,34 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Utilty functions for control flow.
+"""Utility functions for control flow.
 
 This file is necessary to avoid cyclic dependencies between ops.py and
 control_flow_ops.py.
 """
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 import traceback
 
+from tensorflow.python import tf2
 from tensorflow.python.platform import tf_logging as logging
 
-ENABLE_CONTROL_FLOW_V2 = (os.getenv("TF_ENABLE_CONTROL_FLOW_V2", "0") != "0" or
+ENABLE_CONTROL_FLOW_V2 = ((tf2.enabled() and
+                           os.getenv("TF_ENABLE_CONTROL_FLOW_V2") != "0") or
+                          os.getenv("TF_ENABLE_CONTROL_FLOW_V2", "0") != "0" or
                           os.getenv("TF_ENABLE_COND_V2", "0") != "0" or
                           os.getenv("TF_ENABLE_WHILE_V2", "0") != "0" or
                           os.getenv("TF_ENABLE_TENSOR_ARRAY_V2", "0") != "0")
+
+
+# TODO(b/137793122): Remove this.
+def enable_control_flow_v2():  # pylint: disable=invalid-name
+  """Use control flow v2.
+
+  Do not use this symbol. This will be removed.
+  """
+  global ENABLE_CONTROL_FLOW_V2
+  ENABLE_CONTROL_FLOW_V2 = True
 
 
 def EnableControlFlowV2(graph):
@@ -330,12 +339,12 @@ def CheckInputFromValidContext(op, input_op):
   if not valid:
     if while_ctxt:
       error_msg = (
-          "Cannot use '%s' as input to '%s' because they are in different while"
-          " loops." % (input_op.name, op.name))
+          f"Cannot use '{input_op.name}' as input to '{op.name}' because they "
+          "are in different while loops.")
     else:
       error_msg = (
-          "Cannot use '%s' as input to '%s' because '%s' is in a while loop."
-          % (input_op.name, op.name, input_op.name))
+          f"Cannot use '{input_op.name}' as input to '{op.name}' because "
+          f"'{input_op.name}' is in a while loop.")
 
     # Log the error message plus the relevant stack traces. The stacks may be
     # useful for debugging this error, but we don't want to raise an
@@ -348,3 +357,11 @@ def CheckInputFromValidContext(op, input_op):
         input_op.name, "".join(traceback.format_list(input_op.traceback)))
     logging.info(log_msg)
     raise ValueError(error_msg + " See info log for more details.")
+
+
+def GetWhileContext(op):
+  """Get the WhileContext to which this op belongs."""
+  ctxt = op._get_control_flow_context()  # pylint: disable=protected-access
+  if ctxt:
+    ctxt = ctxt.GetWhileContext()
+  return ctxt

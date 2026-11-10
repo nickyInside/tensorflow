@@ -17,6 +17,8 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
+#include <limits>
+
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/type_traits.h"
@@ -60,19 +62,19 @@ class QuantizeV2Op : public OpKernel {
  public:
   explicit QuantizeV2Op(OpKernelConstruction* ctx) : OpKernel(ctx) {
     half_range_ =
-        !std::is_signed<T>::value
+        !std::numeric_limits<T>::is_signed
             ? 0.0f
             : (static_cast<double>(std::numeric_limits<T>::max()) -
                static_cast<double>(std::numeric_limits<T>::min()) + 1) /
                   2.0f;
-    string mode_string;
+    std::string mode_string;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("mode", &mode_string));
     OP_REQUIRES(ctx,
                 (mode_string == "MIN_COMBINED" || mode_string == "MIN_FIRST" ||
                  mode_string == "SCALED"),
-                errors::InvalidArgument("Mode string must be 'MIN_COMBINED',"
-                                        " 'MIN_FIRST', or 'SCALED', is '" +
-                                        mode_string + "'"));
+                absl::InvalidArgumentError("Mode string must be 'MIN_COMBINED',"
+                                           " 'MIN_FIRST', or 'SCALED', is '" +
+                                           mode_string + "'"));
     if (mode_string == "MIN_COMBINED") {
       mode_ = QUANTIZE_MODE_MIN_COMBINED;
     } else if (mode_string == "MIN_FIRST") {
@@ -81,36 +83,145 @@ class QuantizeV2Op : public OpKernel {
       mode_ = QUANTIZE_MODE_SCALED;
     }
 
-    string round_mode_string;
+    std::string round_mode_string;
     OP_REQUIRES_OK(ctx, ctx->GetAttr("round_mode", &round_mode_string));
     OP_REQUIRES(ctx,
                 (round_mode_string == "HALF_AWAY_FROM_ZERO" ||
                  round_mode_string == "HALF_TO_EVEN"),
-                errors::InvalidArgument("Round mode string must be "
-                                        "'HALF_AWAY_FROM_ZERO' or "
-                                        "'HALF_TO_EVEN', is '" +
-                                        round_mode_string + "'"));
+                absl::InvalidArgumentError("Round mode string must be "
+                                           "'HALF_AWAY_FROM_ZERO' or "
+                                           "'HALF_TO_EVEN', is '" +
+                                           round_mode_string + "'"));
     if (round_mode_string == "HALF_AWAY_FROM_ZERO") {
       round_mode_ = ROUND_HALF_AWAY_FROM_ZERO;
     } else if (round_mode_string == "HALF_TO_EVEN") {
-      OP_REQUIRES(ctx, mode_string == "SCALED",
-                  errors::InvalidArgument("Round mode 'HALF_TO_EVEN' "
-                                          "only supported for mode 'SCALED', "
-                                          "but mode is '" +
-                                          mode_string + "'."));
+      OP_REQUIRES(
+          ctx, mode_string == "SCALED",
+          absl::InvalidArgumentError("Round mode 'HALF_TO_EVEN' "
+                                     "only supported for mode 'SCALED', "
+                                     "but mode is '" +
+                                     mode_string + "'."));
       round_mode_ = ROUND_HALF_TO_EVEN;
     }
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("narrow_range", &narrow_range_));
+    OP_REQUIRES_OK(ctx, ctx->GetAttr("axis", &axis_));
+    OP_REQUIRES_OK(
+        ctx, ctx->GetAttr("ensure_minimum_range", &ensure_minimum_range_));
   }
 
   void Compute(OpKernelContext* ctx) override {
     const Tensor& input = ctx->input(0);
-    const float input_min_range = ctx->input(1).flat<float>()(0);
-    const float input_max_range = ctx->input(2).flat<float>()(0);
+    const Tensor& input_min_range = ctx->input(1);
+    const Tensor& input_max_range = ctx->input(2);
 
-    float min_range;
-    float max_range;
+    OP_REQUIRES(ctx, axis_ >= -1,
+                absl::InvalidArgumentError(absl::StrCat(
+                    "Axis must be at least -1, where -1 selects per-tensor "
+                    "quantization, got ",
+                    axis_)));
+
+    int num_slices = 1;
+    if (axis_ > -1) {
+      OP_REQUIRES(
+          ctx, input.dims() > axis_,
+          absl::InvalidArgumentError(absl::StrCat(
+              "Axis is on a zero-based index, so its value must always be less "
+              "than number of input's dims, but given axis value was ",
+              axis_, " and input's dims was ", input.dims())));
+      num_slices = input.dim_size(axis_);
+      OP_REQUIRES(ctx, input_min_range.dims() == 1,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "If axis is specified, min_range must be a 1-D tensor "
+                      "whose size matches the axis dimension of the input and "
+                      "output tensors, but min_range dims are ",
+                      input_min_range.dims())));
+      OP_REQUIRES(ctx, input_min_range.dim_size(0) == num_slices,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "If axis is specified, min_range must be a 1-D tensor "
+                      "whose size matches the axis dimension of the input and "
+                      "output tensors, but min_range is a 1-D tensor of size ",
+                      input_min_range.dim_size(0),
+                      " and input's axis dimension is of size ", num_slices)));
+      OP_REQUIRES(ctx, input_max_range.dims() == 1,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "If axis is specified, max_range must be a 1-D tensor "
+                      "whose size matches the axis dimension of the input and "
+                      "output tensors, but max_range dims are ",
+                      input_max_range.dims())));
+      OP_REQUIRES(ctx, input_max_range.dim_size(0) == num_slices,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "If axis is specified, max_range must be a 1-D tensor "
+                      "whose size matches the axis dimension of the input and "
+                      "output tensors, but max_range is a 1-D tensor of size ",
+                      input_max_range.dim_size(0),
+                      " and input's axis dimension is of size ", num_slices)));
+    } else {
+      OP_REQUIRES(ctx, input_min_range.NumElements() == 1,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "If axis is not specified, min_range must contain a "
+                      "single float element, but it contains ",
+                      input_min_range.NumElements(), " elements")));
+      OP_REQUIRES(ctx, input_max_range.NumElements() == 1,
+                  absl::InvalidArgumentError(absl::StrCat(
+                      "If axis is not specified, max_range must contain a "
+                      "single float element, but it contains ",
+                      input_max_range.NumElements(), " elements")));
+    }
+
+    const TensorShape& minmax_shape = ctx->input(1).shape();
+    Tensor* output = nullptr;
+    OP_REQUIRES_OK(ctx, ctx->allocate_output(0, input.shape(), &output));
+
+    Tensor* output_min_tensor = nullptr;
+    Tensor* output_max_tensor = nullptr;
+
+    if (num_slices == 1) {
+      OP_REQUIRES_OK(ctx, ctx->allocate_output(1, {}, &output_min_tensor));
+      OP_REQUIRES_OK(ctx, ctx->allocate_output(2, {}, &output_max_tensor));
+      const float min_range = input_min_range.template flat<float>()(0);
+      const float max_range = input_max_range.template flat<float>()(0);
+      QuantizeTensor(ctx, input, min_range, max_range, output,
+                     output_min_tensor, output_max_tensor);
+      return;
+    }
+
+    OP_REQUIRES(
+        ctx, mode_ != QUANTIZE_MODE_MIN_FIRST,
+        absl::UnimplementedError("MIN_FIRST mode is not implemented for "
+                                 "Quantize with axis != -1."));
+    OP_REQUIRES_OK(ctx,
+                   ctx->allocate_output(1, minmax_shape, &output_min_tensor));
+    OP_REQUIRES_OK(ctx,
+                   ctx->allocate_output(2, minmax_shape, &output_max_tensor));
+
+    auto input_tensor =
+        input.template flat_inner_outer_dims<float, 3>(axis_ - 1);
+    int64_t pre_dim = 1, post_dim = 1;
+    for (int i = 0; i < axis_; ++i) {
+      pre_dim *= output->dim_size(i);
+    }
+    for (int i = axis_ + 1; i < output->dims(); ++i) {
+      post_dim *= output->dim_size(i);
+    }
+    auto output_tensor = output->template bit_casted_shaped<T, 3>(
+        {pre_dim, num_slices, post_dim});
+    auto min_ranges = input_min_range.template vec<float>();
+    auto max_ranges = input_max_range.template vec<float>();
+    for (int i = 0; i < num_slices; ++i) {
+      QuantizeSlice(ctx->eigen_device<Device>(), ctx,
+                    input_tensor.template chip<1>(i), min_ranges(i),
+                    max_ranges(i), output_tensor.template chip<1>(i),
+                    &output_min_tensor->flat<float>()(i),
+                    &output_max_tensor->flat<float>()(i));
+    }
+  }
+
+  void QuantizeTensor(OpKernelContext* ctx, const Tensor& input,
+                      const float input_min_range, const float input_max_range,
+                      Tensor* output, Tensor* output_min_tensor,
+                      Tensor* output_max_tensor) {
     OP_REQUIRES(ctx, !(input_max_range < input_min_range),
-                errors::InvalidArgument(
+                absl::InvalidArgumentError(
                     "input_max_range must be larger than input_min_range."));
 
     // When the minimum and maximum ranges are too close together, nudge them
@@ -122,16 +233,50 @@ class QuantizeV2Op : public OpKernel {
     // overall range from the maximum, so that the value can be easily
     // represented when we promote the quantized value to a higher
     // intermediate bit depth, since that's a common requirement.
-    min_range = std::min(0.0f, input_min_range);
+    float min_range = std::min(0.0f, input_min_range);
     const float epsilon = std::max(1.0f, std::max(fabsf(input_min_range),
-                                                  fabsf(input_max_range))) /
-                          100.0f;
-    max_range = std::max(input_max_range, min_range + epsilon);
-    max_range = std::max(0.0f, max_range);
+                                                  fabsf(input_max_range))) *
+                          ensure_minimum_range_;
+    float max_range =
+        std::max(0.0f, std::max(input_max_range, min_range + epsilon));
 
-    Tensor* output = nullptr;
-    OP_REQUIRES_OK(ctx, ctx->allocate_output(0, input.shape(), &output));
-    typename TTypes<T>::Vec o = output->template flat<T>();
+    if (mode_ == QUANTIZE_MODE_MIN_FIRST) {
+      if (meta::IsSupportedAndEnabled() && std::is_same<T, quint8>()) {
+        TTypes<const float>::Vec input_array = input.flat<float>();
+
+        meta::Quantize(ctx, input_array.data(), input_array.size(), min_range,
+                       max_range, output->flat<quint8>().data());
+      } else {
+        FloatTensorToQuantizedInPlaceUsingEigen<T>(
+            ctx->template eigen_device<Device>(), input, min_range, max_range,
+            output);
+      }
+      output_min_tensor->flat<float>()(0) = min_range;
+      output_max_tensor->flat<float>()(0) = max_range;
+    } else {
+      QuantizeSlice(ctx->eigen_device<Device>(), ctx, input.flat<float>(),
+                    input_min_range, input_max_range,
+                    output->template flat<T>(),
+                    &output_min_tensor->flat<float>()(0),
+                    &output_max_tensor->flat<float>()(0));
+    }
+  }
+
+  template <typename ConstVec, typename Vec>
+  void QuantizeSlice(const Device& d, OpKernelContext* ctx,
+                     const ConstVec& input, float input_min_range,
+                     float input_max_range, Vec output, float* output_min_range,
+                     float* output_max_range) {
+    OP_REQUIRES(ctx, !(input_max_range < input_min_range),
+                absl::InvalidArgumentError(
+                    "input_max_range must be larger than input_min_range."));
+    float min_range = std::min(0.0f, input_min_range);
+    const float epsilon = std::max(1.0f, std::max(fabsf(input_min_range),
+                                                  fabsf(input_max_range))) *
+                          ensure_minimum_range_;
+    float max_range =
+        std::max(0.0f, std::max(input_max_range, min_range + epsilon));
+
     if (mode_ == QUANTIZE_MODE_MIN_COMBINED) {
       const float scale_factor =
           (static_cast<double>(std::numeric_limits<T>::max()) -
@@ -148,13 +293,12 @@ class QuantizeV2Op : public OpKernel {
       // semantic of std::round, which implements "round-half-away-zero",
       // e.g., -5.5 gets rounded to -6, -5.4 goes to -5, 5.4 goes to 5,
       // and 5.5 goes to 6.
-      bool is_signed = std::is_signed<T>::value;
+      bool is_signed = std::numeric_limits<T>::is_signed;
       if (is_signed) {
         // The slow path.
         // TODO(xbing,yonghui): Speedup this path as well.
-        o.device(ctx->template eigen_device<Device>()) =
-            ((input.flat<float>().cwiseMin(max_range).cwiseMax(min_range) -
-              min_range) *
+        output.device(d) =
+            ((input.cwiseMin(max_range).cwiseMax(min_range) - min_range) *
                  scale_factor -
              half_range_)
                 .round()
@@ -162,25 +306,15 @@ class QuantizeV2Op : public OpKernel {
       } else {
         // The fast path that avoids unaryExpr
         // According to the micro-benchmark, adding device here doesn't help.
-        o = ((input.flat<float>().cwiseMin(max_range).cwiseMax(min_range) -
-              min_range) *
+        output.device(d) =
+            ((input.cwiseMin(max_range).cwiseMax(min_range) - min_range) *
                  scale_factor +
              0.5f)
                 .template cast<T>();
       }
-    } else if (mode_ == QUANTIZE_MODE_MIN_FIRST) {
-      if (meta::IsSupportedAndEnabled() && std::is_same<T, quint8>()) {
-        TTypes<const float>::Vec input_array = input.flat<float>();
-
-        meta::Quantize(ctx, input_array.data(), input_array.size(), min_range,
-                       max_range, output->flat<quint8>().data());
-      } else {
-        FloatTensorToQuantizedInPlaceUsingEigen<T>(
-            ctx->template eigen_device<Device>(), input, min_range, max_range,
-            output);
-      }
     } else if (mode_ == QUANTIZE_MODE_SCALED) {
-      const int min_output_value = std::numeric_limits<T>::min();
+      const int min_output_value =
+          std::numeric_limits<T>::min() + (narrow_range_ ? 1 : 0);
       const int max_output_value = std::numeric_limits<T>::max();
       const float scale_factor_from_min_side =
           (min_output_value * min_range > 0)
@@ -195,35 +329,30 @@ class QuantizeV2Op : public OpKernel {
       min_range = min_output_value / scale_factor;
       max_range = max_output_value / scale_factor;
       if (round_mode_ == ROUND_HALF_TO_EVEN) {
-        // scalar_round_op_google implements "round-half-to-even".
-        o.device(ctx->template eigen_device<Device>()) =
-            (input.flat<float>().cwiseMin(max_range).cwiseMax(min_range) *
-             scale_factor)
-                .unaryExpr(Eigen::internal::scalar_round_op_google<float>())
+        output.device(d) =
+            (input.cwiseMin(max_range).cwiseMax(min_range) * scale_factor)
+                .unaryExpr(
+                    Eigen::internal::scalar_round_half_to_even_op<float>())
                 .template cast<T>();
       } else if (round_mode_ == ROUND_HALF_AWAY_FROM_ZERO) {
-        // scalar_round_op implements "round-half-away-from-zero".
-        o.device(ctx->template eigen_device<Device>()) =
-            (input.flat<float>().cwiseMin(max_range).cwiseMax(min_range) *
-             scale_factor)
-                .unaryExpr(Eigen::internal::scalar_round_op<float>())
+        output.device(d) =
+            (input.cwiseMin(max_range).cwiseMax(min_range) * scale_factor)
+                .round()
                 .template cast<T>();
       }
     }
 
-    Tensor* output_min_tensor = nullptr;
-    OP_REQUIRES_OK(ctx, ctx->allocate_output(1, {}, &output_min_tensor));
-    output_min_tensor->flat<float>()(0) = min_range;
-
-    Tensor* output_max_tensor = nullptr;
-    OP_REQUIRES_OK(ctx, ctx->allocate_output(2, {}, &output_max_tensor));
-    output_max_tensor->flat<float>()(0) = max_range;
+    *output_min_range = min_range;
+    *output_max_range = max_range;
   }
 
  private:
   float half_range_;
+  float ensure_minimum_range_;
   int mode_;
   int round_mode_;
+  int axis_;
+  bool narrow_range_;
 };
 
 REGISTER_KERNEL_BUILDER(

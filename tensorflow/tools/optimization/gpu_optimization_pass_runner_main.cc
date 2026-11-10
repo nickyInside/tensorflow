@@ -17,21 +17,28 @@ limitations under the License.
 // --output_file_path=/tmp/output.pbtxt
 // --optimization_pass=NameOfGraphOptimizationPass
 
-#include "absl/strings/str_cat.h"
-#include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/core/framework/types.h"
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/status.h"
 #include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/init_main.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/util/command_line_flags.h"
 #include "tensorflow/tools/optimization/optimization_pass_runner.h"
 
 namespace tensorflow {
 namespace {
-Status RealMain(int argc, char** argv) {
-  string input_file_path;
-  string output_file_path;
-  string optimization_pass;
+absl::Status RealMain(int argc, char** argv) {
+  std::string input_file_path;
+  std::string output_file_path;
+  std::string optimization_pass;
 
   const std::vector<Flag> flag_list = {
       Flag("input_file_path", &input_file_path, "Location of the input graph."),
@@ -42,18 +49,20 @@ Status RealMain(int argc, char** argv) {
            "Which optimization pass to run."),
   };
   if (!Flags::Parse(&argc, argv, flag_list)) {
-    return errors::FailedPrecondition("Invalid flags passed");
+    return absl::FailedPreconditionError("Invalid flags passed");
   }
   port::InitMain(argv[0], &argc, &argv);
 
   if (input_file_path.empty()) {
-    return errors::FailedPrecondition("input_file_path is a required flag.");
+    return absl::FailedPreconditionError("input_file_path is a required flag.");
   }
   if (output_file_path.empty()) {
-    return errors::FailedPrecondition("output_file_path is a required flag.");
+    return absl::FailedPreconditionError(
+        "output_file_path is a required flag.");
   }
   if (optimization_pass.empty()) {
-    return errors::FailedPrecondition("optimization_pass is a required flag.");
+    return absl::FailedPreconditionError(
+        "optimization_pass is a required flag.");
   }
 
   GraphDef graphdef_input;
@@ -69,9 +78,7 @@ Status RealMain(int argc, char** argv) {
   TF_RETURN_IF_ERROR(runner.AddGpus(8));
 
   // This binary is used to test TF:XLA behavior, so turn on auto_jit.
-  TF_RETURN_IF_ERROR(
-      runner.SetJitLevel(tensorflow::OptimizerOptions::GlobalJitLevel::
-                             OptimizerOptions_GlobalJitLevel_ON_2));
+  TF_RETURN_IF_ERROR(runner.SetJitLevel(tensorflow::OptimizerOptions::ON_2));
   GraphDef graphdef_output;
   TF_RETURN_IF_ERROR(runner.Run(optimization_pass, std::move(graphdef_input),
                                 &graphdef_output));

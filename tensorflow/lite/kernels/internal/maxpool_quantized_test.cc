@@ -33,11 +33,12 @@ namespace {
 // Runs the reference and optimized MaxPool functions and asserts the values
 // are the same.
 void RunOneMaxPoolTest(const PoolParams& params,
-                       const RuntimeShape& input_shape, const int8* input_data,
+                       const RuntimeShape& input_shape,
+                       const int8_t* input_data,
                        const RuntimeShape& output_shape) {
   const int buffer_size = output_shape.FlatSize();
-  std::vector<int8> optimized_maxpool_output(buffer_size);
-  std::vector<int8> reference_maxpool_output(buffer_size);
+  std::vector<int8_t> optimized_maxpool_output(buffer_size);
+  std::vector<int8_t> reference_maxpool_output(buffer_size);
 
   reference_integer_ops::MaxPool(params, input_shape, input_data, output_shape,
                                  reference_maxpool_output.data());
@@ -56,15 +57,17 @@ void RunOneMaxPoolTest(const PoolParams& params,
 // With input/output shapes computed, fills the input data and calls the
 // test function.
 void CreateDataAndRunMaxPool(bool padding_same) {
-  const int batch = UniformRandomInt(1, 20);
-  const int input_depth = UniformRandomInt(32, 700);
+  const int batch = UniformRandomInt(1, 2);
+  const int input_depth = UniformRandomInt(1, 700);
   const int output_depth = input_depth;
-  const int input_width = UniformRandomInt(64, 128);
-  const int input_height = UniformRandomInt(64, 128);
+  const int input_width_offset = UniformRandomInt(1, 30);
+  const int input_height_offset = UniformRandomInt(1, 30);
   const int stride_width = UniformRandomInt(1, 10);
   const int stride_height = UniformRandomInt(1, 10);
   const int filter_width = UniformRandomInt(1, 10);
   const int filter_height = UniformRandomInt(1, 10);
+  const int input_width = input_width_offset + filter_width;
+  const int input_height = input_height_offset + filter_height;
   const int output_width =
       padding_same ? (input_width + stride_width - 1) / stride_width
                    : (input_width - filter_width + stride_width) / stride_width;
@@ -78,7 +81,7 @@ void CreateDataAndRunMaxPool(bool padding_same) {
   auto output_shape =
       RuntimeShape({batch, output_height, output_width, output_depth});
   const int buffer_size = input_shape.FlatSize();
-  std::vector<int8> input_data(buffer_size);
+  std::vector<int8_t> input_data(buffer_size);
   FillRandom(&input_data);
 
   PoolParams params;

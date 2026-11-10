@@ -20,9 +20,9 @@ limitations under the License.
 namespace tensorflow {
 
 // Used for testing the grad+indices handling for SparseApplyXYZ tests.
-static void TestGradAndIndicesErrorHandling(const ShapeInferenceTestOp& op,
-                                            string shape_spec_middle,
-                                            const string& shape_spec_end = "") {
+static void TestGradAndIndicesErrorHandling(
+    const ShapeInferenceTestOp& op, std::string shape_spec_middle,
+    const std::string& shape_spec_end = "") {
   auto shape_spec = [&shape_spec_middle, shape_spec_end](
                         const char* var_spec, const char* grad_indices_spec) {
     return strings::StrCat(var_spec, ";", shape_spec_middle, ";",
@@ -96,7 +96,7 @@ TEST(TrainingOpsTest, ApplyAdadelta_ShapeFn) {
   INFER_ERROR("Dimension 0 in both shapes must be equal, but are 1 and 2", op,
               "[1];[1];[1];[];[];[];[2]");
 
-  // lr, rho, and episilon must be scalars.
+  // lr, rho, and epsilon must be scalars.
   INFER_ERROR("Shape must be rank 0 but is rank 1", op, "?;?;?;[?];?;?;?");
   INFER_ERROR("Shape must be rank 0 but is rank 1", op, "?;?;?;?;[?];?;?");
   INFER_ERROR("Shape must be rank 0 but is rank 1", op, "?;?;?;?;?;[?];?");
@@ -118,7 +118,7 @@ TEST(TrainingOpsTest, SparseApplyAdadelta_ShapeFn) {
 
   TestGradAndIndicesErrorHandling(op, "?;?;?;?;?");
 
-  // lr, rho, and episilon must be scalars.
+  // lr, rho, and epsilon must be scalars.
   INFER_ERROR("Shape must be rank 0 but is rank 1", op, "?;?;?;[?];?;?;?;?");
   INFER_ERROR("Shape must be rank 0 but is rank 1", op, "?;?;?;?;[?];?;?;?");
   INFER_ERROR("Shape must be rank 0 but is rank 1", op, "?;?;?;?;?;[?];?;?");

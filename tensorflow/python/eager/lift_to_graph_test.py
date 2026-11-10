@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for lift_to_graph."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python.eager import def_function
 from tensorflow.python.eager import lift_to_graph
 from tensorflow.python.eager import test
@@ -41,7 +37,7 @@ class LiftToGraphTest(test.TestCase):
       return v1 + v2 + v3
 
     concrete_fn = fn.get_concrete_function()
-    original_captures = concrete_fn.graph.captures
+    original_captures = concrete_fn.graph.internal_captures
     outputs = concrete_fn.graph.outputs
 
     for _ in range(100):
@@ -49,11 +45,10 @@ class LiftToGraphTest(test.TestCase):
 
       lift_to_graph.lift_to_graph(
           outputs, g, add_sources=True, handle_captures=True)
-      lifted_captures = g.captures
+      lifted_captures = g.internal_captures
       self.assertLen(lifted_captures, 3)
-      for original_capture, lifted_capture in zip(original_captures.values(),
-                                                  lifted_captures.values()):
-        self.assertEqual(original_capture.name, lifted_capture.name)
+      for original, lifted in zip(original_captures, lifted_captures):
+        self.assertEqual(original.name, lifted.name)
 
   def testClassAttrsRemoved(self):
     """Tests that _class attrs (from colocate_with()) are removed."""

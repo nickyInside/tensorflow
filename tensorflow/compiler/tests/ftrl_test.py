@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for Ftrl optimizer."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
@@ -48,7 +44,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
         l1_regularization_strength=0.0,
         l2_regularization_strength=0.0)
     ftrl_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-    variables.global_variables_initializer().run()
+    self.evaluate(variables.global_variables_initializer())
     # Fetch params to validate initial values
     self.assertAllClose([0.0, 0.0], self.evaluate(var0))
     self.assertAllClose([0.0, 0.0], self.evaluate(var1))
@@ -63,7 +59,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
     var0, var1, grads0, grads1 = self.initVariableAndGradient(dtype)
     opt = adagrad.AdagradOptimizer(3.0, initial_accumulator_value=0.1)
     adagrad_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-    variables.global_variables_initializer().run()
+    self.evaluate(variables.global_variables_initializer())
     # Fetch params to validate initial values
     self.assertAllClose([0.0, 0.0], self.evaluate(var0))
     self.assertAllClose([0.0, 0.0], self.evaluate(var1))
@@ -83,7 +79,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
         l1_regularization_strength=0.0,
         l2_regularization_strength=0.0)
     ftrl_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-    variables.global_variables_initializer().run()
+    self.evaluate(variables.global_variables_initializer())
     # Fetch params to validate initial values
     self.assertAllClose([0.0, 0.0], self.evaluate(var0))
     self.assertAllClose([0.0, 0.0], self.evaluate(var1))
@@ -98,7 +94,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
     var0, var1, grads0, grads1 = self.initVariableAndGradient(dtype)
     opt = gradient_descent.GradientDescentOptimizer(3.0, name="sgd")
     sgd_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-    variables.global_variables_initializer().run()
+    self.evaluate(variables.global_variables_initializer())
     # Fetch params to validate initial values
     self.assertAllClose([0.0, 0.0], self.evaluate(var0))
     self.assertAllClose([0.0, 0.0], self.evaluate(var1))
@@ -111,7 +107,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
 
   def testFtrlwithoutRegularization(self):
     for dtype in self.float_types:
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         var0 = resource_variable_ops.ResourceVariable([0.0, 0.0], dtype=dtype)
         var1 = resource_variable_ops.ResourceVariable([0.0, 0.0], dtype=dtype)
         grads0 = constant_op.constant([0.1, 0.2], dtype=dtype)
@@ -122,7 +118,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
             l1_regularization_strength=0.0,
             l2_regularization_strength=0.0)
         ftrl_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-        variables.global_variables_initializer().run()
+        self.evaluate(variables.global_variables_initializer())
         # Fetch params to validate initial values
         self.assertAllClose([0.0, 0.0], self.evaluate(var0))
         self.assertAllClose([0.0, 0.0], self.evaluate(var1))
@@ -145,7 +141,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
 
   def testFtrlwithoutRegularization2(self):
     for dtype in self.float_types:
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         var0 = resource_variable_ops.ResourceVariable([1.0, 2.0], dtype=dtype)
         var1 = resource_variable_ops.ResourceVariable([4.0, 3.0], dtype=dtype)
         grads0 = constant_op.constant([0.1, 0.2], dtype=dtype)
@@ -156,7 +152,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
             l1_regularization_strength=0.0,
             l2_regularization_strength=0.0)
         ftrl_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-        variables.global_variables_initializer().run()
+        self.evaluate(variables.global_variables_initializer())
         # Fetch params to validate initial values
         self.assertAllClose([1.0, 2.0], self.evaluate(var0))
         self.assertAllClose([4.0, 3.0], self.evaluate(var1))
@@ -178,7 +174,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
 
   def testFtrlWithL1(self):
     for dtype in self.float_types:
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         var0 = resource_variable_ops.ResourceVariable([1.0, 2.0], dtype=dtype)
         var1 = resource_variable_ops.ResourceVariable([4.0, 3.0], dtype=dtype)
         grads0 = constant_op.constant([0.1, 0.2], dtype=dtype)
@@ -189,7 +185,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
             l1_regularization_strength=0.001,
             l2_regularization_strength=0.0)
         ftrl_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-        variables.global_variables_initializer().run()
+        self.evaluate(variables.global_variables_initializer())
         # Fetch params to validate initial values
         self.assertAllClose([1.0, 2.0], self.evaluate(var0))
         self.assertAllClose([4.0, 3.0], self.evaluate(var1))
@@ -212,7 +208,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
 
   def testFtrlWithL1_L2(self):
     for dtype in self.float_types:
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         var0 = resource_variable_ops.ResourceVariable([1.0, 2.0], dtype=dtype)
         var1 = resource_variable_ops.ResourceVariable([4.0, 3.0], dtype=dtype)
         grads0 = constant_op.constant([0.1, 0.2], dtype=dtype)
@@ -223,7 +219,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
             l1_regularization_strength=0.001,
             l2_regularization_strength=2.0)
         ftrl_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-        variables.global_variables_initializer().run()
+        self.evaluate(variables.global_variables_initializer())
         # Fetch params to validate initial values
         self.assertAllClose([1.0, 2.0], self.evaluate(var0))
         self.assertAllClose([4.0, 3.0], self.evaluate(var1))
@@ -250,7 +246,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
     weights will tend to have smaller magnitudes with this parameter set.
     """
     for dtype in self.float_types:
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         var0 = resource_variable_ops.ResourceVariable([1.0, 2.0], dtype=dtype)
         var1 = resource_variable_ops.ResourceVariable([4.0, 3.0], dtype=dtype)
         grads0 = constant_op.constant([0.1, 0.2], dtype=dtype)
@@ -262,7 +258,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
             l2_regularization_strength=2.0,
             l2_shrinkage_regularization_strength=0.1)
         ftrl_update = opt.apply_gradients(zip([grads0, grads1], [var0, var1]))
-        variables.global_variables_initializer().run()
+        self.evaluate(variables.global_variables_initializer())
         # Fetch params to validate initial values
         self.assertAllCloseAccordingToType([1.0, 2.0], self.evaluate(var0))
         self.assertAllCloseAccordingToType([4.0, 3.0], self.evaluate(var1))
@@ -284,7 +280,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
   def testFtrlWithL2ShrinkageDoesNotChangeLrSchedule(self):
     """Verifies that l2 shrinkage in FTRL does not change lr schedule."""
     for dtype in self.float_types:
-      with self.test_session(), self.test_scope():
+      with self.session(), self.test_scope():
         var0 = resource_variable_ops.ResourceVariable([1.0, 2.0], dtype=dtype)
         var1 = resource_variable_ops.ResourceVariable([1.0, 2.0], dtype=dtype)
         grads0 = constant_op.constant([0.1, 0.2], dtype=dtype)
@@ -303,7 +299,7 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
             l2_regularization_strength=2.0)
         update0 = opt0.apply_gradients([(grads0, var0)])
         update1 = opt1.apply_gradients([(grads1, var1)])
-        variables.global_variables_initializer().run()
+        self.evaluate(variables.global_variables_initializer())
 
         self.assertAllCloseAccordingToType([1.0, 2.0], self.evaluate(var0))
         self.assertAllCloseAccordingToType([1.0, 2.0], self.evaluate(var1))
@@ -324,16 +320,16 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
   # When variables are initialized with Zero, FTRL-Proximal has two properties:
   # 1. Without L1&L2 but with fixed learning rate, FTRL-Proximal is identical
   # with GradientDescent.
-  # 2. Without L1&L2 but with adaptive learning rate, FTRL-Proximal is idential
+  # 2. Without L1&L2 but with adaptive learning rate, FTRL-Proximal is identical
   # with Adagrad.
   # So, basing on these two properties, we test if our implementation of
   # FTRL-Proximal performs same updates as Adagrad or GradientDescent.
   def testEquivAdagradwithoutRegularization(self):
     steps = 5
     for dtype in self.float_types:
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         val0, val1 = self.equivAdagradTest_FtrlPart(steps, dtype)
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         val2, val3 = self.equivAdagradTest_AdagradPart(steps, dtype)
 
     self.assertAllCloseAccordingToType(val0, val2, rtol=1e-4, half_rtol=1e-2)
@@ -342,9 +338,9 @@ class FtrlOptimizerTest(xla_test.XLATestCase):
   def testEquivGradientDescentwithoutRegularization(self):
     steps = 5
     for dtype in self.float_types:
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         val0, val1 = self.equivGradientDescentTest_FtrlPart(steps, dtype)
-      with self.cached_session(), self.test_scope():
+      with self.session(), self.test_scope():
         val2, val3 = self.equivGradientDescentTest_GradientDescentPart(
             steps, dtype)
 

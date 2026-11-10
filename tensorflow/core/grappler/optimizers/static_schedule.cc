@@ -14,7 +14,9 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/grappler/optimizers/static_schedule.h"
+
 #include <deque>
+
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/grappler/costs/graph_properties.h"
 #include "tensorflow/core/grappler/costs/op_level_cost_estimator.h"
@@ -56,10 +58,10 @@ static Costs::NanoSeconds PredictExecutionTime(
   return std::max(estimate, Costs::NanoSeconds(1));
 }
 
-Status EstimateEarliestExecutionTimes(
+absl::Status EstimateEarliestExecutionTimes(
     const GrapplerItem& item, const Cluster* cluster,
     std::unordered_map<const NodeDef*, Costs::NanoSeconds>* completion_times) {
-  std::unordered_map<string, const NodeDef*> name_map;
+  std::unordered_map<std::string, const NodeDef*> name_map;
   std::unordered_map<const NodeDef*, int> pending_inputs;
   std::deque<const NodeDef*> ready_nodes;
   for (const NodeDef& node : item.graph.node()) {
@@ -78,12 +80,12 @@ Status EstimateEarliestExecutionTimes(
 
   std::unordered_map<const NodeDef*, std::vector<const NodeDef*>> fanouts;
   for (const NodeDef& node : item.graph.node()) {
-    for (const string& input : node.input()) {
-      string node_name = NodeName(input);
+    for (const std::string& input : node.input()) {
+      std::string node_name = NodeName(input);
       auto it = name_map.find(node_name);
       if (it == name_map.end()) {
-        return errors::InvalidArgument(
-            strings::StrCat("Unknown input node ", input));
+        return absl::InvalidArgumentError(
+            absl::StrCat("Unknown input node ", input));
       }
       const NodeDef* fanin = it->second;
       fanouts[fanin].push_back(&node);
@@ -92,7 +94,10 @@ Status EstimateEarliestExecutionTimes(
   name_map.clear();
 
   GraphProperties properties(item);
-  TF_RETURN_IF_ERROR(properties.InferStatically(true));
+  TF_RETURN_IF_ERROR(
+      properties.InferStatically(/*assume_valid_feeds=*/true,
+                                 /*aggressive_shape_inference=*/false,
+                                 /*include_tensor_values=*/false));
   OpLevelCostEstimator estimator;
   VirtualPlacer placer(cluster->GetDevices());
 
@@ -122,15 +127,15 @@ Status EstimateEarliestExecutionTimes(
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
-Status EstimateRequiredTimes(
+absl::Status EstimateRequiredTimes(
     const GrapplerItem& item, const Cluster* cluster,
     const std::unordered_map<const NodeDef*, Costs::NanoSeconds>&
         execution_times,
     std::unordered_map<const NodeDef*, Costs::NanoSeconds>* required_times) {
-  std::unordered_map<string, const NodeDef*> name_map;
+  std::unordered_map<std::string, const NodeDef*> name_map;
   for (const NodeDef& node : item.graph.node()) {
     name_map[node.name()] = &node;
     (*required_times)[&node] = Costs::NanoSeconds::max();
@@ -138,12 +143,12 @@ Status EstimateRequiredTimes(
 
   std::unordered_map<const NodeDef*, int> pending_fanouts;
   for (const NodeDef& node : item.graph.node()) {
-    for (const string& input : node.input()) {
-      string node_name = NodeName(input);
+    for (const std::string& input : node.input()) {
+      std::string node_name = NodeName(input);
       auto it = name_map.find(node_name);
       if (it == name_map.end()) {
-        return errors::InvalidArgument(
-            strings::StrCat("Unknown input node ", input));
+        return absl::InvalidArgumentError(
+            absl::StrCat("Unknown input node ", input));
       }
       const NodeDef* fanin = it->second;
       pending_fanouts[fanin] += 1;
@@ -160,7 +165,10 @@ Status EstimateRequiredTimes(
     }
   }
   GraphProperties properties(item);
-  TF_RETURN_IF_ERROR(properties.InferStatically(true));
+  TF_RETURN_IF_ERROR(
+      properties.InferStatically(/*assume_valid_feeds=*/true,
+                                 /*aggressive_shape_inference=*/false,
+                                 /*include_tensor_values=*/false));
   OpLevelCostEstimator estimator;
   VirtualPlacer placer(cluster->GetDevices());
 
@@ -172,7 +180,7 @@ Status EstimateRequiredTimes(
         PredictExecutionTime(properties, estimator, placer, *node);
     Costs::NanoSeconds required_time = (*required_times)[node] - execution_time;
 
-    for (const string& fanin_name : node->input()) {
+    for (const std::string& fanin_name : node->input()) {
       const NodeDef* fanin = name_map[NodeName(fanin_name)];
       (*required_times)[fanin] =
           std::min((*required_times)[fanin], required_time);
@@ -188,7 +196,7 @@ Status EstimateRequiredTimes(
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

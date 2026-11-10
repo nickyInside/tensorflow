@@ -16,16 +16,14 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_EAGER_EAGER_SERVICE_IMPL_H_
 #define TENSORFLOW_CORE_DISTRIBUTED_RUNTIME_EAGER_EAGER_SERVICE_IMPL_H_
 
+#include <memory>
 #include <unordered_map>
+#include <utility>
 
 #include "tensorflow/core/common_runtime/eager/context.h"
-#include "tensorflow/core/common_runtime/eager/tensor_handle.h"
+#include "tensorflow/core/distributed_runtime/eager/remote_mgr.h"
 #include "tensorflow/core/distributed_runtime/eager/remote_tensor_handle.h"
 #include "tensorflow/core/distributed_runtime/worker_env.h"
-#include "tensorflow/core/lib/core/refcount.h"
-#include "tensorflow/core/lib/gtl/array_slice.h"
-#include "tensorflow/core/lib/strings/stringprintf.h"
-#include "tensorflow/core/protobuf/eager_service.pb.h"
 
 namespace tensorflow {
 namespace eager {
@@ -38,7 +36,7 @@ namespace eager {
 // over this (e.g. gRPC).
 class EagerServiceImpl {
  public:
-  explicit EagerServiceImpl(const WorkerEnv* env) : env_(env) {
+  explicit EagerServiceImpl(WorkerEnv* env) : env_(env) {
     gc_thread_.reset(
         env_->env->StartThread({}, "EagerServiceContextGC", [this]() {
           while (true) {
@@ -78,25 +76,36 @@ class EagerServiceImpl {
     }
   }
 
-  Status CreateContext(const CreateContextRequest* request,
-                       CreateContextResponse* response);
+  absl::Status CreateContext(const CreateContextRequest* request,
+                             CreateContextResponse* response);
 
-  Status Enqueue(const EnqueueRequest* request, EnqueueResponse* response);
+  absl::Status UpdateContext(const UpdateContextRequest* request,
+                             UpdateContextResponse* response);
 
-  Status WaitQueueDone(const WaitQueueDoneRequest* request,
-                       WaitQueueDoneResponse* response);
+  // Create a ServerContext for master eager context.
+  absl::Status CreateMasterContext(const uint64_t context_id,
+                                   EagerContext* context);
 
-  Status KeepAlive(const KeepAliveRequest* request,
-                   KeepAliveResponse* response);
+  static constexpr uint64_t kInvalidStreamId = 0;
 
-  Status CloseContext(const CloseContextRequest* request,
-                      CloseContextResponse* response);
+  // Used by both Enqueue and StreamingEnqueue RPCs.
+  absl::Status Enqueue(CallOptions* call_opts, const EnqueueRequest* request,
+                       EnqueueResponse* response,
+                       uint64_t stream_id = kInvalidStreamId);
 
-  Status RegisterFunction(const RegisterFunctionRequest* request,
-                          RegisterFunctionResponse* response);
+  absl::Status WaitQueueDone(const WaitQueueDoneRequest* request,
+                             WaitQueueDoneResponse* response);
 
-  Status SendTensor(const SendTensorRequest* request,
-                    SendTensorResponse* response);
+  void RunComponentFunction(CallOptions* call_opts,
+                            const RunComponentFunctionRequest* request,
+                            RunComponentFunctionResponse* response,
+                            StatusCallback done);
+
+  absl::Status KeepAlive(const KeepAliveRequest* request,
+                         KeepAliveResponse* response);
+
+  absl::Status CloseContext(const CloseContextRequest* request,
+                            CloseContextResponse* response);
 
  protected:
   // This is the server-side execution context. All state regarding execution of
@@ -104,63 +113,33 @@ class EagerServiceImpl {
   // and the EagerContext).
   class ServerContext : public core::RefCounted {
    public:
+    // Create a ServerContext for local master.
+    static ServerContext* CreateMasterContext(tensorflow::EagerContext* ctx,
+                                              const WorkerEnv* env) {
+      return new ServerContext(ctx, -1, env, /* is_master= */ true);
+    }
+
     explicit ServerContext(tensorflow::EagerContext* ctx,
-                           int64 destroy_after_secs, const WorkerEnv* env)
-        : ctx_(ctx), env_(env) {
+                           int64_t destroy_after_secs, const WorkerEnv* env,
+                           const bool is_master = false)
+        : ctx_(ctx), env_(env), is_master_(is_master) {
+      ctx->Ref();
       destroy_after_micros_ =
           destroy_after_secs * tensorflow::EnvTime::kSecondsToMicros;
       RecordAccess();
     }
-    ~ServerContext() {
-      for (const auto& entry : tensors_) {
-        entry.second->Unref();
-      }
 
+    ~ServerContext() override {
+      // TFE_Context is responsible for shutting down master eager context.
+      if (!is_master_) {
+        ctx_->WaitForAndCloseRemoteContexts();
+      }
+      // ctx_->RefCountIsOne() should be true here when is_master_ = false.
+      // TODO(iga): Remove EagerContext refcounting.
       ctx_->Unref();
     }
 
     tensorflow::EagerContext* Context() const { return ctx_; }
-
-    void AddOperationOutputs(
-        const gtl::ArraySlice<tensorflow::TensorHandle*>& handles,
-        int64 operation_id) {
-      mutex_lock l(tensors_mu_);
-      for (int i = 0; i < handles.size(); i++) {
-        // TODO(nareshmodi): Correctly handle operation_id not being unique.
-        tensors_.emplace(RemoteTensorHandleInternal(operation_id, i),
-                         handles[i]);
-      }
-    }
-
-    Status GetTensorHandle(const RemoteTensorHandleInternal& remote_handle,
-                           tensorflow::TensorHandle** handle) {
-      mutex_lock l(tensors_mu_);
-      auto iter = tensors_.find(remote_handle);
-      if (iter == tensors_.end()) {
-        return errors::InvalidArgument(
-            "Unable to find the relevant tensor remote_handle: Op ID: ",
-            remote_handle.op_id, ", Output num: ", remote_handle.output_num);
-      }
-
-      *handle = iter->second;
-
-      return Status::OK();
-    }
-
-    Status DeleteTensorHandle(const RemoteTensorHandleInternal& remote_handle) {
-      mutex_lock l(tensors_mu_);
-      auto iter = tensors_.find(remote_handle);
-      if (iter == tensors_.end()) {
-        return errors::InvalidArgument(
-            "Unable to find the relevant tensor remote_handle: Op ID: ",
-            remote_handle.op_id, ", Output num: ", remote_handle.output_num);
-      }
-
-      iter->second->Unref();
-      tensors_.erase(iter);
-
-      return Status::OK();
-    }
 
     void RecordAccess() {
       mutex_lock l(last_accessed_mu_);
@@ -169,47 +148,93 @@ class EagerServiceImpl {
 
     bool IsStale() {
       mutex_lock l(last_accessed_mu_);
-      return (destroy_after_micros_ > 0 &&
-              (env_->env->NowMicros() - last_accessed_micros_) >
-                  destroy_after_micros_);
+      const int64_t time_passed =
+          env_->env->NowMicros() - last_accessed_micros_;
+      return (destroy_after_micros_ > 0 && time_passed > destroy_after_micros_);
     }
 
    private:
-    using RemoteTensorHandleMap =
-        gtl::FlatMap<RemoteTensorHandleInternal, tensorflow::TensorHandle*,
-                     RemoteTensorHandleInternalHash,
-                     RemoteTensorHandleInternalEquals>;
-
     // The context for this execution.
     tensorflow::EagerContext* ctx_;
-
-    // The state related to the context for this execution.
-    mutex tensors_mu_;
-    RemoteTensorHandleMap tensors_ GUARDED_BY(tensors_mu_);
 
     const WorkerEnv* const env_;  // Not owned.
 
     mutex last_accessed_mu_;
-    int64 last_accessed_micros_ GUARDED_BY(last_accessed_mu_);
-    int64 destroy_after_micros_;
+    int64_t last_accessed_micros_ TF_GUARDED_BY(last_accessed_mu_);
+    int64_t destroy_after_micros_;
+
+    const bool is_master_;
   };
   // The returned ServerContext will need to be Unrefed.
-  tensorflow::Status GetServerContext(uint64, ServerContext**);
+  absl::Status GetServerContext(uint64_t, ServerContext**);
+
+  class ClientTensorHandleDeleteNode : public EagerNode {
+   public:
+    ClientTensorHandleDeleteNode(
+        ServerContext* context,
+        std::unique_ptr<RemoteTensorHandleInternal> handle_to_delete)
+        : tensorflow::EagerNode(),
+          context_(context),
+          handle_to_delete_(std::move(handle_to_delete)) {
+      context_->Ref();
+    }
+
+    ~ClientTensorHandleDeleteNode() override { context_->Unref(); }
+
+    absl::Status Run() override {
+      VLOG(3) << "ServerContext: Deleting tensor handle "
+              << handle_to_delete_->op_id << ":"
+              << handle_to_delete_->output_num;
+      return context_->Context()->RemoteMgr()->DeleteTensorHandle(
+          *handle_to_delete_);
+    }
+
+    void Abort(absl::Status status) override {}
+
+    // Remote node deletions are best effort
+    bool Fatal() const override { return false; }
+
+    std::string DebugString() const override {
+      std::string out = "[ClientTensorHandleDeleteNode]";
+      absl::StrAppend(&out, " op_id: ", handle_to_delete_->op_id);
+      absl::StrAppend(&out, ", output_num: ", handle_to_delete_->output_num);
+      return out;
+    }
+
+   private:
+    // Owns one reference.
+    ServerContext* const context_;
+    const std::unique_ptr<RemoteTensorHandleInternal> handle_to_delete_;
+  };
 
  private:
-  Status ExecuteOp(const Operation& operation, ServerContext* server_context,
-                   QueueResponse* queue_response);
-  const WorkerEnv* const env_;  // Not owned.
+  absl::Status ExecuteOp(CallOptions* call_opts, const Operation& operation,
+                         EagerContext* eager_context,
+                         EagerExecutor* eager_executor,
+                         QueueResponse* queue_response);
+  absl::Status SendTensor(const SendTensorOp& send_tensor,
+                          EagerContext* eager_context);
+  absl::Status SendPackedHandle(const SendPackedHandleOp& send_packed_handle,
+                                EagerContext* eager_context);
+  absl::Status RegisterFunction(const RegisterFunctionOp& register_function,
+                                EagerContext* eager_context);
+  absl::Status RemoveFunction(const RemoveFunctionOp& remove_function,
+                              EagerContext* eager_context);
+  absl::Status CleanupFunction(const CleanupFunctionOp& cleanup_function);
+
+  WorkerEnv* const env_;  // Not owned.
 
   mutex contexts_mu_;
-  std::unordered_map<uint64, ServerContext*> contexts_ GUARDED_BY(contexts_mu_);
+  std::unordered_map<uint64_t, ServerContext*> contexts_
+      TF_GUARDED_BY(contexts_mu_);
 
   std::unique_ptr<Thread> gc_thread_;
   mutex gc_thread_shutdown_mu_;
   condition_variable gc_thread_cv_;
-  bool shutting_down_ GUARDED_BY(gc_thread_shutdown_mu_) = false;
+  bool shutting_down_ TF_GUARDED_BY(gc_thread_shutdown_mu_) = false;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(EagerServiceImpl);
+  EagerServiceImpl(const EagerServiceImpl&) = delete;
+  void operator=(const EagerServiceImpl&) = delete;
 };
 
 }  // namespace eager

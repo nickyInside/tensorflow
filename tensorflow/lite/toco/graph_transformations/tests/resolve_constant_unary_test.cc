@@ -12,14 +12,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#include <tuple>
+#include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
-#include "absl/memory/memory.h"
 #include "tensorflow/lite/toco/graph_transformations/graph_transformations.h"
 #include "tensorflow/lite/toco/model.h"
-#include "tensorflow/lite/toco/tooling_util.h"
 
 namespace toco {
 
@@ -31,9 +31,11 @@ void RunResolveSum(const std::vector<float>& input,
                    const std::vector<int>& output_shape,
                    const std::vector<float>& expected_output) {
   Model model;
+  const std::string output_name("output");
+  model.flags.add_output_arrays(output_name);
   Array& input0 = model.GetOrCreateArray("input0");
   Array& input1 = model.GetOrCreateArray("input1");
-  Array& output = model.GetOrCreateArray("output");
+  Array& output = model.GetOrCreateArray(output_name);
 
   *input0.mutable_shape()->mutable_dims() = input_shape;
   input0.data_type = ArrayDataType::kFloat;
@@ -45,10 +47,10 @@ void RunResolveSum(const std::vector<float>& input,
 
   *output.mutable_shape()->mutable_dims() = output_shape;
 
-  auto sum_op = absl::make_unique<TensorFlowSumOperator>();
+  auto sum_op = std::make_unique<TensorFlowSumOperator>();
   sum_op->keep_dims = true;
   sum_op->inputs = {"input0", "input1"};
-  sum_op->outputs = {"output"};
+  sum_op->outputs = {output_name};
   model.operators.push_back(std::move(sum_op));
   bool modified;
   ASSERT_TRUE(ResolveConstantUnaryOperator().Run(&model, 0, &modified).ok());

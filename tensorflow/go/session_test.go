@@ -19,6 +19,7 @@ package tensorflow
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -71,6 +72,120 @@ func TestSessionRunNeg(t *testing.T) {
 				t.Error(err)
 			}
 		})
+	}
+}
+
+func TestMultipleInput(t *testing.T) {
+	// The inputs to the graph get sorted. This test checks that process works
+	// OK and that we still get the right output.
+	graph := NewGraph()
+
+	inputs := make([]Output, 20)
+	layer2 := make([]Output, len(inputs))
+	for i := range inputs {
+		in, err := Placeholder(graph, fmt.Sprintf("input%d", i), Int64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inputs[i] = in
+
+		factor, err := Const(graph, fmt.Sprintf("factor%d", i), int64(i+1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		l2, err := graph.AddOperation(OpSpec{
+			Type: "Mul",
+			Name: fmt.Sprintf("Mul%d", i),
+			Input: []Input{
+				in,
+				factor,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		layer2[i] = l2.Output(0)
+	}
+
+	fetch, err := graph.AddOperation(OpSpec{
+		Type: "AddN",
+		Input: []Input{
+			OutputList(layer2),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := NewSession(graph, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := session.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	feeds := make(map[Output]*Tensor, len(inputs))
+	for i, in := range inputs {
+		tensor, err := NewTensor(int64(i + 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		feeds[in] = tensor
+	}
+
+	output, err := session.Run(
+		feeds,
+		[]Output{
+			fetch.Output(0),
+		},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var exp int64
+	for i := range inputs {
+		exp += int64((i + 1) * (i + 1))
+	}
+	if v := output[0].Value().(int64); v != exp {
+		t.Fatalf("expected %d got %d", exp, v)
+	}
+}
+
+func TestInputOrderStable(t *testing.T) {
+	graph := NewGraph()
+
+	inputs := make([]Output, 20)
+	for i := range inputs {
+		in, err := Placeholder(graph, fmt.Sprintf("input%d", i), Int64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.Index = i
+		inputs[i] = in
+	}
+
+	makeArgs := func() *cRunArgs {
+		feeds := make(map[Output]*Tensor, len(inputs))
+		for i, in := range inputs {
+			tensor, err := NewTensor(int64(i + 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			feeds[in] = tensor
+		}
+
+		return newCRunArgs(feeds, nil, nil)
+	}
+	args1 := makeArgs()
+	args2 := makeArgs()
+
+	if !reflect.DeepEqual(args1.feeds, args2.feeds) {
+		t.Fatalf("order is not stable")
 	}
 }
 
@@ -261,8 +376,8 @@ func TestSessionConfig(t *testing.T) {
 	// tensorflow Python program:
 	/*
 	 import tensorflow
-	 c = tensorflow.ConfigProto()
-	 c.intra_op_parallelism_threads = 1
+	 c = tensorflow.compat.v1.ConfigProto()
+	 c.inter_op_parallelism_threads = 1
 	 print c.SerializeToString()
 	*/
 	graph := NewGraph()
@@ -281,6 +396,20 @@ func TestSessionConfig(t *testing.T) {
 	}
 	if output[0].Value().(int32) != 14 {
 		t.Fatalf("Got %v, want -1", output[0].Value())
+	}
+}
+
+func TestSessionConfigInvalid(t *testing.T) {
+	// SessionOptions.c() returns early when TF_SetConfig rejects Config, and
+	// has to free its C copy of Config there too (GitHub issue 129133).
+	graph := NewGraph()
+	opts := SessionOptions{Config: []byte("invalid config")}
+	_, err := NewSession(graph, &opts)
+	if err == nil {
+		t.Fatal("Expected error from NewSession with invalid config, got nil")
+	}
+	if got, want := err.Error(), "invalid SessionOptions.Config"; !strings.Contains(got, want) {
+		t.Errorf("Got error %q, want it to contain %q", got, want)
 	}
 }
 

@@ -20,9 +20,11 @@ limitations under the License.
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "absl/types/variant.h"
+#include "tensorflow/lite/delegates/gpu/common/access_type.h"
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
 #include "tensorflow/lite/delegates/gpu/common/types.h"
@@ -31,12 +33,6 @@ limitations under the License.
 namespace tflite {
 namespace gpu {
 namespace gl {
-
-enum class AccessType {
-  READ,
-  WRITE,
-  READ_WRITE,
-};
 
 using ObjectData = std::vector<uint8_t>;
 
@@ -51,7 +47,7 @@ enum class ObjectType : int {
   BUFFER = 2,
 };
 
-using ObjectSize = absl::variant<uint32_t, uint2, uint3>;
+using ObjectSize = std::variant<size_t, uint2, uint3>;
 
 // An object represents a reference to or pre-defined constant OpenGL Buffer or
 // Texture. NodeShader is supposed to set all fields but leave binding = 0
@@ -70,28 +66,27 @@ struct Object {
   // consists of 4 values.
   ObjectSize size;
 
-  absl::variant<ObjectData, ObjectRef> object;
+  std::variant<ObjectData, ObjectRef> object;
 };
 
 // @return true if object is a reference.
 inline bool IsRef(const Object& object) {
-  return !absl::get_if<ObjectData>(&object.object);
+  return !std::holds_alternative<ObjectData>(object.object);
 }
 
 inline ObjectRef GetRef(const Object& object) {
-  auto ref = absl::get_if<ObjectRef>(&object.object);
+  auto ref = std::get_if<ObjectRef>(&object.object);
   return ref ? *ref : kInvalidObjectRef;
 }
 
 inline const ObjectData* GetData(const Object& object) {
-  return absl::get_if<ObjectData>(&object.object);
+  return std::get_if<ObjectData>(&object.object);
 }
 
 inline size_t ByteSizeOf(const Object& object);
 
 // @return object that references an object created externally.
-template <typename SizeT>
-inline Object MakeObjectRef(ObjectRef unique_id, const SizeT& size,
+inline Object MakeObjectRef(ObjectRef unique_id, const ObjectSize& size,
                             AccessType access_type) {
   return Object{access_type, DataType::FLOAT32, ObjectType::UNKNOWN, 0,
                 size,        unique_id};
@@ -120,15 +115,15 @@ struct ObjectSizer {
 }  // namespace internal_object
 
 inline size_t NumElements(const ObjectSize& size) {
-  return absl::visit(internal_object::ObjectSizer{}, size);
+  return std::visit(internal_object::ObjectSizer{}, size);
 }
 
 inline size_t ByteSizeOf(const Object& object) {
   return SizeOf(object.data_type) * /* vec4 */ 4 * NumElements(object.size);
 }
 
-template <typename SizeT>
-Object MakeReadonlyObject(const SizeT& size, const std::vector<float>& data) {
+inline Object MakeReadonlyObject(const ObjectSize& size,
+                                 const std::vector<float>& data) {
   return Object{AccessType::READ,
                 DataType::FLOAT32,
                 ObjectType::UNKNOWN,
@@ -137,8 +132,8 @@ Object MakeReadonlyObject(const SizeT& size, const std::vector<float>& data) {
                 internal_object::ToBytesVector(data, 16)};
 }
 
-template <typename SizeT>
-Object MakeReadonlyTexture(const SizeT& size, const std::vector<float>& data) {
+inline Object MakeReadonlyTexture(const ObjectSize& size,
+                                  const std::vector<float>& data) {
   return Object{AccessType::READ,
                 DataType::FLOAT32,
                 ObjectType::TEXTURE,
@@ -147,8 +142,8 @@ Object MakeReadonlyTexture(const SizeT& size, const std::vector<float>& data) {
                 internal_object::ToBytesVector(data, 16)};
 }
 
-template <typename SizeT>
-Object MakeReadonlyBuffer(const SizeT& size, const std::vector<float>& data) {
+inline Object MakeReadonlyBuffer(const ObjectSize& size,
+                                 const std::vector<float>& data) {
   return Object{AccessType::READ,
                 DataType::FLOAT32,
                 ObjectType::BUFFER,
@@ -158,15 +153,18 @@ Object MakeReadonlyBuffer(const SizeT& size, const std::vector<float>& data) {
 }
 
 inline Object MakeReadonlyObject(const std::vector<float>& data) {
-  return MakeReadonlyObject(IntegralDivideRoundUp(data.size(), 4U), data);
+  return MakeReadonlyObject(
+      DivideRoundUp(static_cast<uint32_t>(data.size()), 4U), data);
 }
 
 inline Object MakeReadonlyTexture(const std::vector<float>& data) {
-  return MakeReadonlyTexture(IntegralDivideRoundUp(data.size(), 4U), data);
+  return MakeReadonlyTexture(
+      DivideRoundUp(static_cast<uint32_t>(data.size()), 4U), data);
 }
 
 inline Object MakeReadonlyBuffer(const std::vector<float>& data) {
-  return MakeReadonlyBuffer(IntegralDivideRoundUp(data.size(), 4U), data);
+  return MakeReadonlyBuffer(
+      DivideRoundUp(static_cast<uint32_t>(data.size()), 4U), data);
 }
 
 // TODO(akulik): find better place for functions below.
@@ -175,7 +173,7 @@ inline uint3 GetPHWC4Size(const BHWC& shape) {
   uint3 size;
   size.x = shape.w;
   size.y = shape.h;
-  size.z = shape.b * IntegralDivideRoundUp(shape.c, 4);
+  size.z = shape.b * DivideRoundUp(shape.c, 4);
   return size;
 }
 

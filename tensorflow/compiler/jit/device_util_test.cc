@@ -21,9 +21,9 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-Status PickDeviceHelper(bool allow_mixing_unknown_and_cpu,
-                        absl::Span<const absl::string_view> device_names,
-                        string* result) {
+absl::Status PickDeviceHelper(bool allow_mixing_unknown_and_cpu,
+                              absl::Span<const absl::string_view> device_names,
+                              std::string* result) {
   jit::DeviceInfoCache cache;
   jit::DeviceSet device_set;
   for (absl::string_view name : device_names) {
@@ -34,14 +34,14 @@ Status PickDeviceHelper(bool allow_mixing_unknown_and_cpu,
   TF_ASSIGN_OR_RETURN(
       jit::DeviceId result_id,
       PickDeviceForXla(cache, device_set, allow_mixing_unknown_and_cpu));
-  *result = string(cache.GetNameFor(result_id));
-  return Status::OK();
+  *result = std::string(cache.GetNameFor(result_id));
+  return absl::OkStatus();
 }
 
 void CheckPickDeviceResult(absl::string_view expected_result,
                            bool allow_mixing_unknown_and_cpu,
                            absl::Span<const absl::string_view> inputs) {
-  string result;
+  std::string result;
   TF_ASSERT_OK(PickDeviceHelper(allow_mixing_unknown_and_cpu, inputs, &result))
       << "inputs = [" << absl::StrJoin(inputs, ", ")
       << "], allow_mixing_unknown_and_cpu=" << allow_mixing_unknown_and_cpu
@@ -51,7 +51,7 @@ void CheckPickDeviceResult(absl::string_view expected_result,
 
 void CheckPickDeviceHasError(bool allow_mixing_unknown_and_cpu,
                              absl::Span<const absl::string_view> inputs) {
-  string result;
+  std::string result;
   EXPECT_FALSE(
       PickDeviceHelper(allow_mixing_unknown_and_cpu, inputs, &result).ok());
 }
@@ -65,8 +65,19 @@ const char* kCPU1 = "/job:localhost/replica:0/task:0/device:CPU:1";
 const char* kGPU1 = "/job:localhost/replica:0/task:0/device:GPU:1";
 const char* kXPU1 = "/job:localhost/replica:0/task:0/device:XPU:1";
 
+const char* kCPU0Partial = "/device:CPU:0";
+const char* kGPU0Partial = "/device:GPU:0";
+const char* kXPU0Partial = "/device:XPU:0";
+
 TEST(PickDeviceForXla, UniqueDevice) {
   CheckPickDeviceResult(kGPU0, false, {kGPU0, kGPU0});
+}
+
+TEST(PickDeviceForXla, MoreSpecificDevice) {
+  CheckPickDeviceResult(kCPU0, false, {kCPU0, kCPU0Partial});
+  CheckPickDeviceResult(kGPU0, false, {kGPU0, kGPU0Partial});
+  // Unknown devices do not support merging of full and partial specifications.
+  CheckPickDeviceHasError(false, {kXPU1, kXPU0Partial});
 }
 
 TEST(PickDeviceForXla, DeviceOrder) {
@@ -99,10 +110,10 @@ void SimpleRoundTripTestForDeviceSet(int num_devices) {
   jit::DeviceSet device_set;
   jit::DeviceInfoCache device_info_cache;
 
-  std::vector<string> expected_devices, actual_devices;
+  std::vector<std::string> expected_devices, actual_devices;
 
   for (int i = 0; i < num_devices; i++) {
-    string device_name =
+    std::string device_name =
         absl::StrCat("/job:localhost/replica:0/task:0/device:XPU:", i);
     TF_ASSERT_OK_AND_ASSIGN(jit::DeviceId device_id,
                             device_info_cache.GetIdFor(device_name));
@@ -111,7 +122,8 @@ void SimpleRoundTripTestForDeviceSet(int num_devices) {
   }
 
   device_set.ForEach([&](jit::DeviceId device_id) {
-    actual_devices.push_back(string(device_info_cache.GetNameFor(device_id)));
+    actual_devices.push_back(
+        std::string(device_info_cache.GetNameFor(device_id)));
     return true;
   });
 

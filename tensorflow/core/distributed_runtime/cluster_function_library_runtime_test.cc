@@ -12,12 +12,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+
 #include "tensorflow/core/distributed_runtime/cluster_function_library_runtime.h"
 
+#include <map>
+#include <memory>
+
+#include "absl/synchronization/notification.h"
 #include "tensorflow/core/common_runtime/function_testlib.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_channel.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_testlib.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_worker_cache.h"
+#include "tensorflow/core/distributed_runtime/worker_session.h"
 #include "tensorflow/core/framework/function_testlib.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
@@ -30,56 +36,82 @@ class ClusterFunctionLibraryRuntimeTest : public ::testing::Test {
  public:
   ClusterFunctionLibraryRuntimeTest() {
     SessionOptions options;
-    TF_CHECK_OK(test::TestCluster::MakeTestCluster(options, 2, &cluster_));
+    TF_CHECK_OK(test::TestCluster::MakeTestCluster(
+        test::TestClusterConfig().Options(options).Jobs(
+            {test::TestJob{"localhost", 2}}),
+        &cluster_));
     GrpcChannelSpec spec;
-    TF_CHECK_OK(spec.AddHostPortsJob("localhost", cluster_->targets()));
+
+    std::map<int, std::string> host_ports;
+    int i = 0;
+    for (const auto& target : cluster_->targets("localhost")) {
+      host_ports[i++] = target;
+    }
+
+    TF_CHECK_OK(spec.AddHostPortsJob("localhost", host_ports));
     ChannelCreationFunction channel_func =
         ConvertToChannelCreationFunction(NewHostPortGrpcChannel);
+    grpc_worker_env_.reset(CreateGrpcWorkerEnv());
+    std::shared_ptr<GrpcChannelCache> channel_cache(
+        NewGrpcChannelCache(spec, channel_func));
     std::unique_ptr<WorkerCacheInterface> worker_cache(
-        NewGrpcWorkerCache(std::shared_ptr<GrpcChannelCache>(
-            NewGrpcChannelCache(spec, channel_func))));
+        NewGrpcWorkerCache(channel_cache, grpc_worker_env_.get()));
 
-    worker_session_.reset(new WorkerSession(
+    worker_session_ = std::make_unique<WorkerSession>(
         "cluster_test_session", "/job:localhost/replica:0/task:0",
         std::move(worker_cache), std::unique_ptr<DeviceMgr>(),
-        std::unique_ptr<GraphMgr>(), nullptr));
+        std::unique_ptr<GraphMgr>(), nullptr,
+        [](WorkerSession* worker_session, bool called,
+           DeviceMgr* remote_device_mgr) { return nullptr; });
 
-    cluster_flr_.reset(new ClusterFunctionLibraryRuntime(worker_session_.get(),
-                                                         true, nullptr));
+    cluster_flr_ = std::make_unique<ClusterFunctionLibraryRuntime>(
+        worker_session_.get(), true, nullptr);
   }
 
-  Status ConstructFunctionGraphHelper(
+  absl::Status ConstructFunctionGraphHelper(
       const OpDef& sig, test::function::Attrs attrs,
-      const FunctionLibraryRuntime::InstantiateOptions& options, GraphDef* g,
-      std::vector<string>* send_keys, std::vector<string>* recv_keys) {
+      const FunctionLibraryRuntime::InstantiateOptions& options,
+      const FunctionLibraryDefinition& lib_def, GraphDef* g,
+      std::vector<std::string>* send_keys,
+      std::vector<std::string>* recv_keys) {
     return ClusterFunctionLibraryRuntime::ConstructFunctionGraph(
-        sig, attrs, options, g, send_keys, recv_keys);
+        sig, attrs, options, lib_def, g, send_keys, recv_keys);
   }
 
-  Status Instantiate(const string& function_name,
-                     const FunctionLibraryDefinition& lib_def,
-                     test::function::Attrs attrs,
-                     const FunctionLibraryRuntime::InstantiateOptions& options,
-                     FunctionLibraryRuntime::LocalHandle* local_handle) {
-    return cluster_flr_->Instantiate(function_name, lib_def, attrs, options,
-                                     local_handle);
+  void Instantiate(const std::string& function_name,
+                   const FunctionLibraryDefinition& lib_def,
+                   test::function::Attrs attrs,
+                   const FunctionLibraryRuntime::InstantiateOptions& options,
+                   FunctionLibraryRuntime::LocalHandle* local_handle,
+                   FunctionLibraryRuntime::DoneCallback done) {
+    cluster_flr_->Instantiate(function_name, lib_def, attrs, options,
+                              local_handle, done);
   }
 
-  Status InstantiateAndRun(
-      const string& function_name, const FunctionLibraryDefinition& lib_def,
-      test::function::Attrs attrs,
+  absl::Status InstantiateAndRun(
+      const std::string& function_name,
+      const FunctionLibraryDefinition& lib_def, test::function::Attrs attrs,
       const FunctionLibraryRuntime::InstantiateOptions& options,
       const std::vector<Tensor>& args, std::vector<Tensor*> rets) {
     FunctionLibraryRuntime::LocalHandle handle;
-    TF_RETURN_IF_ERROR(cluster_flr_->Instantiate(function_name, lib_def, attrs,
-                                                 options, &handle));
+    absl::Status status;
+    absl::Notification instantiate_done;
+    cluster_flr_->Instantiate(
+        function_name, lib_def, attrs, options, &handle,
+        [&status, &instantiate_done](const absl::Status& s) {
+          status = s;
+          instantiate_done.Notify();
+        });
+    instantiate_done.WaitForNotification();
+    if (!status.ok()) {
+      return status;
+    }
 
-    Notification done;
+    absl::Notification done;
     FunctionLibraryRuntime::Options opts;
     std::vector<Tensor> out;
-    Status status;
     cluster_flr_->Run(opts, handle, args, &out,
-                      [&status, &done](const Status& s) {
+                      [&status, &done](const absl::Status& s) {
                         status = s;
                         done.Notify();
                       });
@@ -92,23 +124,28 @@ class ClusterFunctionLibraryRuntimeTest : public ::testing::Test {
       *rets[i] = out[i];
     }
 
-    return Status::OK();
+    return absl::OkStatus();
   }
 
  protected:
   std::unique_ptr<test::TestCluster> cluster_;
   std::unique_ptr<WorkerSession> worker_session_;
   std::unique_ptr<ClusterFunctionLibraryRuntime> cluster_flr_;
+  std::unique_ptr<GrpcWorkerEnv> grpc_worker_env_;
 };
 
 TEST_F(ClusterFunctionLibraryRuntimeTest, ConstructFunctionGraph) {
   GraphDef actual;
-  std::vector<string> send_keys, recv_keys;
+  std::vector<std::string> send_keys, recv_keys;
+  FunctionDefLibrary proto;
+  *(proto.add_function()) = test::function::Swap();
+  FunctionLibraryDefinition lib_def(OpRegistry::Global(), proto);
+
   FunctionLibraryRuntime::InstantiateOptions instantiate_opts;
   instantiate_opts.target = "/job:a/replica:0/task:0/device:CPU:0";
-  TF_CHECK_OK(ConstructFunctionGraphHelper(test::function::Swap().signature(),
-                                           {{"T", DT_FLOAT}}, instantiate_opts,
-                                           &actual, &send_keys, &recv_keys));
+  TF_CHECK_OK(ConstructFunctionGraphHelper(
+      test::function::Swap().signature(), {{"T", DT_FLOAT}}, instantiate_opts,
+      lib_def, &actual, &send_keys, &recv_keys));
   GraphDef expected;
   protobuf::TextFormat::ParseFromString(R"(
 node {
@@ -194,9 +231,20 @@ node {
   }
 }
 node {
-  name: "Swap"
-  op: "Swap"
+  name: "Func/Swap/input/_0"
+  op: "Identity"
   input: "_recv_i0_0"
+  device: "/job:a/replica:0/task:0/device:CPU:0"
+  attr {
+    key: "T"
+    value {
+      type: DT_FLOAT
+    }
+  }
+}
+node {
+  name: "Func/Swap/input/_1"
+  op: "Identity"
   input: "_recv_i1_1"
   device: "/job:a/replica:0/task:0/device:CPU:0"
   attr {
@@ -205,17 +253,59 @@ node {
       type: DT_FLOAT
     }
   }
+}
+node {
+  name: "Swap/o0"
+  op: "Identity"
+  input: "Func/Swap/input/_1"
+  device: "/job:a/replica:0/task:0/device:CPU:0"
   attr {
-    key: "_target"
+    key: "T"
     value {
-      s: "/job:a/replica:0/task:0/device:CPU:0"
+      type: DT_FLOAT
+    }
+  }
+}
+node {
+  name: "Swap/o1"
+  op: "Identity"
+  input: "Func/Swap/input/_0"
+  device: "/job:a/replica:0/task:0/device:CPU:0"
+  attr {
+    key: "T"
+    value {
+      type: DT_FLOAT
+    }
+  }
+}
+node {
+  name: "Func/Swap/output/_2"
+  op: "Identity"
+  input: "Swap/o0"
+  device: "/job:a/replica:0/task:0/device:CPU:0"
+  attr {
+    key: "T"
+    value {
+      type: DT_FLOAT
+    }
+  }
+}
+node {
+  name: "Func/Swap/output/_3"
+  op: "Identity"
+  input: "Swap/o1"
+  device: "/job:a/replica:0/task:0/device:CPU:0"
+  attr {
+    key: "T"
+    value {
+      type: DT_FLOAT
     }
   }
 }
 node {
   name: "_send_o0_0"
   op: "_Send"
-  input: "Swap"
+  input: "Func/Swap/output/_2"
   device: "/job:a/replica:0/task:0/device:CPU:0"
   attr {
     key: "T"
@@ -257,7 +347,7 @@ node {
 node {
   name: "_send_o1_1"
   op: "_Send"
-  input: "Swap:1"
+  input: "Func/Swap/output/_3"
   device: "/job:a/replica:0/task:0/device:CPU:0"
   attr {
     key: "T"
@@ -313,10 +403,10 @@ TEST_F(ClusterFunctionLibraryRuntimeTest, DISABLED_InstantiateAndRun) {
   instantiate_opts.target = "/job:localhost/replica:0/task:1/cpu:0";
 
   Tensor y;
-  auto x = test::AsTensor<int32>({1, 2, 3, 4});
+  auto x = test::AsTensor<int32_t>({1, 2, 3, 4});
   TF_EXPECT_OK(InstantiateAndRun("XTimesTwoInt32", lib_def, {},
                                  instantiate_opts, {x}, {&y}));
-  test::ExpectTensorEqual<int32>(y, test::AsTensor<int32>({2, 4, 6, 8}));
+  test::ExpectTensorEqual<int32_t>(y, test::AsTensor<int32_t>({2, 4, 6, 8}));
 }
 
 TEST_F(ClusterFunctionLibraryRuntimeTest,

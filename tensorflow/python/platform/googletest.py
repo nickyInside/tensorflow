@@ -14,23 +14,19 @@
 # ==============================================================================
 
 """Imports absltest as a replacement for testing.pybase.googletest."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import atexit
 import os
 import sys
 import tempfile
 
 # go/tf-wildcard-import
-# pylint: disable=wildcard-import
+# pylint: disable=wildcard-import,redefined-builtin
+from absl import app
 from absl.testing.absltest import *
-# pylint: enable=wildcard-import
+# pylint: enable=wildcard-import,redefined-builtin
 
 from tensorflow.python.framework import errors
 from tensorflow.python.lib.io import file_io
-from tensorflow.python.platform import app
 from tensorflow.python.platform import benchmark
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.util import tf_decorator
@@ -62,7 +58,8 @@ def main(argv=None):  # pylint: disable=function-redefined
     if args is None:
       args = sys.argv
     return app.run(main=g_main, argv=args)
-  benchmark.benchmarks_main(true_main=main_wrapper)
+
+  benchmark.benchmarks_main(true_main=main_wrapper, argv=argv)
 
 
 def GetTempDir():
@@ -103,8 +100,12 @@ def test_src_dir_path(relative_path):
   Returns:
     An absolute path to the linked in runfiles.
   """
-  return os.path.join(os.environ['TEST_SRCDIR'],
-                      'org_tensorflow/tensorflow', relative_path)
+  return os.path.join(
+      os.environ['TEST_SRCDIR'],
+      os.environ['TEST_WORKSPACE'],
+      'tensorflow',
+      relative_path,
+  )
 
 
 def StatefulSessionAvailable():

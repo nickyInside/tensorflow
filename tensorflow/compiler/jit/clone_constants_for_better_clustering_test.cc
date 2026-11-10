@@ -18,6 +18,7 @@ limitations under the License.
 #include "tensorflow/cc/framework/ops.h"
 #include "tensorflow/cc/ops/array_ops.h"
 #include "tensorflow/cc/ops/const_op.h"
+#include "tensorflow/cc/ops/math_ops.h"
 #include "tensorflow/compiler/jit/node_matchers.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
@@ -27,9 +28,9 @@ namespace tensorflow {
 namespace {
 using ::tensorflow::testing::FindNodeByName;
 
-Status CloneConstantsForBetterClustering(const Scope& s,
-                                         std::unique_ptr<Graph>* result) {
-  auto graph = absl::make_unique<Graph>(OpRegistry::Global());
+absl::Status CloneConstantsForBetterClustering(const Scope& s,
+                                               std::unique_ptr<Graph>* result) {
+  auto graph = std::make_unique<Graph>(OpRegistry::Global());
   SessionOptions session_options;
   session_options.config.mutable_graph_options()
       ->mutable_optimizer_options()
@@ -54,13 +55,36 @@ Status CloneConstantsForBetterClustering(const Scope& s,
   CloneConstantsForBetterClusteringPass rewriter;
   TF_RETURN_IF_ERROR(rewriter.Run(options));
   *result = std::move(graph);
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 const char* kCPU = "/job:localhost/replica:0/task:0/device:CPU:0";
 const char* kGPU = "/job:localhost/replica:0/task:0/device:GPU:0";
 
-TEST(CloneConstantsForBetterClusteringTest, Basic) {
+TEST(CloneConstantsForBetterClusteringTest, ScalarConstantPlacedOnGpu) {
+  Scope root = Scope::NewRootScope().ExitOnError();
+  Scope on_gpu = root.WithAssignedDevice(kGPU).WithDevice(kGPU);
+
+  Output in = ops::Placeholder(on_gpu.WithOpName("in"), DT_FLOAT);
+  Output c = ops::Const(on_gpu.WithOpName("const"), 1.0f, {});
+  Output add1 = ops::AddV2(on_gpu.WithOpName("add1"), in, c);
+  Output add2 = ops::AddV2(on_gpu.WithOpName("add2"), add1, c);
+
+  std::unique_ptr<Graph> result;
+  TF_ASSERT_OK(CloneConstantsForBetterClustering(root, &result));
+
+  OutputTensor add1_operand;
+  TF_ASSERT_OK(
+      FindNodeByName(result.get(), "add1")->input_tensor(1, &add1_operand));
+
+  OutputTensor add2_operand;
+  TF_ASSERT_OK(
+      FindNodeByName(result.get(), "add2")->input_tensor(1, &add2_operand));
+
+  EXPECT_NE(add1_operand.node, add2_operand.node);
+}
+
+TEST(CloneConstantsForBetterClusteringTest, HostConstantPlacedOnCpu) {
   Scope root = Scope::NewRootScope().ExitOnError();
   Scope on_gpu = root.WithAssignedDevice(kGPU).WithDevice(kGPU);
   Scope on_cpu = root.WithAssignedDevice(kCPU).WithDevice(kCPU);
@@ -87,7 +111,7 @@ TEST(CloneConstantsForBetterClusteringTest, Basic) {
   EXPECT_NE(tr0_perm.node, tr1_perm.node);
 }
 
-TEST(CloneConstantsForBetterClusteringTest, DontCloneNonHostConstants) {
+TEST(CloneConstantsForBetterClusteringTest, HostConstantPlacedOnGpu) {
   Scope root = Scope::NewRootScope().ExitOnError();
   Scope on_gpu = root.WithAssignedDevice(kGPU).WithDevice(kGPU);
 
@@ -110,7 +134,39 @@ TEST(CloneConstantsForBetterClusteringTest, DontCloneNonHostConstants) {
   OutputTensor tr1_perm;
   TF_ASSERT_OK(FindNodeByName(result.get(), "tr1")->input_tensor(1, &tr1_perm));
 
-  EXPECT_EQ(tr0_perm.node, tr1_perm.node);
+  EXPECT_NE(tr0_perm.node, tr1_perm.node);
+}
+
+TEST(CloneConstantsForBetterClusteringTest, CloneSmallDeviceConstants) {
+  Scope root = Scope::NewRootScope().ExitOnError();
+  Scope on_gpu = root.WithAssignedDevice(kGPU).WithDevice(kGPU);
+
+  Output in0 = ops::Placeholder(on_gpu.WithOpName("in0"), DT_FLOAT);
+  Output in1 = ops::Placeholder(on_gpu.WithOpName("in1"), DT_FLOAT);
+
+  Output perm_f32 = ops::Const(on_gpu.WithOpName("perm"), {3.0, 1.0, 2.0, 0.0});
+  Output perm_int0 =
+      ops::Cast(on_gpu.WithOpName("perm_cast_0"), perm_f32, DT_INT32);
+  Output perm_int1 =
+      ops::Cast(on_gpu.WithOpName("perm_cast_1"), perm_f32, DT_INT32);
+
+  {
+    Output tr0 = ops::Transpose(on_gpu.WithOpName("tr0"), in0, perm_int0);
+    Output tr1 = ops::Transpose(on_gpu.WithOpName("tr1"), in1, perm_int1);
+  }
+
+  std::unique_ptr<Graph> result;
+  TF_ASSERT_OK(CloneConstantsForBetterClustering(root, &result));
+
+  OutputTensor tr0_perm;
+  TF_ASSERT_OK(
+      FindNodeByName(result.get(), "perm_cast_0")->input_tensor(0, &tr0_perm));
+
+  OutputTensor tr1_perm;
+  TF_ASSERT_OK(
+      FindNodeByName(result.get(), "perm_cast_1")->input_tensor(0, &tr1_perm));
+
+  EXPECT_NE(tr0_perm.node, tr1_perm.node);
 }
 
 TEST(CloneConstantsForBetterClusteringTest, DontCloneLargeConstants) {

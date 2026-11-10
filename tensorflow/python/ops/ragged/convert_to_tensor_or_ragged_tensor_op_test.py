@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for ragged_tensor.convert_to_tensor_or_ragged."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 import numpy as np
 
@@ -26,13 +22,12 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops.ragged import ragged_factory_ops
 from tensorflow.python.ops.ragged import ragged_tensor
-from tensorflow.python.ops.ragged import ragged_test_util
 from tensorflow.python.platform import googletest
 
 
 @test_util.run_all_in_graph_and_eager_modes
-class RaggedConvertToTensorOrRaggedTensorTest(
-    ragged_test_util.RaggedTensorTestCase, parameterized.TestCase):
+class RaggedConvertToTensorOrRaggedTensorTest(test_util.TensorFlowTestCase,
+                                              parameterized.TestCase):
 
   #=============================================================================
   # Tests where the 'value' param is a RaggedTensor
@@ -46,8 +41,10 @@ class RaggedConvertToTensorOrRaggedTensorTest(
       dict(
           pylist=[np.array([1, 2]), np.array([3])],
           preferred_dtype=dtypes.string),
-      dict(pylist=np.array([[1, 2], [3]]), preferred_dtype=dtypes.float32),
-      dict(pylist=np.array([[1, 2], [3]]), preferred_dtype=dtypes.string),
+      dict(pylist=np.array([[1, 2], [3]], dtype=object),
+           preferred_dtype=dtypes.float32),
+      dict(pylist=np.array([[1, 2], [3]], dtype=object),
+           preferred_dtype=dtypes.string),
       dict(
           pylist=[np.array([[1], np.array([2])]), [np.array([3])]],
           preferred_dtype=dtypes.float32),
@@ -83,7 +80,7 @@ class RaggedConvertToTensorOrRaggedTensorTest(
                                    preferred_dtype=None):
     rt = ragged_factory_ops.constant(pylist)
 
-    with self.assertRaisesRegexp(ValueError, message):
+    with self.assertRaisesRegex(ValueError, message):
       ragged_tensor.convert_to_tensor_or_ragged_tensor(rt, dtype,
                                                        preferred_dtype)
 
@@ -126,21 +123,22 @@ class RaggedConvertToTensorOrRaggedTensorTest(
         value, dtype, preferred_dtype)
     self.assertEqual(value.ragged_rank, converted.ragged_rank)
     self.assertEqual(dtypes.as_dtype(expected_dtype), converted.dtype)
-    self.assertEqual(value.to_list(), self.eval_to_list(converted))
+    self.assertAllEqual(value, converted)
 
   @parameterized.parameters([
       dict(
           value=ragged_factory_ops.constant_value([['a', 'b'], ['c']],
                                                   dtype=str),
           dtype=dtypes.int32,
-          message=r"invalid literal for int\(\) with base 10: 'a'"),
+          message=(r"invalid literal for int\(\) with base 10: "
+                   r"('a'|np.str_\('a'\))")),
   ])
   def testConvertRaggedTensorValueError(self,
                                         value,
                                         message,
                                         dtype=None,
                                         preferred_dtype=None):
-    with self.assertRaisesRegexp(ValueError, message):
+    with self.assertRaisesRegex(ValueError, message):
       ragged_tensor.convert_to_tensor_or_ragged_tensor(value, dtype,
                                                        preferred_dtype)
 
@@ -176,7 +174,7 @@ class RaggedConvertToTensorOrRaggedTensorTest(
                              dtype=None,
                              preferred_dtype=None):
     tensor = constant_op.constant(pylist)
-    with self.assertRaisesRegexp(ValueError, message):
+    with self.assertRaisesRegex(ValueError, message):
       ragged_tensor.convert_to_tensor_or_ragged_tensor(tensor, dtype,
                                                        preferred_dtype)
 
@@ -219,14 +217,15 @@ class RaggedConvertToTensorOrRaggedTensorTest(
       dict(
           value=np.array([['a', 'b'], ['c', 'd']], dtype=str),
           dtype=dtypes.int32,
-          message=r"invalid literal for int\(\) with base 10: 'a'"),
+          message=(r"invalid literal for int\(\) with base 10: "
+                   r"('a'|np.str_\('a'\))")),
   ])
   def testConvertNumpyArrayError(self,
                                  value,
                                  message,
                                  dtype=None,
                                  preferred_dtype=None):
-    with self.assertRaisesRegexp(ValueError, message):
+    with self.assertRaisesRegex(ValueError, message):
       ragged_tensor.convert_to_tensor_or_ragged_tensor(value, dtype,
                                                        preferred_dtype)
 

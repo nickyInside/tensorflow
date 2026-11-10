@@ -13,41 +13,42 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/tools/graph_transforms/fold_constants_lib.h"
-
 #include "tensorflow/core/common_runtime/constant_folding.h"
-#include "tensorflow/core/graph/graph_constructor.h"
+#include "tensorflow/core/common_runtime/graph_constructor.h"
 #include "tensorflow/core/graph/node_builder.h"
 #include "tensorflow/core/graph/subgraph.h"
 #include "tensorflow/core/platform/init_main.h"
 #include "tensorflow/core/public/session.h"
+#include "tensorflow/tools/graph_transforms/fold_constants_lib.h"
 #include "tensorflow/tools/graph_transforms/transform_utils.h"
 
 namespace tensorflow {
 namespace graph_transforms {
 
-Status RenameAttribute(const GraphDef& input_graph_def,
-                       const TransformFuncContext& context,
-                       GraphDef* output_graph_def) {
+absl::Status RenameAttribute(const GraphDef& input_graph_def,
+                             const TransformFuncContext& context,
+                             GraphDef* output_graph_def) {
   if (!context.params.count("old_attribute_name") ||
       (context.params.at("old_attribute_name").size() != 1) ||
       !context.params.count("new_attribute_name") ||
       (context.params.at("new_attribute_name").size() != 1)) {
-    return errors::InvalidArgument(
+    return absl::InvalidArgumentError(
         "rename_attribute expects exactly one 'old_attribute_name' and one "
         "'new_attribute_name' argument, e.g. "
         "rename_attribute(old_attribute_name=foo, new_attribute_name=bar)");
   }
 
-  string op_name;
+  std::string op_name;
   if (context.params.count("op_name")) {
     op_name = context.params.at("op_name")[0];
   } else {
     op_name = "*";
   }
 
-  const string old_attribute_name = context.params.at("old_attribute_name")[0];
-  const string new_attribute_name = context.params.at("new_attribute_name")[0];
+  const std::string old_attribute_name =
+      context.params.at("old_attribute_name")[0];
+  const std::string new_attribute_name =
+      context.params.at("new_attribute_name")[0];
   output_graph_def->Clear();
   for (const NodeDef& node : input_graph_def.node()) {
     NodeDef* new_node = output_graph_def->mutable_node()->Add();
@@ -60,7 +61,7 @@ Status RenameAttribute(const GraphDef& input_graph_def,
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 REGISTER_GRAPH_TRANSFORM("rename_attribute", RenameAttribute);

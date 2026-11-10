@@ -16,9 +16,7 @@
 """Tests for decode_proto op."""
 
 # Python3 preparedness imports.
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+import itertools
 
 from absl.testing import parameterized
 import numpy as np
@@ -134,7 +132,10 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
           dtypes.uint64:
               'uint64_value',
       }
-      tf_field_name = tf_type_to_primitive_value_field.get(field.dtype)
+      if field.name in ['enum_value', 'enum_value_with_default']:
+        tf_field_name = 'enum_value'
+      else:
+        tf_field_name = tf_type_to_primitive_value_field.get(field.dtype)
       if tf_field_name is None:
         self.fail('Unhandled tensorflow type %d' % field.dtype)
 
@@ -239,11 +240,10 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
     # format being the same for packed and unpacked fields, and reparse the
     # test message using the packed version of the proto.
     packed_batch = [
-        # Note: float_format='.17g' is necessary to ensure preservation of
-        # doubles and floats in text format.
         text_format.Parse(
-            text_format.MessageToString(value, float_format='.17g'),
-            test_example_pb2.PackedTestValue()).SerializeToString()
+            text_format.MessageToString(value),
+            test_example_pb2.PackedTestValue(),
+        ).SerializeToString()
         for value in case.values
     ]
 
@@ -258,12 +258,7 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
 
   @parameterized.named_parameters(*test_base.ProtoOpTestBase.named_parameters())
   def testText(self, case):
-    # Note: float_format='.17g' is necessary to ensure preservation of
-    # doubles and floats in text format.
-    text_batch = [
-        text_format.MessageToString(
-            value, float_format='.17g') for value in case.values
-    ]
+    text_batch = [text_format.MessageToString(value) for value in case.values]
 
     self._runDecodeProtoTests(
         case.fields,
@@ -296,7 +291,7 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
     field_names = ['sizes']
     field_types = [dtypes.int32]
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         errors.DataLossError, 'Unable to parse binary protobuf'
         '|Failed to consume entire buffer'):
       self.evaluate(
@@ -306,3 +301,79 @@ class DecodeProtoOpTestBase(test_base.ProtoOpTestBase, parameterized.TestCase):
               field_names=field_names,
               output_types=field_types,
               sanitize=sanitize))
+
+  def testUnexpectedType(self):
+    with self.assertRaisesRegex(
+        errors.InvalidArgumentError,
+        'Unexpected output type.*int64 to DT_STRING'):
+      msg = test_example_pb2.TestValue(
+          int64_value_with_default=3
+      ).SerializeToString()
+      msg_type = 'tensorflow.contrib.proto.TestValue'
+      field_names = ['int64_value_with_default']
+      field_types = [dtypes.string]
+      self.evaluate(
+          self._decode_module.decode_proto(
+              msg,
+              message_type=msg_type,
+              field_names=field_names,
+              output_types=field_types,
+          )
+      )
+
+  def testOutOfOrderRepeated(self):
+    fragments = [
+        test_example_pb2.TestValue(double_value=[1.0]).SerializeToString(),
+        test_example_pb2.TestValue(
+            message_value=[test_example_pb2.PrimitiveValue(
+                string_value='abc')]).SerializeToString(),
+        test_example_pb2.TestValue(
+            message_value=[test_example_pb2.PrimitiveValue(
+                string_value='def')]).SerializeToString()
+    ]
+    all_fields_to_parse = ['double_value', 'message_value']
+    field_types = {
+        'double_value': dtypes.double,
+        'message_value': dtypes.string,
+    }
+    # Test against all 3! permutations of fragments, and for each permutation
+    # test parsing all possible combination of 2 fields.
+    for indices in itertools.permutations(range(len(fragments))):
+      proto = b''.join(fragments[i] for i in indices)
+      for i in indices:
+        if i == 1:
+          expected_message_values = [
+              test_example_pb2.PrimitiveValue(
+                  string_value='abc').SerializeToString(),
+              test_example_pb2.PrimitiveValue(
+                  string_value='def').SerializeToString(),
+          ]
+          break
+        if i == 2:
+          expected_message_values = [
+              test_example_pb2.PrimitiveValue(
+                  string_value='def').SerializeToString(),
+              test_example_pb2.PrimitiveValue(
+                  string_value='abc').SerializeToString(),
+          ]
+          break
+
+      expected_field_values = {
+          'double_value': [[1.0]],
+          'message_value': [expected_message_values],
+      }
+
+      for num_fields_to_parse in range(len(all_fields_to_parse)):
+        for comb in itertools.combinations(
+            all_fields_to_parse, num_fields_to_parse):
+          parsed_values = self.evaluate(
+              self._decode_module.decode_proto(
+                  [proto],
+                  message_type='tensorflow.contrib.proto.TestValue',
+                  field_names=comb,
+                  output_types=[field_types[f] for f in comb],
+                  sanitize=False)).values
+          self.assertLen(parsed_values, len(comb))
+          for field_name, parsed in zip(comb, parsed_values):
+            self.assertAllEqual(parsed, expected_field_values[field_name],
+                                'perm: {}, comb: {}'.format(indices, comb))

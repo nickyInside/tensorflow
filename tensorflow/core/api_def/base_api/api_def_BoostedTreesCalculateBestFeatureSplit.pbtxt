@@ -1,5 +1,6 @@
 op {
   graph_op_name: "BoostedTreesCalculateBestFeatureSplit"
+  deprecation_message: "Boosted Trees kernels in TF are deprecated. Please use TensorFlow Decision Forests instead (https://github.com/tensorflow/decision-forests)"
   visibility: HIDDEN
   in_arg {
     name: "node_id_range"
@@ -35,7 +36,7 @@ END
   in_arg {
     name: "min_node_weight"
     description: <<END
-mininum avg of hessians in a node before required for the node to be considered for splitting.
+minimum avg of hessians in a node before required for the node to be considered for splitting.
 END
   }
   out_arg {
@@ -78,6 +79,7 @@ END
     name: "split_with_default_directions"
     description: <<END
 A Rank 1 tensors indicating the which direction to go if data is missing. See above for details like shapes and sizes.
+Inequality with default left returns 0, inequality with default right returns 1, equality with default right returns 2.
 END
   }
   attr {

@@ -12,159 +12,418 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#include "tensorflow/lite/c/builtin_op_data.h"
-#include "tensorflow/lite/c/c_api_internal.h"
+#include "tensorflow/lite/kernels/internal/reference/quantize.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/kernels/internal/optimized/optimized_ops.h"
+#include "tensorflow/lite/kernels/internal/portable_tensor_utils.h"
+#include "tensorflow/lite/kernels/internal/quantization_util.h"
+#include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
+#include "tensorflow/lite/kernels/internal/reference/requantize.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
+#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
+#include "tensorflow/lite/kernels/internal/tensor_utils.h"
+#include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
-#include "tensorflow/lite/kernels/op_macros.h"
 
 namespace tflite {
 namespace ops {
 namespace builtin {
 namespace quantize {
 
+// This file has two implementation of Quantize.
+enum KernelType {
+  kReference,
+  kGenericOptimized,
+};
+
 struct OpData {
   int32_t output_multiplier;
   int output_shift;
 };
 
+inline bool IsQuantizedPerChannel(const TfLiteTensor* input) {
+  if (input->quantization.type == kTfLiteAffineQuantization &&
+      input->quantization.params) {
+    auto* quant_params =
+        reinterpret_cast<TfLiteAffineQuantization*>(input->quantization.params);
+    return (quant_params->scale && quant_params->scale->size > 1);
+  }
+  return false;
+}
+
+namespace {
+template <KernelType kernel_type, typename output_type>
+static inline void AffineQuantize(const tflite::QuantizationParams& op_params,
+                                  const RuntimeShape& input_shape,
+                                  const float* input_data,
+                                  const RuntimeShape& output_shape,
+                                  output_type* output_data) {
+  if (kernel_type == kReference) {
+    reference_ops::AffineQuantize(op_params, input_shape, input_data,
+                                  output_shape, output_data);
+  } else {
+    optimized_ops::AffineQuantize(op_params, input_shape, input_data,
+                                  output_shape, output_data);
+  }
+}
+
+template <KernelType kernel_type, typename input_type, typename output_type>
+static inline void Requantize(const input_type* input_data, int32_t size,
+                              int32_t effective_scale_multiplier,
+                              int32_t effective_scale_shift,
+                              int32_t input_zeropoint, int32_t output_zeropoint,
+                              output_type* output_data) {
+  if (kernel_type == kReference) {
+    reference_ops::Requantize(input_data, size, effective_scale_multiplier,
+                              effective_scale_shift, input_zeropoint,
+                              output_zeropoint, output_data);
+  } else {
+    optimized_ops::Requantize(input_data, size, effective_scale_multiplier,
+                              effective_scale_shift, input_zeropoint,
+                              output_zeropoint, output_data);
+  }
+}
+
+void AffineQuantizeToInt4(const tflite::QuantizationParams& op_params,
+                          const RuntimeShape& input_shape,
+                          const float* input_data,
+                          const RuntimeShape& output_shape,
+                          int8_t* output_data) {
+  const int32_t zero_point = op_params.zero_point;
+  const double scale = op_params.scale;
+  const int flat_size = MatchingFlatSize(input_shape, output_shape);
+  // Signed int4 has range [-8, 7]. Narrow range ([-7, 7]) is not needed here
+  // since we will unpack int4 to int8 for computation
+  constexpr int32_t min_val = -8;
+  constexpr int32_t max_val = 7;
+  std::vector<int8_t> quantized_buffer(flat_size);
+  for (int i = 0; i < flat_size; i++) {
+    const float val = input_data[i];
+    int32_t unclamped =
+        static_cast<int32_t>(TfLiteRound(val / static_cast<float>(scale))) +
+        zero_point;
+    int32_t clamped = std::min(std::max(unclamped, min_val), max_val);
+    quantized_buffer[i] = clamped;
+  }
+  tensor_utils::PackInt8IntoDenseInt(quantized_buffer.data(), flat_size,
+                                     /*bit_width=*/4, output_data);
+}
+
+void AffineQuantizeToUInt4(const tflite::QuantizationParams& op_params,
+                           const RuntimeShape& input_shape,
+                           const float* input_data,
+                           const RuntimeShape& output_shape,
+                           int8_t* output_data) {
+  const int32_t zero_point = op_params.zero_point;
+  const double scale = op_params.scale;
+  const int flat_size = MatchingFlatSize(input_shape, output_shape);
+  // Unsigned int4 has range [0, 15].
+  constexpr int32_t min_val = 0;
+  constexpr int32_t max_val = 15;
+  std::vector<int8_t> quantized_buffer(flat_size);
+  for (int i = 0; i < flat_size; i++) {
+    const float val = input_data[i];
+    int32_t unclamped =
+        static_cast<int32_t>(TfLiteRound(val / static_cast<float>(scale))) +
+        zero_point;
+    int32_t clamped = std::min(std::max(unclamped, min_val), max_val);
+    quantized_buffer[i] = clamped;
+  }
+  tensor_utils::PackInt8IntoDenseInt(quantized_buffer.data(), flat_size,
+                                     /*bit_width=*/4, output_data);
+}
+
+void ReportError(TfLiteContext* context, TfLiteType input_type,
+                 TfLiteType output_type) {
+  TF_LITE_KERNEL_LOG(
+      context, "Input type %s with Output type %s is not currently supported.",
+      TfLiteTypeGetName(input_type), TfLiteTypeGetName(output_type));
+}
+}  // namespace
+
 void* Init(TfLiteContext* context, const char* buffer, size_t length) {
-  auto* data = new OpData;
-  return data;
+  return new OpData;
 }
 
 void Free(TfLiteContext* context, void* buffer) {
-  delete reinterpret_cast<OpData*>(buffer);
+  delete static_cast<OpData*>(buffer);
 }
 
-struct OpContext {
-  OpContext(TfLiteContext* context, TfLiteNode* node) {
-    input = GetInput(context, node, 0);
-    output = GetOutput(context, node, 0);
-  }
-  const TfLiteTensor* input;
-  TfLiteTensor* output;
-};
-
 TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
-  OpData* data = reinterpret_cast<OpData*>(node->user_data);
+  OpData* data = static_cast<OpData*>(node->user_data);
   TF_LITE_ENSURE_EQ(context, NumInputs(node), 1);
   TF_LITE_ENSURE_EQ(context, NumOutputs(node), 1);
 
-  OpContext op_context(context, node);
+  const TfLiteTensor* input;
+  TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, 0, &input));
+  TfLiteTensor* output;
+  TF_LITE_ENSURE_OK(context, GetOutputSafe(context, node, 0, &output));
 
-  TF_LITE_ENSURE(context, op_context.output->type == kTfLiteUInt8 ||
-                              op_context.output->type == kTfLiteInt8);
-
-  // TODO(b/128934713): Add support for fixed-point per-channel quantization.
-  // Currently this only support affine per-layer quantization.
-  TF_LITE_ENSURE_EQ(context, op_context.output->quantization.type,
+  // Currently this only support affine quantization.
+  TF_LITE_ENSURE_EQ(context, output->quantization.type,
                     kTfLiteAffineQuantization);
-  const auto* affine_quantization = reinterpret_cast<TfLiteAffineQuantization*>(
-      op_context.output->quantization.params);
-  TF_LITE_ENSURE(context, affine_quantization);
-  TF_LITE_ENSURE(context, affine_quantization->scale);
-  TF_LITE_ENSURE(context, affine_quantization->scale->size == 1);
 
-  // For requantize use case.
-  const bool is_requantize = (op_context.input->type == kTfLiteUInt8 ||
-                              op_context.input->type == kTfLiteInt8) &&
-                             (op_context.output->type == kTfLiteUInt8 ||
-                              op_context.output->type == kTfLiteInt8);
-  if (is_requantize) {
+  if (input->type == kTfLiteFloat32) {
+    // Quantize use case.
+    TF_LITE_ENSURE(context, output->type == kTfLiteUInt8 ||
+                                output->type == kTfLiteInt8 ||
+                                output->type == kTfLiteInt16 ||
+                                output->type == kTfLiteInt4 ||
+                                output->type == kTfLiteUInt4);
+  } else {
+    // Requantize use case.
+    if (input->type == kTfLiteInt16) {
+      TF_LITE_ENSURE(context, output->type == kTfLiteInt8 ||
+                                  output->type == kTfLiteInt16 ||
+                                  output->type == kTfLiteInt32);
+    } else if (input->type == kTfLiteInt32) {
+      TF_LITE_ENSURE(
+          context, output->type == kTfLiteInt8 || output->type == kTfLiteInt16);
+    } else {
+      TF_LITE_ENSURE(context,
+                     input->type == kTfLiteInt8 || input->type == kTfLiteUInt8);
+      TF_LITE_ENSURE(context, output->type == kTfLiteUInt8 ||
+                                  output->type == kTfLiteInt8 ||
+                                  output->type == kTfLiteInt16);
+    }
     const double effective_output_scale =
-        static_cast<double>(op_context.input->params.scale) /
-        static_cast<double>(op_context.output->params.scale);
+        static_cast<double>(input->params.scale) /
+        static_cast<double>(output->params.scale);
     QuantizeMultiplier(effective_output_scale, &data->output_multiplier,
                        &data->output_shift);
   }
 
-  return context->ResizeTensor(context, op_context.output,
-                               TfLiteIntArrayCopy(op_context.input->dims));
+  if (input->type == kTfLiteInt16 && output->type == kTfLiteInt16) {
+    TF_LITE_ENSURE_EQ(context, input->params.zero_point, 0);
+    TF_LITE_ENSURE_EQ(context, output->params.zero_point, 0);
+  }
+
+  return context->ResizeTensor(context, output,
+                               TfLiteIntArrayCopy(input->dims));
 }
 
+template <KernelType kernel_type>
 TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
-  OpData* data = reinterpret_cast<OpData*>(node->user_data);
+  OpData* data = static_cast<OpData*>(node->user_data);
 
-  TfLiteTensor* input = &context->tensors[node->inputs->data[0]];
-  TfLiteTensor* output = &context->tensors[node->outputs->data[0]];
+  const TfLiteTensor* input;
+  TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, 0, &input));
+  TfLiteTensor* output;
+  TF_LITE_ENSURE_OK(context, GetOutputSafe(context, node, 0, &output));
+
+  const RuntimeShape input_shape = GetTensorShape(input);
+  const RuntimeShape output_shape = GetTensorShape(output);
 
   switch (input->type) {
     case kTfLiteFloat32: {
-      // Float to int8, uint8.
-      tflite::QuantizationParams op_params;
-      op_params.zero_point = output->params.zero_point;
-      op_params.scale = output->params.scale;
-      if (output->type == kTfLiteInt8) {
-        optimized_ops::AffineQuantize(
-            op_params, GetTensorShape(input), GetTensorData<float>(input),
-            GetTensorShape(output), GetTensorData<int8_t>(output));
-      } else if (output->type == kTfLiteUInt8) {
-        optimized_ops::AffineQuantize(
-            op_params, GetTensorShape(input), GetTensorData<float>(input),
-            GetTensorShape(output), GetTensorData<uint8_t>(output));
+      // Float to int8, uint8, int16.
+      const float* input_data = GetTensorData<float>(input);
+
+      if (IsQuantizedPerChannel(output)) {
+        // Per-channel quantization: one scale and zero point for each channel.
+        const auto* quantization_params =
+            reinterpret_cast<const TfLiteAffineQuantization*>(
+                output->quantization.params);
+        PerChannelQuantizationParams per_channel_op_params;
+        per_channel_op_params.quantized_dimension =
+            quantization_params->quantized_dimension;
+        per_channel_op_params.scale = quantization_params->scale->data;
+        std::vector<int> zero_points;
+        if (quantization_params->zero_point->size ==
+            quantization_params->scale->size) {
+          per_channel_op_params.zero_point =
+              quantization_params->zero_point->data;
+        } else {
+          zero_points.resize(quantization_params->scale->size,
+                             quantization_params->zero_point->data[0]);
+          per_channel_op_params.zero_point = zero_points.data();
+        }
+
+        switch (output->type) {
+          case kTfLiteInt8:
+            reference_ops::PerChannelQuantize(
+                per_channel_op_params, input_shape, input_data, output_shape,
+                GetTensorData<int8_t>(output));
+            return kTfLiteOk;
+          case kTfLiteUInt8:
+            reference_ops::PerChannelQuantize(
+                per_channel_op_params, input_shape, input_data, output_shape,
+                GetTensorData<uint8_t>(output));
+            return kTfLiteOk;
+          case kTfLiteInt16:
+            reference_ops::PerChannelQuantize(
+                per_channel_op_params, input_shape, input_data, output_shape,
+                GetTensorData<int16_t>(output));
+            return kTfLiteOk;
+          default:
+            ReportError(context, input->type, output->type);
+            return kTfLiteError;
+        }
       } else {
-        context->ReportError(
-            context,
-            "Input type %d with Output type %d is not currently supported.",
-            input->type, output->type);
-        return kTfLiteError;
+        // Per-node quantization: single scale and zero point for all channels.
+        tflite::QuantizationParams op_params;
+        op_params.zero_point = output->params.zero_point;
+        op_params.scale = output->params.scale;
+
+        switch (output->type) {
+          case kTfLiteInt4: {
+            AffineQuantizeToInt4(op_params, input_shape, input_data,
+                                 output_shape, GetTensorData<int8_t>(output));
+            return kTfLiteOk;
+          }
+          case kTfLiteUInt4: {
+            AffineQuantizeToUInt4(op_params, input_shape, input_data,
+                                  output_shape, GetTensorData<int8_t>(output));
+            return kTfLiteOk;
+          }
+          case kTfLiteInt8:
+            AffineQuantize<kernel_type>(op_params, input_shape, input_data,
+                                        output_shape,
+                                        GetTensorData<int8_t>(output));
+            return kTfLiteOk;
+          case kTfLiteUInt8:
+            AffineQuantize<kernel_type>(op_params, input_shape, input_data,
+                                        output_shape,
+                                        GetTensorData<uint8_t>(output));
+            return kTfLiteOk;
+          case kTfLiteInt16:
+            AffineQuantize<kernel_type>(op_params, input_shape, input_data,
+                                        output_shape,
+                                        GetTensorData<int16_t>(output));
+            return kTfLiteOk;
+          default:
+            ReportError(context, input->type, output->type);
+            return kTfLiteError;
+        }
       }
-    } break;
+    }
+    // This case is not supported by the converter or other TFLite tools. The
+    // only use case is for applications that take quantized int32 inference
+    // inputs.
+    case kTfLiteInt32: {
+      // int32 to int8 or int16.
+      switch (output->type) {
+        case kTfLiteInt8:
+          Requantize<kernel_type>(GetTensorData<int32_t>(input),
+                                  MatchingFlatSize(input_shape, output_shape),
+                                  data->output_multiplier, data->output_shift,
+                                  input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int8_t>(output));
+          return kTfLiteOk;
+        case kTfLiteInt16:
+          Requantize<kernel_type>(GetTensorData<int32_t>(input),
+                                  MatchingFlatSize(input_shape, output_shape),
+                                  data->output_multiplier, data->output_shift,
+                                  input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int16_t>(output));
+          return kTfLiteOk;
+        default:
+          ReportError(context, input->type, output->type);
+          return kTfLiteError;
+      }
+    }
+    case kTfLiteInt16: {
+      // int16 to int8 or int16.
+      switch (output->type) {
+        case kTfLiteInt8:
+          Requantize<kernel_type>(GetTensorData<int16_t>(input),
+                                  MatchingFlatSize(input_shape, output_shape),
+                                  data->output_multiplier, data->output_shift,
+                                  input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int8_t>(output));
+          return kTfLiteOk;
+        case kTfLiteInt16:
+          Requantize<kernel_type>(GetTensorData<int16_t>(input),
+                                  MatchingFlatSize(input_shape, output_shape),
+                                  data->output_multiplier, data->output_shift,
+                                  input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int16_t>(output));
+          return kTfLiteOk;
+        case kTfLiteInt32:
+          // This case is not supported by the converter or other TFLite tools.
+          // The only use case is for applications that take quantized int32
+          // inference outputs.
+          Requantize<kernel_type>(GetTensorData<int16_t>(input),
+                                  MatchingFlatSize(input_shape, output_shape),
+                                  data->output_multiplier, data->output_shift,
+                                  input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int32_t>(output));
+          return kTfLiteOk;
+        default:
+          ReportError(context, input->type, output->type);
+          return kTfLiteError;
+      }
+    }
     case kTfLiteInt8: {
       // int8 to int8, uint8.
-      const int32_t size =
-          MatchingFlatSize(GetTensorShape(input), GetTensorShape(output));
-      if (output->type == kTfLiteInt8) {
-        reference_ops::Requantize<int8_t, int8_t>(
-            GetTensorData<int8_t>(input), size, data->output_multiplier,
-            data->output_shift, input->params.zero_point,
-            output->params.zero_point, GetTensorData<int8_t>(output));
-      } else if (output->type == kTfLiteUInt8) {
-        reference_ops::Requantize<int8_t, uint8_t>(
-            GetTensorData<int8_t>(input), size, data->output_multiplier,
-            data->output_shift, input->params.zero_point,
-            output->params.zero_point, GetTensorData<uint8_t>(output));
-      } else {
-        context->ReportError(
-            context,
-            "Input type %d with Output type %d is not currently supported.",
-            input->type, output->type);
-        return kTfLiteError;
+      const int32_t size = MatchingFlatSize(input_shape, output_shape);
+      const int8_t* input_data = GetTensorData<int8_t>(input);
+      switch (output->type) {
+        case kTfLiteInt8:
+          Requantize<kernel_type>(input_data, size, data->output_multiplier,
+                                  data->output_shift, input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int8_t>(output));
+          return kTfLiteOk;
+        case kTfLiteUInt8:
+          Requantize<kernel_type>(input_data, size, data->output_multiplier,
+                                  data->output_shift, input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<uint8_t>(output));
+          return kTfLiteOk;
+        case kTfLiteInt16:
+          Requantize<kernel_type>(input_data, size, data->output_multiplier,
+                                  data->output_shift, input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int16_t>(output));
+          return kTfLiteOk;
+        default:
+          ReportError(context, input->type, output->type);
+          return kTfLiteError;
       }
-    } break;
+    }
     case kTfLiteUInt8: {
       // uint8 to int8, uint8.
-      const int32_t size =
-          MatchingFlatSize(GetTensorShape(input), GetTensorShape(output));
-      if (output->type == kTfLiteInt8) {
-        reference_ops::Requantize<uint8_t, int8_t>(
-            GetTensorData<uint8_t>(input), size, data->output_multiplier,
-            data->output_shift, input->params.zero_point,
-            output->params.zero_point, GetTensorData<int8_t>(output));
-      } else if (output->type == kTfLiteUInt8) {
-        reference_ops::Requantize<uint8_t, uint8_t>(
-            GetTensorData<uint8_t>(input), size, data->output_multiplier,
-            data->output_shift, input->params.zero_point,
-            output->params.zero_point, GetTensorData<uint8_t>(output));
-      } else {
-        context->ReportError(
-            context,
-            "Input type %d with Output type %d is not currently supported.",
-            input->type, output->type);
-        return kTfLiteError;
+      const int32_t size = MatchingFlatSize(input_shape, output_shape);
+      const uint8_t* input_data = GetTensorData<uint8_t>(input);
+      switch (output->type) {
+        case kTfLiteInt8:
+          Requantize<kernel_type>(input_data, size, data->output_multiplier,
+                                  data->output_shift, input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int8_t>(output));
+          return kTfLiteOk;
+        case kTfLiteUInt8:
+          Requantize<kernel_type>(input_data, size, data->output_multiplier,
+                                  data->output_shift, input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<uint8_t>(output));
+          return kTfLiteOk;
+        case kTfLiteInt16:
+          Requantize<kernel_type>(input_data, size, data->output_multiplier,
+                                  data->output_shift, input->params.zero_point,
+                                  output->params.zero_point,
+                                  GetTensorData<int16_t>(output));
+          return kTfLiteOk;
+        default:
+          ReportError(context, input->type, output->type);
+          return kTfLiteError;
       }
-    } break;
+    }
     default:
-      context->ReportError(
-          context,
-          "Input type %d with Output type %d is not currently supported.",
-          input->type, output->type);
+      ReportError(context, input->type, output->type);
       return kTfLiteError;
   }
-
-  return kTfLiteOk;
 }
 
 }  // namespace quantize
@@ -178,7 +437,15 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
 // scale and zero point.
 TfLiteRegistration* Register_QUANTIZE_OPT() {
   static TfLiteRegistration r = {quantize::Init, quantize::Free,
-                                 quantize::Prepare, quantize::Eval};
+                                 quantize::Prepare,
+                                 quantize::Eval<quantize::kGenericOptimized>};
+  return &r;
+}
+
+TfLiteRegistration* Register_QUANTIZE_REF() {
+  static TfLiteRegistration r = {quantize::Init, quantize::Free,
+                                 quantize::Prepare,
+                                 quantize::Eval<quantize::kReference>};
   return &r;
 }
 

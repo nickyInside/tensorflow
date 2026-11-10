@@ -17,85 +17,45 @@ limitations under the License.
 #define TENSORFLOW_CORE_COMMON_RUNTIME_GPU_GPU_BFC_ALLOCATOR_H_
 
 #include <memory>
+#include <optional>
 #include <string>
-#include <unordered_map>
-#include <vector>
 
-#include "tensorflow/core/common_runtime/allocator_retry.h"
-#include "tensorflow/core/common_runtime/bfc_allocator.h"
-#include "tensorflow/core/common_runtime/gpu/gpu_id.h"
-#include "tensorflow/core/platform/stream_executor.h"
-#include "tensorflow/core/platform/thread_annotations.h"
-#include "tensorflow/core/platform/types.h"
-#include "tensorflow/core/protobuf/config.pb.h"
+#include "xla/tsl/framework/allocator.h"
+#include "xla/tsl/framework/bfc_allocator.h"
+#include "xla/tsl/platform/macros.h"
 
 namespace tensorflow {
 
-// Suballocator for GPU memory.
-class GPUMemAllocator : public SubAllocator {
- public:
-  // 'platform_gpu_id' refers to the ID of the GPU device within
-  // the process and must reference a valid ID in the process.
-  // Note: stream_exec cannot be null.
-  explicit GPUMemAllocator(se::StreamExecutor* stream_exec,
-                           PlatformGpuId gpu_id, bool use_unified_memory,
-                           const std::vector<Visitor>& alloc_visitors,
-                           const std::vector<Visitor>& free_visitors)
-      : SubAllocator(alloc_visitors, free_visitors),
-        stream_exec_(stream_exec),
-        gpu_id_(gpu_id),
-        use_unified_memory_(use_unified_memory) {
-    CHECK(stream_exec_ != nullptr);
-  }
-  ~GPUMemAllocator() override {}
-
-  void* Alloc(size_t alignment, size_t num_bytes) override {
-    void* ptr = nullptr;
-    if (num_bytes > 0) {
-      if (use_unified_memory_) {
-        ptr = stream_exec_->UnifiedMemoryAllocate(num_bytes);
-      } else {
-        ptr = stream_exec_->AllocateArray<char>(num_bytes).opaque();
-      }
-      VisitAlloc(ptr, gpu_id_.value(), num_bytes);
-    }
-    return ptr;
-  }
-
-  void Free(void* ptr, size_t num_bytes) override {
-    if (ptr != nullptr) {
-      VisitFree(ptr, gpu_id_.value(), num_bytes);
-      if (use_unified_memory_) {
-        stream_exec_->UnifiedMemoryDeallocate(ptr);
-      } else {
-        se::DeviceMemoryBase gpu_ptr(ptr);
-        stream_exec_->Deallocate(&gpu_ptr);
-      }
-    }
-  }
-
- private:
-  se::StreamExecutor* stream_exec_;  // not owned, non-null
-  const PlatformGpuId gpu_id_;
-  const bool use_unified_memory_ = false;
-
-  TF_DISALLOW_COPY_AND_ASSIGN(GPUMemAllocator);
-};
-
 // A GPU memory allocator that implements a 'best-fit with coalescing'
 // algorithm.
-class GPUBFCAllocator : public BFCAllocator {
+class GPUBFCAllocator : public tsl::BFCAllocator {
  public:
-  GPUBFCAllocator(GPUMemAllocator* sub_allocator, size_t total_memory,
-                  const string& name);
-  GPUBFCAllocator(GPUMemAllocator* sub_allocator, size_t total_memory,
-                  const GPUOptions& gpu_options, const string& name);
-  ~GPUBFCAllocator() override {}
+  // See BFCAllocator::Options.
+  struct Options {
+    // Overridden by TF_FORCE_GPU_ALLOW_GROWTH if that envvar is set.
+    bool allow_growth = false;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(GPUBFCAllocator);
+    // If nullopt, defaults to TF_ENABLE_GPU_GARBAGE_COLLECTION, or true if that
+    // envvar is not present.
+    //
+    // Note:
+    //
+    //  - BFCAllocator defaults garbage_collection to false, not true.
+    //  - this is not the same override behavior as TF_FORCE_GPU_ALLOW_GROWTH.
+    std::optional<bool> garbage_collection;
 
- private:
-  static bool GetAllowGrowthValue(const GPUOptions& gpu_options);
+    double fragmentation_fraction = 0;
+    bool allow_retry_on_failure = true;
+  };
+
+  GPUBFCAllocator(std::unique_ptr<tsl::SubAllocator> sub_allocator,
+                  size_t total_memory, const std::string& name,
+                  const Options& opts);
+
+  ~GPUBFCAllocator() override = default;
+
+  GPUBFCAllocator(const GPUBFCAllocator&) = delete;
+  void operator=(const GPUBFCAllocator&) = delete;
 };
 
 }  // namespace tensorflow

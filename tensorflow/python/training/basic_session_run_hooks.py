@@ -12,17 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Some common SessionRunHook classes."""
+"""Some common SessionRunHook classes.
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+Note that the symbols that are exported to v1 tf.train namespace are also
+exported to v2 in tf.estimator namespace. See
+https://github.com/tensorflow/estimator/blob/master/tensorflow_estimator/python/estimator/hooks/basic_session_run_hooks.py
+"""
 
 import os
 import time
 
 import numpy as np
-import six
 
 from tensorflow.core.framework.summary_pb2 import Summary
 from tensorflow.core.protobuf import config_pb2
@@ -46,7 +46,7 @@ _HOOKS = "hooks"
 _STEPS_PER_RUN_VAR = "steps_per_run"
 
 
-class _HookTimer(object):
+class _HookTimer:
   """Base timer for determining when Hooks should trigger.
 
   Should not be instantiated directly.
@@ -84,7 +84,11 @@ class _HookTimer(object):
 
 @tf_export(v1=["train.SecondOrStepTimer"])
 class SecondOrStepTimer(_HookTimer):
-  """Timer that triggers at most once every N seconds or once every N steps."""
+  """Timer that triggers at most once every N seconds or once every N steps.
+
+  This symbol is also exported to v2 in tf.estimator namespace. See
+  https://github.com/tensorflow/estimator/blob/master/tensorflow_estimator/python/estimator/hooks/basic_session_run_hooks.py
+  """
 
   def __init__(self, every_secs=None, every_steps=None):
     self.reset()
@@ -174,6 +178,14 @@ class LoggingTensorHook(session_run_hook.SessionRunHook):
 
   Note that if `at_end` is True, `tensors` should not include any tensor
   whose evaluation produces a side effect such as consuming additional inputs.
+
+  @compatibility(TF2)
+  Please check this [notebook][notebook] on how to migrate the API to TF2.
+
+  [notebook]:https://github.com/tensorflow/docs/blob/master/site/en/guide/migrate/logging_stop_hook.ipynb
+
+  @end_compatibility
+
   """
 
   def __init__(self,
@@ -379,7 +391,15 @@ class _MultiStepStopAtStepHook(session_run_hook.SessionRunHook):
 
 @tf_export(v1=["train.StopAtStepHook"])
 class StopAtStepHook(session_run_hook.SessionRunHook):
-  """Hook that requests stop at a specified step."""
+  """Hook that requests stop at a specified step.
+
+  @compatibility(TF2)
+  Please check this [notebook][notebook] on how to migrate the API to TF2.
+
+  [notebook]:https://github.com/tensorflow/docs/blob/master/site/en/guide/migrate/logging_stop_hook.ipynb
+
+  @end_compatibility
+  """
 
   def __init__(self, num_steps=None, last_step=None):
     """Initializes a `StopAtStepHook`.
@@ -434,7 +454,7 @@ class StopAtStepHook(session_run_hook.SessionRunHook):
 
 
 @tf_export(v1=["train.CheckpointSaverListener"])
-class CheckpointSaverListener(object):
+class CheckpointSaverListener:
   """Interface for listeners that take action before or after checkpoint save.
 
   `CheckpointSaverListener` triggers only in steps when `CheckpointSaverHook` is
@@ -511,7 +531,8 @@ class CheckpointSaverHook(session_run_hook.SessionRunHook):
                saver=None,
                checkpoint_basename="model.ckpt",
                scaffold=None,
-               listeners=None):
+               listeners=None,
+               save_graph_def=True):
     """Initializes a `CheckpointSaverHook`.
 
     Args:
@@ -524,6 +545,10 @@ class CheckpointSaverHook(session_run_hook.SessionRunHook):
       listeners: List of `CheckpointSaverListener` subclass instances. Used for
         callbacks that run immediately before or after this hook saves the
         checkpoint.
+      save_graph_def: Whether to save the GraphDef and MetaGraphDef to
+        `checkpoint_dir`. The GraphDef is saved after the session is created as
+        `graph.pbtxt`. MetaGraphDefs are saved out for every checkpoint as
+        `model.ckpt-*.meta`.
 
     Raises:
       ValueError: One of `save_steps` or `save_secs` should be set.
@@ -539,7 +564,11 @@ class CheckpointSaverHook(session_run_hook.SessionRunHook):
     self._timer = SecondOrStepTimer(
         every_secs=save_secs, every_steps=save_steps)
     self._listeners = listeners or []
-    self._steps_per_run = 1
+    # Set sufficiently high default that it never skips checking the actual
+    # global step counter -- unless the user overrides it with the right value
+    # for the steps_per_run.
+    self._steps_per_run = 1000000
+    self._save_graph_def = save_graph_def
 
   def _set_steps_per_run(self, steps_per_run):
     self._steps_per_run = steps_per_run
@@ -555,12 +584,13 @@ class CheckpointSaverHook(session_run_hook.SessionRunHook):
 
   def after_create_session(self, session, coord):
     global_step = session.run(self._global_step_tensor)
-    # We do write graph and saver_def at the first call of before_run.
-    # We cannot do this in begin, since we let other hooks to change graph and
-    # add variables in begin. Graph is finalized after all begin calls.
-    training_util.write_graph(
-        ops.get_default_graph().as_graph_def(add_shapes=True),
-        self._checkpoint_dir, "graph.pbtxt")
+    if self._save_graph_def:
+      # We do write graph and saver_def at the first call of before_run.
+      # We cannot do this in begin, since we let other hooks to change graph and
+      # add variables in begin. Graph is finalized after all begin calls.
+      training_util.write_graph(
+          ops.get_default_graph().as_graph_def(add_shapes=True),
+          self._checkpoint_dir, "graph.pbtxt")
     saver_def = self._get_saver().saver_def if self._get_saver() else None
     graph = ops.get_default_graph()
     meta_graph_def = meta_graph.create_meta_graph_def(
@@ -594,17 +624,20 @@ class CheckpointSaverHook(session_run_hook.SessionRunHook):
 
   def _save(self, session, step):
     """Saves the latest checkpoint, returns should_stop."""
-    logging.info("Saving checkpoints for %d into %s.", step, self._save_path)
-
+    logging.info("Calling checkpoint listeners before saving checkpoint %d...",
+                 step)
     for l in self._listeners:
       l.before_save(session, step)
 
-    self._get_saver().save(session, self._save_path, global_step=step)
+    logging.info("Saving checkpoints for %d into %s.", step, self._save_path)
+    self._get_saver().save(session, self._save_path, global_step=step,
+                           write_meta_graph=self._save_graph_def)
     self._summary_writer.add_session_log(
         SessionLog(
             status=SessionLog.CHECKPOINT, checkpoint_path=self._save_path),
         step)
-
+    logging.info("Calling checkpoint listeners after saving checkpoint %d...",
+                 step)
     should_stop = False
     for l in self._listeners:
       if l.after_save(session, step):
@@ -786,6 +819,7 @@ class SummarySaverHook(session_run_hook.SessionRunHook):
 
     Raises:
       ValueError: Exactly one of scaffold or summary_op should be set.
+      ValueError: If both output_dir and summary_writer are `None`.
     """
     if ((scaffold is None and summary_op is None) or
         (scaffold is not None and summary_op is not None)):
@@ -797,7 +831,10 @@ class SummarySaverHook(session_run_hook.SessionRunHook):
     self._scaffold = scaffold
     self._timer = SecondOrStepTimer(
         every_secs=save_secs, every_steps=save_steps)
-    # TODO(mdan): Throw an error if output_dir and summary_writer are None.
+    if output_dir is None and summary_writer is None:
+      raise ValueError(
+          "At least one of output_dir or summary_writer must be provided."
+      )
 
   def begin(self):
     if self._summary_writer is None and self._output_dir:
@@ -984,7 +1021,7 @@ class ProfilerHook(session_run_hook.SessionRunHook):
   Trace format.
 
   For more information see:
-  https://github.com/catapult-project/catapult/blob/master/tracing/README.md
+  https://chromium.googlesource.com/catapult/+/refs/heads/main/tracing/README.md
   """
 
   def __init__(self,
@@ -1064,7 +1101,7 @@ class ProfilerHook(session_run_hook.SessionRunHook):
 def _as_graph_element(obj):
   """Retrieves Graph element."""
   graph = ops.get_default_graph()
-  if not isinstance(obj, six.string_types):
+  if not isinstance(obj, str):
     if not hasattr(obj, "graph") or obj.graph != graph:
       raise ValueError("Passed %s should have graph attribute that is equal "
                        "to current graph %s." % (obj, graph))

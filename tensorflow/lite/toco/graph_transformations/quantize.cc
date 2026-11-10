@@ -14,64 +14,109 @@ limitations under the License.
 ==============================================================================*/
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <limits>
 #include <memory>
+#include <set>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/lite/toco/graph_transformations/graph_transformations.h"
 #include "tensorflow/lite/toco/graph_transformations/quantization_util.h"
 #include "tensorflow/lite/toco/model.h"
 #include "tensorflow/lite/toco/model_flags.pb.h"
+#include "tensorflow/lite/toco/toco_types.h"
 #include "tensorflow/lite/toco/tooling_util.h"
-#include "tensorflow/core/platform/logging.h"
 
 namespace toco {
 
 namespace {
 
-bool SupportsQuantization(const Operator& op) {
+bool SupportsQuantization(Model* model, const Operator& op) {
   auto type = op.type;
   if (type == OperatorType::kUnsupported) {
     auto* unsupported = static_cast<const TensorFlowUnsupportedOperator*>(&op);
     return unsupported->quantized;
   }
-  return type == OperatorType::kConv || type == OperatorType::kDepthwiseConv ||
-         type == OperatorType::kFullyConnected ||
-         type == OperatorType::kConcatenation ||
-         type == OperatorType::kL2Normalization || type == OperatorType::kAdd ||
-         type == OperatorType::kAveragePool || type == OperatorType::kMaxPool ||
-         type == OperatorType::kMinimum || type == OperatorType::kMaximum ||
-         type == OperatorType::kLogistic || type == OperatorType::kSoftmax ||
-         type == OperatorType::kLogSoftmax || type == OperatorType::kSlice ||
-         type == OperatorType::kResizeBilinear ||
-         type == OperatorType::kSplit || type == OperatorType::kSub ||
-         type == OperatorType::kSqueeze || type == OperatorType::kPad ||
-         type == OperatorType::kPadV2 || type == OperatorType::kReshape ||
-         type == OperatorType::kTanh || type == OperatorType::kMul ||
-         type == OperatorType::kBatchToSpaceND || type == OperatorType::kSum ||
-         type == OperatorType::kSpaceToBatchND ||
-         type == OperatorType::kSpaceToDepth ||
-         type == OperatorType::kStridedSlice ||
-         type == OperatorType::kDepthToSpace ||
-         type == OperatorType::kLstmCell || type == OperatorType::kGather ||
-         type == OperatorType::kTranspose || type == OperatorType::kMean ||
-         type == OperatorType::kEqual || type == OperatorType::kGreater ||
-         type == OperatorType::kGreaterEqual || type == OperatorType::kLess ||
-         type == OperatorType::kLessEqual || type == OperatorType::kSelect ||
-         type == OperatorType::kArgMax || type == OperatorType::kRelu ||
-         type == OperatorType::kRelu1 || type == OperatorType::kRelu6 ||
-         type == OperatorType::kLeakyRelu || type == OperatorType::kShape ||
-         type == OperatorType::kExpandDims || type == OperatorType::kPack ||
-         type == OperatorType::kTopK_V2 ||
-         type == OperatorType::kRandomUniform ||
-         type == OperatorType::kResizeNearestNeighbor ||
-         type == OperatorType::kPRelu || type == OperatorType::kReduceMax ||
-         type == OperatorType::kReduceMin ||
-         type == OperatorType::kTransposeConv ||
-         type == OperatorType::kMatrixSetDiag ||
-         type == OperatorType::kMatrixDiag;
+  if (op.type == OperatorType::kRange) {
+    const auto& array = model->GetArray(op.outputs[0]);
+    return (array.data_type != ArrayDataType::kFloat &&
+            array.data_type != ArrayDataType::kFloat16);
+  }
+  // Please add op in alpha-beta sequence.
+  static const std::set<OperatorType> supported_ops{
+      OperatorType::kAdd,
+      OperatorType::kArgMax,
+      OperatorType::kArgMin,
+      OperatorType::kAveragePool,
+      OperatorType::kBatchToSpaceND,
+      OperatorType::kConcatenation,
+      OperatorType::kConv,
+      OperatorType::kDepthToSpace,
+      OperatorType::kDepthwiseConv,
+      OperatorType::kDiv,
+      OperatorType::kEqual,
+      OperatorType::kExpandDims,
+      OperatorType::kFullyConnected,
+      OperatorType::kGather,
+      OperatorType::kGreater,
+      OperatorType::kGreaterEqual,
+      OperatorType::kHardSwish,
+      OperatorType::kL2Normalization,
+      OperatorType::kLeakyRelu,
+      OperatorType::kLess,
+      OperatorType::kLessEqual,
+      OperatorType::kLogistic,
+      OperatorType::kLogSoftmax,
+      OperatorType::kLstmCell,
+      OperatorType::kMatrixDiag,
+      OperatorType::kMatrixSetDiag,
+      OperatorType::kMaximum,
+      OperatorType::kMaxPool,
+      OperatorType::kMean,
+      OperatorType::kMinimum,
+      OperatorType::kMirrorPad,
+      OperatorType::kMul,
+      OperatorType::kPack,
+      OperatorType::kPad,
+      OperatorType::kPadV2,
+      OperatorType::kPRelu,
+      OperatorType::kRandomUniform,
+      OperatorType::kReduceMax,
+      OperatorType::kReduceMin,
+      OperatorType::kRelu,
+      OperatorType::kRelu1,
+      OperatorType::kRelu6,
+      OperatorType::kReshape,
+      OperatorType::kResizeBilinear,
+      OperatorType::kResizeNearestNeighbor,
+      OperatorType::kSelect,
+      OperatorType::kShape,
+      OperatorType::kSlice,
+      OperatorType::kSoftmax,
+      OperatorType::kSpaceToBatchND,
+      OperatorType::kSpaceToDepth,
+      OperatorType::kSparseToDense,
+      OperatorType::kSplit,
+      OperatorType::kSplitV,
+      OperatorType::kSqueeze,
+      OperatorType::kStridedSlice,
+      OperatorType::kSub,
+      OperatorType::kSum,
+      OperatorType::kTanh,
+      OperatorType::kTopK_V2,
+      OperatorType::kTranspose,
+      OperatorType::kTransposeConv,
+      OperatorType::kUnpack,
+  };
+  return supported_ops.find(type) != supported_ops.end();
 }
 
 // The quantized op allows output arrays of type float using
@@ -84,7 +129,7 @@ bool SupportOutputTypeFloatInQuantizedOp(const Operator& op) {
   }
   return false;
 }
-const MinMax& GetOrComputeMinMax(Model* model, const string& array_name) {
+const MinMax& GetOrComputeMinMax(Model* model, const std::string& array_name) {
   auto& array = model->GetArray(array_name);
   // Normally we should have a MinMax recorded on this Array,
   // so we just use it.
@@ -153,9 +198,9 @@ const MinMax& GetOrComputeMinMax(Model* model, const string& array_name) {
 }
 
 struct QuantizationPoints {
-  int64 min_value;
-  int64 max_value;
-  int64 central_value;
+  int64_t min_value;
+  int64_t max_value;
+  int64_t central_value;
 };
 
 template <ArrayDataType A>
@@ -204,6 +249,13 @@ bool ChooseQuantizationForOperatorInput(
     if (input_index == 2) {
       is_bias_vector = true;
       activations_input_index = 0;
+      weights_input_index = 1;
+    }
+  }
+  if (op.type == OperatorType::kTransposeConv) {
+    if (input_index == 3) {
+      is_bias_vector = true;
+      activations_input_index = 2;
       weights_input_index = 1;
     }
   }
@@ -367,7 +419,11 @@ bool ChooseQuantizationForOperatorOutput(
       op.type == OperatorType::kSpaceToDepth ||
       op.type == OperatorType::kReshape || op.type == OperatorType::kSplit ||
       op.type == OperatorType::kRelu || op.type == OperatorType::kRelu1 ||
-      op.type == OperatorType::kRelu6 || op.type == OperatorType::kPRelu) {
+      op.type == OperatorType::kRelu6 || op.type == OperatorType::kPRelu ||
+      op.type == OperatorType::kUnpack || op.type == OperatorType::kSlice ||
+      op.type == OperatorType::kStridedSlice ||
+      op.type == OperatorType::kAveragePool ||
+      op.type == OperatorType::kMaxPool) {
     int data_input_index = 0;
     if (op.type == OperatorType::kSplit) {
       data_input_index = 1;
@@ -447,8 +503,7 @@ void FixMinMaxPostQuantization(GraphTransformation* transformation,
 
 }  // namespace
 
-::tensorflow::Status Quantize::Run(Model* model, std::size_t op_index,
-                                   bool* modified) {
+absl::Status Quantize::Run(Model* model, std::size_t op_index, bool* modified) {
   *modified = false;
   // Our general "quantization" graph transformation consists in replacing
   //   QuantizedInputArrays[] ->
@@ -470,7 +525,7 @@ void FixMinMaxPostQuantization(GraphTransformation* transformation,
   auto& op = *model->operators[op_index];
   if (op.type == OperatorType::kDequantize ||
       op.type == OperatorType::kFakeQuant) {
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
 
   // Our assumption here is that the input arrays are already quantized -
@@ -492,13 +547,13 @@ void FixMinMaxPostQuantization(GraphTransformation* transformation,
           << "Input array " << input << " is missing quantization_params";
     }
   }
-  if (!SupportsQuantization(op)) {
-    return tensorflow::errors::InvalidArgument(
+  if (!SupportsQuantization(model, op)) {
+    return absl::InvalidArgumentError(absl::StrCat(
         "Unimplemented: this graph contains an operator of type ",
         HelpfulOperatorTypeName(op),
         " for which the quantized form is not yet implemented. Sorry, and "
         "patches welcome (that's a relatively fun patch to write, mostly "
-        "providing the actual quantized arithmetic code for this op).");
+        "providing the actual quantized arithmetic code for this op)."));
   }
 
   for (const auto& input : op.inputs) {
@@ -507,7 +562,7 @@ void FixMinMaxPostQuantization(GraphTransformation* transformation,
       if (!array.minmax && !array.buffer) {
         LOG(WARNING) << "Can't quantize input array " << input
                      << " because it lacks min/max info";
-        return ::tensorflow::Status::OK();
+        return absl::OkStatus();
       }
       const auto* other_op = GetOpWithOutput(*model, input);
       if (other_op && other_op->type != OperatorType::kDequantize) {
@@ -517,7 +572,7 @@ void FixMinMaxPostQuantization(GraphTransformation* transformation,
             "which means that we should yield and let other ops "
             "get quantized first",
             LogName(op), input);
-        return ::tensorflow::Status::OK();
+        return absl::OkStatus();
       }
     }
   }
@@ -546,10 +601,7 @@ void FixMinMaxPostQuantization(GraphTransformation* transformation,
           // Check if the output of that Dequantize op was not used by any
           // other operator. We will then erase that Dequantize op.
           if (!CountOpsWithInput(*model, dequantize_op->outputs[0])) {
-            if (IsDiscardableArray(*model, dequantize_op->outputs[0])) {
-              // Usual case: we can just discard the dequantize output.
-              model->EraseArray(dequantize_op->outputs[0]);
-            } else {
+            if (!IsDiscardableArray(*model, dequantize_op->outputs[0])) {
               // The dequantize output is not discardable. Special care needed.
               // If any of the model's output_arrays was pointing to the
               // Dequantize op's output, let it point to the Dequantize op's
@@ -583,13 +635,12 @@ void FixMinMaxPostQuantization(GraphTransformation* transformation,
                         model->flags.output_arrays(i),
                         dequantize_op->inputs[0]);
                     model->flags.set_output_arrays(i, dequantize_op->inputs[0]);
-                    model->EraseArray(dequantize_op->outputs[0]);
                   }
                   break;
                 }
               }
             }
-            model->operators.erase(dequantize_it);
+            DeleteOpAndArrays(model, dequantize_op);
           }
           changed = true;
         } else {
@@ -683,7 +734,7 @@ void FixMinMaxPostQuantization(GraphTransformation* transformation,
   }
 
   *modified = changed;
-  return ::tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace toco

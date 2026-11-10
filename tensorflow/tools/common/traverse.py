@@ -14,10 +14,6 @@
 # ==============================================================================
 """Traversing Python modules and classes."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import enum
 import sys
 
@@ -43,9 +39,16 @@ def _traverse_internal(root, visit, stack, path):
           children.append(enum_member)
       children = sorted(children)
   except ImportError:
-    # On some Python installations, some modules do not support enumerating
-    # members (six in particular), leading to import errors.
-    children = []
+    # Children could be missing for one of two reasons:
+    # 1. On some Python installations, some modules do not support enumerating
+    #    members, leading to import errors.
+    # 2. Children are lazy-loaded.
+    try:
+      children = []
+      for child_name in root.__all__:
+        children.append((child_name, getattr(root, child_name)))
+    except AttributeError:
+      children = []
 
   new_stack = stack + [root]
   visit(path, root, children)
@@ -90,7 +93,7 @@ def traverse(root, visit):
   is already in the stack.
 
   Traversing system modules can take a long time, it is advisable to pass a
-  `visit` callable which blacklists such modules.
+  `visit` callable which denylists such modules.
 
   Args:
     root: A python object with which to start the traversal.

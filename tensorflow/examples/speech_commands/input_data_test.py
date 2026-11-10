@@ -14,16 +14,13 @@
 # ==============================================================================
 """Tests for data input for speech commands."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
+import io
 import os
+import tarfile
 
 import numpy as np
 import tensorflow as tf
 
-from tensorflow.contrib.framework.python.ops import audio_ops as contrib_audio
 from tensorflow.examples.speech_commands import input_data
 from tensorflow.examples.speech_commands import models
 from tensorflow.python.framework import test_util
@@ -33,9 +30,9 @@ from tensorflow.python.platform import test
 class InputDataTest(test.TestCase):
 
   def _getWavData(self):
-    with self.cached_session() as sess:
+    with self.cached_session():
       sample_data = tf.zeros([32000, 2])
-      wav_encoder = contrib_audio.encode_wav(sample_data, 16000)
+      wav_encoder = tf.audio.encode_wav(sample_data, 16000)
       wav_data = self.evaluate(wav_encoder)
     return wav_data
 
@@ -84,6 +81,28 @@ class InputDataTest(test.TestCase):
       self.assertEqual(10, len(result_data))
       self.assertEqual(10, len(result_labels))
 
+  def testExtractRejectsMemberEscapingDestination(self):
+    tmp_dir = self.get_temp_dir()
+    archive_path = os.path.join(tmp_dir, "evil.tar.gz")
+    with tarfile.open(archive_path, "w:gz") as archive:
+      info = tarfile.TarInfo("d")
+      info.type = tarfile.SYMTYPE
+      info.linkname = "."
+      archive.addfile(info)
+      data = b"x"
+      info = tarfile.TarInfo("d/../../escaped.txt")
+      info.size = len(data)
+      archive.addfile(info, io.BytesIO(data))
+    dest_dir = os.path.join(tmp_dir, "dest")
+    with self.assertRaisesRegex(
+        (ValueError, tarfile.TarError),
+        r"unsafe archive member|outside the destination",
+    ):
+      input_data.AudioProcessor.maybe_download_and_extract_dataset(
+          None, "file://" + archive_path, dest_dir
+      )
+    self.assertFalse(os.path.exists(os.path.join(tmp_dir, "escaped.txt")))
+
   def testPrepareWordsList(self):
     words_list = ["a", "b"]
     self.assertGreater(
@@ -105,27 +124,27 @@ class InputDataTest(test.TestCase):
                                                 ["a", "b"], 10, 10,
                                                 self._model_settings(), tmp_dir)
     self.assertLess(0, audio_processor.set_size("training"))
-    self.assertTrue("training" in audio_processor.data_index)
-    self.assertTrue("validation" in audio_processor.data_index)
-    self.assertTrue("testing" in audio_processor.data_index)
-    self.assertEquals(input_data.UNKNOWN_WORD_INDEX,
-                      audio_processor.word_to_index["c"])
+    self.assertIn("training", audio_processor.data_index)
+    self.assertIn("validation", audio_processor.data_index)
+    self.assertIn("testing", audio_processor.data_index)
+    self.assertEqual(input_data.UNKNOWN_WORD_INDEX,
+                     audio_processor.word_to_index["c"])
 
   def testPrepareDataIndexEmpty(self):
     tmp_dir = self.get_temp_dir()
     self._saveWavFolders(tmp_dir, ["a", "b", "c"], 0)
-    with self.assertRaises(Exception) as e:
+    with self.assertRaises(FileNotFoundError) as e:
       _ = input_data.AudioProcessor("", tmp_dir, 10, 10, ["a", "b"], 10, 10,
                                     self._model_settings(), tmp_dir)
-    self.assertTrue("No .wavs found" in str(e.exception))
+    self.assertIn("No .wavs found", str(e.exception))
 
   def testPrepareDataIndexMissing(self):
     tmp_dir = self.get_temp_dir()
     self._saveWavFolders(tmp_dir, ["a", "b", "c"], 100)
-    with self.assertRaises(Exception) as e:
+    with self.assertRaises(ValueError) as e:
       _ = input_data.AudioProcessor("", tmp_dir, 10, 10, ["a", "b", "d"], 10,
                                     10, self._model_settings(), tmp_dir)
-    self.assertTrue("Expected to find" in str(e.exception))
+    self.assertIn("Expected to find", str(e.exception))
 
   @test_util.run_deprecated_v1
   def testPrepareBackgroundData(self):
@@ -201,6 +220,10 @@ class InputDataTest(test.TestCase):
   @test_util.run_deprecated_v1
   def testGetDataMfcc(self):
     self._runGetDataTest("mfcc", 30)
+
+  @test_util.run_deprecated_v1
+  def testGetDataMicro(self):
+    self._runGetDataTest("micro", 20)
 
   @test_util.run_deprecated_v1
   def testGetUnprocessedData(self):

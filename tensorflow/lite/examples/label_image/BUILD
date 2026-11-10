@@ -1,11 +1,31 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 # TensorFlow Lite Example Label Image.
 
-package(default_visibility = ["//visibility:public"])
-
-licenses(["notice"])  # Apache 2.0
-
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//tensorflow/lite:build_def.bzl", "tflite_linkopts")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:LICENSE"],
+    default_visibility = ["//visibility:public"],
+    licenses = ["notice"],
+)
 
 exports_files(glob([
     "testdata/*.bmp",
@@ -22,15 +42,25 @@ cc_binary(
         "//tensorflow:android": [
             "-pie",  # Android 5.0 and later supports only PIE
             "-lm",  # some builtin ops, e.g., tanh, need -lm
+            "-Wl,-rpath=/data/local/tmp",  # for hexagon delegate
         ],
         "//conditions:default": [],
     }),
     deps = [
         ":bitmap_helpers",
         "//tensorflow/lite:framework",
-        "//tensorflow/lite:string_util",
+        "//tensorflow/lite:string",
+        "//tensorflow/lite/c:c_api_types",
+        "//tensorflow/lite/c:common",
+        "//tensorflow/lite/core:cc_api_stable",
         "//tensorflow/lite/kernels:builtin_ops",
+        "//tensorflow/lite/profiling:profile_buffer",
         "//tensorflow/lite/profiling:profiler",
+        "//tensorflow/lite/schema:schema_fbs",
+        "//tensorflow/lite/tools:command_line_flags",
+        "//tensorflow/lite/tools:tool_params",
+        "//tensorflow/lite/tools/delegates:delegate_provider_hdr",
+        "//tensorflow/lite/tools/delegates:tflite_execution_providers",
     ],
 )
 
@@ -41,15 +71,29 @@ cc_library(
         "bitmap_helpers.h",
         "bitmap_helpers_impl.h",
         "label_image.h",
+        "log.h",
     ],
     deps = [
+        "//tensorflow/core/platform:tstring",
         "//tensorflow/lite:builtin_op_data",
         "//tensorflow/lite:framework",
         "//tensorflow/lite:string",
         "//tensorflow/lite:string_util",
+        "//tensorflow/lite/c:c_api_types",
         "//tensorflow/lite/kernels:builtin_ops",
         "//tensorflow/lite/schema:schema_fbs",
-    ],
+        "@tsl//tsl/platform:tstring",
+    ] + select({
+        "//tensorflow:android": [
+            "//tensorflow/lite/delegates/gpu:delegate",
+            "//tensorflow/lite/delegates/hexagon:hexagon_delegate",
+        ],
+        "//tensorflow:android_arm64": [
+            "//tensorflow/lite/delegates/gpu:delegate",
+            "//tensorflow/lite/delegates/hexagon:hexagon_delegate",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_test(
@@ -64,6 +108,8 @@ cc_test(
     ],
     deps = [
         ":bitmap_helpers",
-        "@com_google_googletest//:gtest",
+        "//tensorflow/lite/c:c_api_types",
+        "//tensorflow/lite/c:common",
+        "@com_google_googletest//:gtest_main",
     ],
 )

@@ -18,9 +18,11 @@ limitations under the License.
 
 #include <memory>
 #include <unordered_map>
+
 #include "grpcpp/server_builder.h"
-#include "tensorflow/core/distributed_runtime/rpc/grpc_response_cache.h"
+#include "xla/tsl/distributed_runtime/rpc/async_service_interface.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_worker_service_impl.h"
+#include "tensorflow/core/distributed_runtime/rpc/rpc_response_cache.h"
 #include "tensorflow/core/distributed_runtime/worker.h"
 #include "tensorflow/core/protobuf/worker.pb.h"
 
@@ -28,13 +30,16 @@ namespace grpc {
 class ByteBuffer;
 }  // namespace grpc
 
+namespace tsl {
+class AsyncServiceInterface;
+}
+
 namespace tensorflow {
 
-class AsyncServiceInterface;
 class ConfigProto;
 struct WorkerEnv;
-struct WorkerSession;
-class GrpcResponseCache;
+class WorkerSession;
+class RpcResponseCache;
 
 class GrpcWorker : public Worker {
  public:
@@ -60,11 +65,11 @@ class GrpcWorker : public Worker {
 
   void EnableResponseCache();
 
-  void RemoveCacheEntryForId(int64 request_id);
+  void RemoveCacheEntryForId(int64_t request_id);
 
  private:
-  std::unique_ptr<GrpcResponseCache> response_cache_;
-  const int32 recv_buf_max_chunk_;
+  std::unique_ptr<RpcResponseCache> response_cache_;
+  const int32_t recv_buf_max_chunk_;
 };
 
 std::unique_ptr<GrpcWorker> NewGrpcWorker(WorkerEnv* worker_env,
@@ -75,20 +80,12 @@ struct GrpcWorkerServiceOptions {
   // default queue depth for a method.
   std::unordered_map<int, int> queue_depth;
   int num_serving_threads = 8;
-
-  // Setting cache_rpc_response to true will enable sender side caching of
-  // response for RecvTensorAsync and RecvBufAsync to allow receiver to retry
-  // requests . This is only necessary when the network fabric is experiencing a
-  // significant error rate.  Without it we'll fail a step on an network error,
-  // while with it we'll be able to complete long steps (like complex
-  // initializations) in the face of some network errors during RecvTensor.
-  bool cache_rpc_response = false;
 };
 
 // Returns an implementation of WorkerService rpc service.
-std::unique_ptr<AsyncServiceInterface> NewGrpcWorkerService(
+std::unique_ptr<tsl::AsyncServiceInterface> NewGrpcWorkerService(
     GrpcWorker* worker, ::grpc::ServerBuilder* builder,
-    GrpcWorkerServiceOptions opts = GrpcWorkerServiceOptions());
+    GrpcWorkerServiceOptions options = GrpcWorkerServiceOptions());
 
 }  // namespace tensorflow
 

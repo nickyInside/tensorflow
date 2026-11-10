@@ -25,86 +25,287 @@ namespace tensorflow {
 namespace grappler {
 namespace graph_tests_utils {
 
-NodeDef MakeFilterNode(StringPiece name, StringPiece input_node_name,
-                       StringPiece function_name) {
+NodeDef MakeBatchV2Node(absl::string_view name,
+                        absl::string_view input_node_name,
+                        absl::string_view batch_size_node_name,
+                        absl::string_view drop_remainder_node_name,
+                        bool parallel_copy) {
   return test::function::NDef(
-      name, "FilterDataset", {string(input_node_name)},
-      {{"predicate", FunctionDefHelper::FunctionRef(string(function_name))},
-       {"Targuments", {}},
-       {"output_shapes", gtl::ArraySlice<TensorShape>{}},
-       {"output_types", gtl::ArraySlice<TensorShape>{}}});
+      name, "BatchDatasetV2",
+      {std::string(input_node_name), std::string(batch_size_node_name),
+       std::string(drop_remainder_node_name)},
+      {{"parallel_copy", parallel_copy},
+       {"output_shapes", absl::Span<const TensorShape>{}},
+       {"output_types", absl::Span<const DataType>{}}});
 }
 
-NodeDef MakeMapAndBatchNode(StringPiece name, StringPiece input_node_name,
-                            StringPiece batch_size_node_name,
-                            StringPiece num_parallel_calls_node_name,
-                            StringPiece drop_remainder_node_name,
-                            StringPiece function_name) {
+NodeDef MakeParallelBatchNode(absl::string_view name,
+                              absl::string_view input_node_name,
+                              absl::string_view batch_size_node_name,
+                              absl::string_view num_parallel_calls_node_name,
+                              absl::string_view drop_remainder_node_name,
+                              absl::string_view deterministic) {
   return test::function::NDef(
-      name, "ExperimentalMapAndBatchDataset",
-      {string(input_node_name), string(batch_size_node_name),
-       string(num_parallel_calls_node_name), string(drop_remainder_node_name)},
-      {{"f", FunctionDefHelper::FunctionRef(string(function_name))},
-       {"Targuments", {}},
-       {"output_shapes", gtl::ArraySlice<TensorShape>{}},
-       {"output_types", gtl::ArraySlice<TensorShape>{}}});
+      name, "ParallelBatchDataset",
+      {std::string(input_node_name), std::string(batch_size_node_name),
+       std::string(num_parallel_calls_node_name),
+       std::string(drop_remainder_node_name)},
+      {{"output_shapes", absl::Span<const TensorShape>{}},
+       {"output_types", absl::Span<const DataType>{}},
+       {"deterministic", std::string(deterministic)}});
 }
 
-NodeDef MakeMapNode(StringPiece name, StringPiece input_node_name,
-                    StringPiece function_name) {
+NodeDef MakeCacheV2Node(absl::string_view name,
+                        absl::string_view input_node_name,
+                        absl::string_view filename_node_name,
+                        absl::string_view cache_node_name) {
   return test::function::NDef(
-      name, "MapDataset", {string(input_node_name)},
-      {{"f", FunctionDefHelper::FunctionRef(string(function_name))},
-       {"Targuments", {}},
-       {"output_shapes", gtl::ArraySlice<TensorShape>{}},
-       {"output_types", gtl::ArraySlice<DataType>{}}});
+      name, "CacheDatasetV2",
+      {
+          std::string(input_node_name),
+          std::string(filename_node_name),
+          std::string(cache_node_name),
+      },
+      {
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+      });
 }
 
-NodeDef MakeParallelInterleaveNode(StringPiece name,
-                                   StringPiece input_node_name,
-                                   StringPiece cycle_length_node_name,
-                                   StringPiece block_length_node_name,
-                                   StringPiece num_parallel_calls_node_name,
-                                   StringPiece function_name, bool sloppy) {
+NodeDef MakeFilterNode(absl::string_view name,
+                       absl::string_view input_node_name,
+                       absl::string_view function_name) {
+  return test::function::NDef(
+      name, "FilterDataset", {std::string(input_node_name)},
+      {{"predicate",
+        FunctionDefHelper::FunctionRef(std::string(function_name))},
+       {"Targuments", {}},
+       {"output_shapes", absl::Span<const TensorShape>{}},
+       {"output_types", absl::Span<const DataType>{}}});
+}
+
+NodeDef MakeMapAndBatchNode(absl::string_view name,
+                            absl::string_view input_node_name,
+                            absl::string_view batch_size_node_name,
+                            absl::string_view num_parallel_calls_node_name,
+                            absl::string_view drop_remainder_node_name,
+                            absl::string_view function_name) {
+  return test::function::NDef(
+      name, "MapAndBatchDataset",
+      {std::string(input_node_name), std::string(batch_size_node_name),
+       std::string(num_parallel_calls_node_name),
+       std::string(drop_remainder_node_name)},
+      {{"f", FunctionDefHelper::FunctionRef(std::string(function_name))},
+       {"Targuments", {}},
+       {"output_shapes", absl::Span<const TensorShape>{}},
+       {"output_types", absl::Span<const DataType>{}}});
+}
+
+NodeDef MakeMapNode(absl::string_view name, absl::string_view input_node_name,
+                    absl::string_view function_name) {
+  return test::function::NDef(
+      name, "MapDataset", {std::string(input_node_name)},
+      {{"f", FunctionDefHelper::FunctionRef(std::string(function_name))},
+       {"Targuments", {}},
+       {"output_shapes", absl::Span<const TensorShape>{}},
+       {"output_types", absl::Span<const DataType>{}}});
+}
+
+NodeDef MakeParallelInterleaveV2Node(
+    absl::string_view name, absl::string_view input_node_name,
+    absl::string_view cycle_length_node_name,
+    absl::string_view block_length_node_name,
+    absl::string_view num_parallel_calls_node_name,
+    absl::string_view function_name, bool sloppy) {
   return test::function::NDef(
       name, "ParallelInterleaveDatasetV2",
-      {string(input_node_name), string(cycle_length_node_name),
-       string(block_length_node_name), string(num_parallel_calls_node_name)},
+      {std::string(input_node_name), std::string(cycle_length_node_name),
+       std::string(block_length_node_name),
+       std::string(num_parallel_calls_node_name)},
       {
-          {"f", FunctionDefHelper::FunctionRef(string(function_name))},
+          {"f", FunctionDefHelper::FunctionRef(std::string(function_name))},
           {"Targuments", {}},
-          {"output_shapes", gtl::ArraySlice<TensorShape>{}},
-          {"output_types", gtl::ArraySlice<TensorShape>{}},
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
           {"sloppy", sloppy},
       });
 }
 
-NodeDef MakeParallelMapNode(StringPiece name, StringPiece input_node_name,
-                            StringPiece num_parallel_calls_node_name,
-                            StringPiece function_name, bool sloppy) {
+NodeDef MakeParallelInterleaveV4Node(
+    absl::string_view name, absl::string_view input_node_name,
+    absl::string_view cycle_length_node_name,
+    absl::string_view block_length_node_name,
+    absl::string_view num_parallel_calls_node_name,
+    absl::string_view function_name, absl::string_view deterministic) {
+  return test::function::NDef(
+      name, "ParallelInterleaveDatasetV4",
+      {std::string(input_node_name), std::string(cycle_length_node_name),
+       std::string(block_length_node_name),
+       std::string(num_parallel_calls_node_name)},
+      {
+          {"f", FunctionDefHelper::FunctionRef(std::string(function_name))},
+          {"Targuments", {}},
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+          {"deterministic", std::string(deterministic)},
+      });
+}
+
+NodeDef MakeInterleaveNode(absl::string_view name,
+                           absl::string_view input_node_name,
+                           absl::string_view cycle_length_node_name,
+                           absl::string_view block_length_node_name,
+                           absl::string_view function_name,
+                           absl::string_view deterministic) {
+  return test::function::NDef(
+      name, "InterleaveDataset",
+      {std::string(input_node_name), std::string(cycle_length_node_name),
+       std::string(block_length_node_name)},
+      {
+          {"f", FunctionDefHelper::FunctionRef(std::string(function_name))},
+          {"Targuments", {}},
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+          {"deterministic", std::string(deterministic)},
+      });
+}
+
+NodeDef MakeParallelMapNode(absl::string_view name,
+                            absl::string_view input_node_name,
+                            absl::string_view num_parallel_calls_node_name,
+                            absl::string_view function_name, bool sloppy) {
   return test::function::NDef(
       name, "ParallelMapDataset",
-      {string(input_node_name), string(num_parallel_calls_node_name)},
+      {std::string(input_node_name), std::string(num_parallel_calls_node_name)},
       {
-          {"f", FunctionDefHelper::FunctionRef(string(function_name))},
+          {"f", FunctionDefHelper::FunctionRef(std::string(function_name))},
           {"Targuments", {}},
-          {"output_shapes", gtl::ArraySlice<TensorShape>{}},
-          {"output_types", gtl::ArraySlice<DataType>{}},
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
           {"sloppy", sloppy},
       });
 }
 
-NodeDef MakeParseExampleNode(StringPiece name, StringPiece input_node_name,
-                             StringPiece num_parallel_calls_node_name,
+NodeDef MakeParallelMapV2Node(absl::string_view name,
+                              absl::string_view input_node_name,
+                              absl::string_view num_parallel_calls_node_name,
+                              absl::string_view function_name,
+                              absl::string_view deterministic,
+                              bool use_unbounded_threadpool) {
+  return test::function::NDef(
+      name, "ParallelMapDatasetV2",
+      {std::string(input_node_name), std::string(num_parallel_calls_node_name)},
+      {
+          {"f", FunctionDefHelper::FunctionRef(std::string(function_name))},
+          {"Targuments", {}},
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+          {"deterministic", std::string(deterministic)},
+          {"use_unbounded_threadpool", use_unbounded_threadpool},
+      });
+}
+
+NodeDef MakeParseExampleNode(absl::string_view name,
+                             absl::string_view input_node_name,
+                             absl::string_view num_parallel_calls_node_name,
                              bool sloppy) {
   return test::function::NDef(
       name, "ParseExampleDataset",
-      {string(input_node_name), string(num_parallel_calls_node_name)},
+      {std::string(input_node_name), std::string(num_parallel_calls_node_name)},
       {
-          {"output_shapes", gtl::ArraySlice<TensorShape>{}},
-          {"output_types", gtl::ArraySlice<DataType>{}},
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
           {"sloppy", sloppy},
       });
+}
+
+NodeDef MakeShuffleV2Node(absl::string_view name,
+                          absl::string_view input_node_name,
+                          absl::string_view buffer_size_node_name,
+                          absl::string_view seed_generator_node_name) {
+  return test::function::NDef(
+      name, "ShuffleDatasetV2",
+      {
+          std::string(input_node_name),
+          std::string(buffer_size_node_name),
+          std::string(seed_generator_node_name),
+      },
+      {
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+      });
+}
+
+NodeDef MakeTakeNode(absl::string_view name, absl::string_view input_node_name,
+                     absl::string_view count_node_name) {
+  return test::function::NDef(
+      name, "TakeDataset",
+      {
+          std::string(input_node_name),
+          std::string(count_node_name),
+      },
+      {
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+      });
+}
+
+NodeDef MakeTensorSliceNode(absl::string_view name,
+                            absl::string_view tensor_node_name,
+                            bool replicate_on_split) {
+  return test::function::NDef(
+      name, "TensorSliceDataset",
+      {
+          std::string(tensor_node_name),
+      },
+      {
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+          {"replicate_on_split", replicate_on_split},
+      });
+}
+
+NodeDef MakeSkipNode(absl::string_view name, absl::string_view input_node_name,
+                     absl::string_view count_node_name) {
+  return test::function::NDef(
+      name, "SkipDataset",
+      {
+          std::string(input_node_name),
+          std::string(count_node_name),
+      },
+      {
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+      });
+}
+
+NodeDef MakeShardNode(absl::string_view name, absl::string_view input_node_name,
+                      absl::string_view num_shards_node_name,
+                      absl::string_view index_node_name) {
+  return test::function::NDef(
+      name, "ShardDataset",
+      {
+          std::string(input_node_name),
+          std::string(num_shards_node_name),
+          std::string(index_node_name),
+      },
+      {
+          {"output_shapes", absl::Span<const TensorShape>{}},
+          {"output_types", absl::Span<const DataType>{}},
+      });
+}
+
+NodeDef MakePrefetchNode(absl::string_view name,
+                         absl::string_view input_node_name,
+                         absl::string_view buffer_size) {
+  return test::function::NDef(
+      name, "PrefetchDataset",
+      {std::string(input_node_name), std::string(buffer_size)},
+      {{"output_shapes", absl::Span<const TensorShape>{}},
+       {"output_types", absl::Span<const DataType>{}},
+       {"slack_period", 0},
+       {"legacy_autotune", true},
+       {"buffer_size_min", 0}});
 }
 
 }  // namespace graph_tests_utils

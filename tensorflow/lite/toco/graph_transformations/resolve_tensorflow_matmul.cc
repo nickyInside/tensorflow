@@ -12,22 +12,28 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <algorithm>
+#include <cstddef>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+#include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/lite/toco/graph_transformations/graph_transformations.h"
 #include "tensorflow/lite/toco/model.h"
 #include "tensorflow/lite/toco/tooling_util.h"
-#include "tensorflow/core/platform/logging.h"
 
 namespace toco {
 
 namespace {
 
 TransposeOperator* FindTransposeOpWithInput(const Model& model,
-                                            const string& array_name) {
+                                            const std::string& array_name) {
   for (auto it = model.operators.begin(); it != model.operators.end(); ++it) {
     Operator* op = it->get();
     if (op->type != OperatorType::kTranspose) {
@@ -55,36 +61,79 @@ TransposeOperator* FindTransposeOpWithInput(const Model& model,
 
 }  // namespace
 
-::tensorflow::Status ResolveTensorFlowMatMul::Run(Model* model,
-                                                  std::size_t op_index,
-                                                  bool* modified) {
+absl::Status ResolveTensorFlowMatMul::Run(Model* model, std::size_t op_index,
+                                          bool* modified) {
   *modified = false;
   auto matmul_it = model->operators.begin() + op_index;
   if (matmul_it->get()->type != OperatorType::kMatMul) {
-    return ::tensorflow::Status::OK();
+    return absl::OkStatus();
   }
   const auto* matmul_op =
       static_cast<const TensorFlowMatMulOperator*>(matmul_it->get());
 
-  // Handling transposition of the first input here isn't very simple because
-  // we need to know the actual shape in order to produce a proper
-  // TransposeOperator.  However, the second input is supposed to be 2D, so we
-  // can actually handle transposition of that matrix, which happens to be more
-  // common anyway.
+  auto refresh_matmul_iterator = [&model, &matmul_it, &matmul_op]() {
+    matmul_it = std::find_if(model->operators.begin(), model->operators.end(),
+                             [matmul_op](const std::unique_ptr<Operator>& op) {
+                               return op.get() == matmul_op;
+                             });
+    DCHECK_EQ(matmul_it->get(), matmul_op);
+  };
+
+  std::string input_lhs = matmul_op->inputs[0];
+  std::string input_rhs = matmul_op->inputs[1];
+
+  // Handle `transpose_a` with best effort: If the dimension of lhs is known,
+  // insert a `Transpose` op.
   if (matmul_op->transpose_a) {
-    AddMessageF(
-        "Not replacing %s by a FullyConnected operator, because it has "
-        "the transpose_a attribute",
-        LogName(*matmul_op));
-    return ::tensorflow::Status::OK();
+    Array& lhs_array = model->GetArray(input_lhs);
+    if (!lhs_array.has_shape()) {
+      AddMessageF(
+          "Not replacing %s by a FullyConnected operator, because it has "
+          "the transpose_a attribute and LHS has no shape",
+          LogName(*matmul_op));
+      return absl::OkStatus();
+    }
+
+    int dimensions_count = lhs_array.shape().dimensions_count();
+    if (dimensions_count < 2) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Inputs of MatMul should have dimension >= 2. Got %d dimensions",
+          dimensions_count));
+    }
+
+    // Create a permutation vector to exchange the last 2 dimensions.
+    // E.g. For 4D, create [0, 1, 3, 2].
+    std::vector<int> perm;
+    perm.reserve(dimensions_count);
+    for (int i = 0; i < dimensions_count; ++i) {
+      perm.push_back(i);
+    }
+    std::swap(perm[dimensions_count - 1], perm[dimensions_count - 2]);
+
+    auto* transpose_op = new TransposeOperator;
+    transpose_op->inputs = {
+        input_lhs,
+        CreateInt32Array(
+            model, AvailableArrayName(*model, input_lhs + "/transpose/perm"),
+            perm)};
+    transpose_op->outputs = {
+        AvailableArrayName(*model, input_lhs + "/transpose")};
+    model->GetOrCreateArray(transpose_op->outputs[0]);
+    model->operators.emplace(matmul_it, transpose_op);
+    // Sanity check
+    DCHECK_EQ(transpose_op, FindTransposeOpWithInput(*model, input_lhs));
+    input_lhs = transpose_op->outputs[0];
+
+    refresh_matmul_iterator();
   }
 
+  // TODO(b/138662017): The following code assumes that RHS is 2D. This isn't
+  // always true in TensorFlow.
+  //
   // Reorder the axes on the second input. TensorFlow uses row-major ordering
   // on both inputs, however this is inefficient for the FullyConnected
   // operator. We'll transpose the second input to be in column-major order now
   // and let constant propagation optimize things (if possible).
-  string input_lhs = matmul_op->inputs[0];
-  string input_rhs = matmul_op->inputs[1];
   if (!matmul_op->transpose_b) {
     // Need to transpose input_rhs, by inserting a TransposeOperator.
     // First, check if there already is a TransposeOperator transposing that
@@ -108,6 +157,7 @@ TransposeOperator* FindTransposeOpWithInput(const Model& model,
       model->operators.emplace(matmul_it, transpose_op);
       // Sanity check
       DCHECK_EQ(transpose_op, FindTransposeOpWithInput(*model, input_rhs));
+      refresh_matmul_iterator();
     } else {
       AddMessageF(
           "While replacing %s by a FullyConnected operator, reused existing "
@@ -118,21 +168,13 @@ TransposeOperator* FindTransposeOpWithInput(const Model& model,
     input_rhs = transpose_op->outputs[0];
   }
 
-  // Refresh iterator.
-  matmul_it = model->operators.begin();
-  for (; matmul_it != model->operators.end(); ++matmul_it) {
-    if (matmul_it->get() == matmul_op) {
-      break;
-    }
-  }
-  DCHECK_EQ(matmul_it->get(), matmul_op);
-
   // Construct the new FullyConnectedOperator.
   auto* fc_op = new FullyConnectedOperator;
+  fc_op->inputs = {input_lhs, input_rhs};
   fc_op->outputs = matmul_op->outputs;
 
   // Insert the newly constructed FullyConnectedOperator.
-  model->operators.emplace(matmul_it, fc_op) + 1;
+  model->operators.emplace(matmul_it, fc_op);
 
   // Find the op producing the array passed to this MatMul
   auto previous_op_it = model->operators.begin();
@@ -173,36 +215,23 @@ TransposeOperator* FindTransposeOpWithInput(const Model& model,
     }
     CHECK_EQ(previous_op->inputs.size(), 2);
     input_lhs = previous_op->inputs[0];
+    fc_op->inputs = {input_lhs, input_rhs};
     // Only remove Reshape node if no other node uses its output.
     if (CountOpsWithInput(*model, previous_op_output) == 1) {
-      const auto& previous_op_shape = previous_op->inputs[1];
-      if (CountOpsWithInput(*model, previous_op_shape) == 1 &&
-          !GetOpWithOutput(*model, previous_op_shape)) {
-        model->EraseArray(previous_op_shape);
-      }
-      model->operators.erase(previous_op_it);
+      DeleteOpAndArrays(model, previous_op);
     }
 
     // We may have just invalidated matmul_it, so let's refresh it now.
-    matmul_it = model->operators.begin();
-    for (; matmul_it != model->operators.end(); ++matmul_it) {
-      if (matmul_it->get() == matmul_op) {
-        break;
-      }
-    }
-    CHECK(matmul_it != model->operators.end());
-    CHECK(matmul_it->get() == matmul_op);
+    refresh_matmul_iterator();
   } else {
     AddMessageF("Replacing %s by a FullyConnected operator",
                 LogName(*matmul_op));
   }
 
-  fc_op->inputs = {input_lhs, input_rhs};
-
   // erase the MatMul operator
   model->operators.erase(matmul_it);
   *modified = true;
-  return ::tensorflow::Status::OK();
+  return absl::OkStatus();
 }
 
 }  // namespace toco

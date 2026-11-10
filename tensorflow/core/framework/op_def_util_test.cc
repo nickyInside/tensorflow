@@ -19,6 +19,7 @@ limitations under the License.
 #include "tensorflow/core/framework/op_def_builder.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/strings/str_util.h"
+#include "tensorflow/core/lib/strings/strcat.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/protobuf.h"
 #include "tensorflow/core/platform/test.h"
@@ -26,13 +27,13 @@ limitations under the License.
 namespace tensorflow {
 namespace {
 
-OpDef FromText(const string& text) {
+OpDef FromText(const std::string& text) {
   OpDef op_def;
   EXPECT_TRUE(protobuf::TextFormat::MergeFromString(text, &op_def));
   return op_def;
 }
 
-OpDef::AttrDef ADef(const string& text) {
+OpDef::AttrDef ADef(const std::string& text) {
   OpDef::AttrDef attr_def;
   EXPECT_TRUE(protobuf::TextFormat::MergeFromString(text, &attr_def));
   return attr_def;
@@ -40,11 +41,13 @@ OpDef::AttrDef ADef(const string& text) {
 
 class ValidateOpDefTest : public ::testing::Test {
  protected:
-  Status TestProto(const string& text) { return ValidateOpDef(FromText(text)); }
+  absl::Status TestProto(const std::string& text) {
+    return ValidateOpDef(FromText(text));
+  }
 
-  Status TestBuilder(const OpDefBuilder& builder) {
+  absl::Status TestBuilder(const OpDefBuilder& builder) {
     OpRegistrationData op_reg_data;
-    Status status = builder.Finalize(&op_reg_data);
+    absl::Status status = builder.Finalize(&op_reg_data);
     TF_EXPECT_OK(status);
     if (!status.ok()) {
       return status;
@@ -52,16 +55,74 @@ class ValidateOpDefTest : public ::testing::Test {
       return ValidateOpDef(op_reg_data.op_def);
     }
   }
-
-  void ExpectFailure(const Status& status, const string& message) {
-    EXPECT_FALSE(status.ok()) << "Did not see error with: " << message;
-    if (!status.ok()) {
-      LOG(INFO) << "message: " << status;
-      EXPECT_TRUE(str_util::StrContains(status.ToString(), message))
-          << "Actual: " << status << "\nExpected to contain: " << message;
-    }
-  }
 };
+
+namespace {
+void ExpectFailure(const absl::Status& status, const std::string& message) {
+  EXPECT_FALSE(status.ok()) << "Did not see error with: " << message;
+  if (!status.ok()) {
+    LOG(INFO) << "message: " << status;
+    EXPECT_TRUE(absl::StrContains(status.ToString(), message))
+        << "Actual: " << status << "\nExpected to contain: " << message;
+  }
+}
+}  // namespace
+
+// IsValidAttrOrArgName and SanitizeToIdentifier are code-generator-facing
+// utilities, not a runtime validity constraint on OpDef registration --
+// ValidateOpDef/ValidateArg deliberately do not call them (see
+// OpDefValidAcceptsNonIdentifierNames below and the comment on
+// IsValidAttrOrArgName's definition for why).
+TEST(IsValidAttrOrArgNameTest, AcceptsSafeIdentifiers) {
+  EXPECT_TRUE(IsValidAttrOrArgName("dtype"));
+  EXPECT_TRUE(IsValidAttrOrArgName("T"));
+  EXPECT_TRUE(IsValidAttrOrArgName("num_threads_2"));
+  EXPECT_TRUE(IsValidAttrOrArgName("_internal"));
+}
+
+TEST(IsValidAttrOrArgNameTest, RejectsUnsafeNames) {
+  // The exact malicious payload from GHSA-2xp6-8g4h-qw72.
+  EXPECT_FALSE(
+      IsValidAttrOrArgName("evil\"); system(\"touch /tmp/PWNED\"); //"));
+  // A legitimate, already-registered op's argument name that is not a
+  // safe identifier for reasons unrelated to code generation.
+  EXPECT_FALSE(IsValidAttrOrArgName("raw_outputs/box_encodings"));
+  EXPECT_FALSE(IsValidAttrOrArgName("TFLite_Detection_PostProcess:1"));
+  EXPECT_FALSE(IsValidAttrOrArgName(""));
+  EXPECT_FALSE(IsValidAttrOrArgName("1abc"));
+}
+
+TEST(SanitizeToIdentifierTest, ProducesASafeIdentifierForAnyInput) {
+  // Every unsafe character becomes an underscore; the malicious payload
+  // that IsValidAttrOrArgName exists to reject becomes an inert, safe
+  // identifier string rather than being spliced verbatim.
+  EXPECT_EQ(SanitizeToIdentifier("evil\"); system(\"touch /tmp/PWNED\"); //"),
+            "evil____system__touch__tmp_PWNED______");
+  EXPECT_EQ(SanitizeToIdentifier("raw_outputs/box_encodings"),
+            "raw_outputs_box_encodings");
+  EXPECT_EQ(SanitizeToIdentifier("TFLite_Detection_PostProcess:1"),
+            "TFLite_Detection_PostProcess_1");
+  // A result that would start with a digit gets a leading underscore
+  // rather than becoming a syntactically invalid identifier.
+  EXPECT_EQ(SanitizeToIdentifier("123_invalid"), "_123_invalid");
+  EXPECT_EQ(SanitizeToIdentifier(""), "_");
+  // A name that is already safe is unaffected other than round-tripping
+  // through the same character-by-character pass.
+  EXPECT_EQ(SanitizeToIdentifier("already_safe"), "already_safe");
+}
+
+// The regression this fix closes: ValidateOpDef must accept an OpDef using
+// argument names outside IsValidAttrOrArgName's safe set, matching a real,
+// already-registered op (TFLite_Detection_PostProcess, registered in
+// tensorflow/compiler/mlir/lite/python/tf_tfl_flatbuffer_helpers.cc) that
+// broke under the runtime rejection this fix removes.
+TEST_F(ValidateOpDefTest, OpDefValidAcceptsNonIdentifierNames) {
+  TF_EXPECT_OK(TestProto(
+      "name: 'TFLite_Detection_PostProcess' "
+      "input_arg { name: 'raw_outputs/box_encodings' type: DT_FLOAT } "
+      "input_arg { name: 'raw_outputs/class_predictions' type: DT_FLOAT } "
+      "output_arg { name: 'TFLite_Detection_PostProcess:1' type: DT_FLOAT }"));
+}
 
 TEST_F(ValidateOpDefTest, OpDefValid) {
   TF_EXPECT_OK(TestBuilder(OpDefBuilder("X").Attr("a: int")));
@@ -74,12 +135,26 @@ TEST_F(ValidateOpDefTest, OpDefValid) {
   TF_EXPECT_OK(TestBuilder(OpDefBuilder("X").Attr("a: int >= -5 = 3")));
   TF_EXPECT_OK(TestBuilder(OpDefBuilder("X").Attr("a: numbertype")));
   TF_EXPECT_OK(TestBuilder(OpDefBuilder("Uppercase")));
+
+  TF_EXPECT_OK(TestBuilder(OpDefBuilder("Namespace>X").Attr("a: int")));
+  TF_EXPECT_OK(TestBuilder(OpDefBuilder("Namespace>X>Y").Attr("a: int")));
 }
 
 TEST_F(ValidateOpDefTest, InvalidName) {
   ExpectFailure(TestBuilder(OpDefBuilder("lower").Attr("a: int")),
                 "Invalid name");
   ExpectFailure(TestBuilder(OpDefBuilder("BadSuffix 7%")), "Invalid name");
+  ExpectFailure(TestBuilder(OpDefBuilder(">OpName").Attr("a: int")),
+                "Invalid name");
+  // Can't have a dangling empty namespace
+  ExpectFailure(TestBuilder(OpDefBuilder("OpName>").Attr("a: int")),
+                "Invalid name");
+  // Each namespace section must be Camelcased
+  ExpectFailure(TestBuilder(OpDefBuilder("OpName>b").Attr("a: int")),
+                "Invalid name");
+  // Can't have empty namespaces
+  ExpectFailure(TestBuilder(OpDefBuilder("OpName>A>>B").Attr("a: int")),
+                "Invalid name");
 }
 
 TEST_F(ValidateOpDefTest, DuplicateName) {
@@ -497,19 +572,40 @@ void ExpectDifferent(const OpDef& o1, const OpDef& o2) {
 }
 
 TEST(OpDefEqualityTest, EqualAndHash) {
-  string a1 = "attr { name: 'a' type: 'string' } ";
-  string a2 = "attr { name: 'b' type: 'string' } ";
-  string a3 = "attr { name: 'c' type: 'int32' } ";
-  OpDef o1 = FromText(strings::StrCat("name: 'MatMul' ", a1));
-  OpDef o2 = FromText(strings::StrCat("name: 'MatMul' ", a2));
-  OpDef o3 = FromText(strings::StrCat("name: 'MatMul' ", a1, a2));
-  OpDef o4 = FromText(strings::StrCat("name: 'MatMul' ", a2, a1));
+  std::string a1 = "attr { name: 'a' type: 'string' } ";
+  std::string a2 = "attr { name: 'b' type: 'string' } ";
+  std::string a3 = "attr { name: 'c' type: 'int32' } ";
+  OpDef o1 = FromText(absl::StrCat("name: 'MatMul' ", a1));
+  OpDef o2 = FromText(absl::StrCat("name: 'MatMul' ", a2));
+  OpDef o3 = FromText(absl::StrCat("name: 'MatMul' ", a1, a2));
+  OpDef o4 = FromText(absl::StrCat("name: 'MatMul' ", a2, a1));
 
   ExpectEqual(o1, o1);
   ExpectEqual(o3, o4);
 
   ExpectDifferent(o1, o2);
   ExpectDifferent(o1, o3);
+}
+
+TEST(OpDefAttrDefaultsUnchangedTest, Foo) {
+  const auto& op1 = FromText("name: 'op1' attr { name: 'n' type: 'string'}");
+  const auto& op2 = FromText(
+      "name: 'op2' attr { name: 'n' type: 'string' default_value: {s: 'x'}}");
+  const auto& op3 = FromText(
+      "name: 'op3' attr { name: 'n' type: 'string' default_value: {s: 'y'}}");
+
+  // Adding a default value: fine.
+  TF_EXPECT_OK(OpDefAttrDefaultsUnchanged(op1, op2));
+
+  // Changing a default value: not ok.
+  absl::Status changed_attr = OpDefAttrDefaultsUnchanged(op2, op3);
+  ExpectFailure(changed_attr,
+                "Attr 'n' has changed it's default value; from \"x\" to \"y\"");
+
+  // Removing a default value: not ok.
+  absl::Status removed_attr = OpDefAttrDefaultsUnchanged(op2, op1);
+  ExpectFailure(removed_attr,
+                "Attr 'n' has removed it's default; from \"x\" to no default");
 }
 
 }  // namespace

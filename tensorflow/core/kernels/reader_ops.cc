@@ -50,7 +50,7 @@ class ReaderVerbAsyncOpKernel : public AsyncOpKernel {
       : AsyncOpKernel(context),
         thread_pool_(new thread::ThreadPool(
             context->env(), ThreadOptions(),
-            strings::StrCat("reader_thread_", SanitizeThreadSuffix(name())),
+            absl::StrCat("reader_thread_", SanitizeThreadSuffix(name())),
             1 /* num_threads */, false /* low_latency_hint */)) {}
 
   void ComputeAsync(OpKernelContext* context, DoneCallback done) override {
@@ -90,9 +90,12 @@ class ReaderReadOp : public ReaderVerbAsyncOpKernel {
     OP_REQUIRES_OK(context,
                    context->allocate_output("value", TensorShape({}), &value));
 
-    auto key_scalar = key->scalar<string>();
-    auto value_scalar = value->scalar<string>();
-    reader->Read(queue, &key_scalar(), &value_scalar(), context);
+    auto key_scalar = key->scalar<tstring>();
+    auto value_scalar = value->scalar<tstring>();
+    tstring key_out, val_out;
+    reader->Read(queue, &key_out, &val_out, context);
+    key_scalar() = key_out;
+    value_scalar() = val_out;
   }
 };
 
@@ -109,25 +112,27 @@ class ReaderReadUpToOp : public ReaderVerbAsyncOpKernel {
 
     const Tensor* num_records_tensor;
     OP_REQUIRES_OK(context, context->input("num_records", &num_records_tensor));
-    int64 num_records = num_records_tensor->scalar<int64>()();
+    int64_t num_records = num_records_tensor->scalar<int64_t>()();
 
     OP_REQUIRES_OK(context,
                    GetResourceFromContext(context, "queue_handle", &queue));
     core::ScopedUnref unref_me(queue);
 
-    std::vector<string> keys_vec;
+    std::vector<tstring> keys_vec;
     keys_vec.reserve(num_records);
-    std::vector<string> values_vec;
+    std::vector<tstring> values_vec;
     values_vec.reserve(num_records);
 
-    int64 num_actually_read =
+    int64_t num_actually_read =
         reader->ReadUpTo(num_records, queue, &keys_vec, &values_vec, context);
 
-    OP_REQUIRES(context, num_actually_read == keys_vec.size(),
-                errors::InvalidArgument("num_actually_read != len(keys_vec"));
+    OP_REQUIRES(
+        context, num_actually_read == keys_vec.size(),
+        absl::InvalidArgumentError("num_actually_read != len(keys_vec"));
 
-    OP_REQUIRES(context, num_actually_read == values_vec.size(),
-                errors::InvalidArgument("num_actually_read != len(values_vec"));
+    OP_REQUIRES(
+        context, num_actually_read == values_vec.size(),
+        absl::InvalidArgumentError("num_actually_read != len(values_vec"));
 
     Tensor* keys = nullptr;
     OP_REQUIRES_OK(context,
@@ -139,8 +144,8 @@ class ReaderReadUpToOp : public ReaderVerbAsyncOpKernel {
                    context->allocate_output(
                        "values", TensorShape({num_actually_read}), &values));
 
-    auto keys_t = keys->vec<string>();
-    auto values_t = values->vec<string>();
+    auto keys_t = keys->vec<tstring>();
+    auto values_t = values->vec<tstring>();
     for (int i = 0; i < num_actually_read; ++i) {
       keys_t(i) = std::move(keys_vec[i]);
       values_t(i) = std::move(values_vec[i]);
@@ -162,7 +167,7 @@ class ReaderNumRecordsProducedOp : public ReaderVerbSyncOpKernel {
     Tensor* output = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output("records_produced",
                                                      TensorShape({}), &output));
-    output->scalar<int64>()() = reader->NumRecordsProduced();
+    output->scalar<int64_t>()() = reader->NumRecordsProduced();
   }
 };
 
@@ -180,7 +185,7 @@ class ReaderNumWorkUnitsCompletedOp : public ReaderVerbSyncOpKernel {
     Tensor* output = nullptr;
     OP_REQUIRES_OK(context, context->allocate_output("units_completed",
                                                      TensorShape({}), &output));
-    output->scalar<int64>()() = reader->NumWorkUnitsCompleted();
+    output->scalar<int64_t>()() = reader->NumWorkUnitsCompleted();
   }
 };
 
@@ -200,7 +205,7 @@ class ReaderSerializeStateOp : public ReaderVerbSyncOpKernel {
     OP_REQUIRES_OK(context,
                    context->allocate_output("state", TensorShape({}), &output));
     OP_REQUIRES_OK(context,
-                   reader->SerializeState(&output->scalar<string>()()));
+                   reader->SerializeState(&output->scalar<tstring>()()));
   }
 };
 
@@ -217,11 +222,11 @@ class ReaderRestoreStateOp : public ReaderVerbSyncOpKernel {
                          ReaderInterface* reader) override {
     const Tensor* tensor;
     OP_REQUIRES_OK(context, context->input("state", &tensor));
-    OP_REQUIRES(
-        context, TensorShapeUtils::IsScalar(tensor->shape()),
-        errors::InvalidArgument("Reader state must be scalar, but had shape: ",
-                                tensor->shape().DebugString()));
-    OP_REQUIRES_OK(context, reader->RestoreState(tensor->scalar<string>()()));
+    OP_REQUIRES(context, TensorShapeUtils::IsScalar(tensor->shape()),
+                absl::InvalidArgumentError(
+                    absl::StrCat("Reader state must be scalar, but had shape: ",
+                                 tensor->shape().DebugString())));
+    OP_REQUIRES_OK(context, reader->RestoreState(tensor->scalar<tstring>()()));
   }
 };
 

@@ -9,791 +9,818 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include "tensorflow/core/kernels/data/interleave_dataset_op.h"
 
-#include "tensorflow/core/kernels/data/dataset_test_base.h"
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "xla/tsl/lib/core/status_test_util.h"
+#include "xla/tsl/platform/status.h"
+#include "tensorflow/core/data/dataset_test_base.h"
+#include "tensorflow/core/data/name_utils.h"
+#include "tensorflow/core/data/serialization_utils.h"
+#include "tensorflow/core/framework/dataset.h"
+#include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/function_testlib.h"
+#include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/framework/variant_tensor_data.h"
+#include "tensorflow/core/kernels/data/tensor_slice_dataset_op.h"
+#include "tensorflow/core/platform/test.h"
+// IWYU pragma: begin_keep
+#include "tensorflow/core/platform/test_benchmark.h"
+// IWYU pragma: end_keep
+#include "tensorflow/core/platform/tstring.h"
 
 namespace tensorflow {
 namespace data {
 namespace {
 
 constexpr char kNodeName[] = "interleave_dataset";
-constexpr char kOpName[] = "InterleaveDataset";
+
+class InterleaveDatasetParams : public DatasetParams {
+ public:
+  template <typename T>
+  InterleaveDatasetParams(T input_dataset_params,
+                          std::vector<Tensor> other_arguments,
+                          int64_t cycle_length, int64_t block_length,
+                          FunctionDefHelper::AttrValueWrapper func,
+                          std::vector<FunctionDef> func_lib,
+                          DataTypeVector type_arguments,
+                          DataTypeVector output_dtypes,
+                          std::vector<PartialTensorShape> output_shapes,
+                          std::string node_name)
+      : DatasetParams(std::move(output_dtypes), std::move(output_shapes),
+                      std::move(node_name)),
+        other_arguments_(std::move(other_arguments)),
+        cycle_length_(cycle_length),
+        block_length_(block_length),
+        func_(std::move(func)),
+        func_lib_(std::move(func_lib)),
+        type_arguments_(std::move(type_arguments)) {
+    input_dataset_params_.push_back(std::make_unique<T>(input_dataset_params));
+    iterator_prefix_ =
+        name_utils::IteratorPrefix(input_dataset_params.dataset_type(),
+                                   input_dataset_params.iterator_prefix());
+  }
+
+  std::vector<Tensor> GetInputTensors() const override {
+    std::vector<Tensor> input_tensors = other_arguments_;
+    input_tensors.emplace_back(
+        CreateTensor<int64_t>(TensorShape({}), {cycle_length_}));
+    input_tensors.emplace_back(
+        CreateTensor<int64_t>(TensorShape({}), {block_length_}));
+    return input_tensors;
+  }
+
+  absl::Status GetInputNames(
+      std::vector<std::string>* input_names) const override {
+    input_names->clear();
+    input_names->reserve(input_dataset_params_.size() +
+                         other_arguments_.size() + 2);
+    input_names->emplace_back(InterleaveDatasetOp::kInputDataset);
+    for (int i = 0; i < other_arguments_.size(); ++i) {
+      input_names->emplace_back(
+          absl::StrCat(InterleaveDatasetOp::kOtherArguments, "_", i));
+    }
+    input_names->emplace_back(InterleaveDatasetOp::kCycleLength);
+    input_names->emplace_back(InterleaveDatasetOp::kBlockLength);
+    return absl::OkStatus();
+  }
+
+  absl::Status GetAttributes(AttributeVector* attr_vector) const override {
+    *attr_vector = {{"f", func_},
+                    {"Targuments", type_arguments_},
+                    {"output_shapes", output_shapes_},
+                    {"output_types", output_dtypes_},
+                    {"metadata", ""}};
+    return absl::OkStatus();
+  }
+
+  std::vector<FunctionDef> func_lib() const override { return func_lib_; }
+
+  std::string dataset_type() const override {
+    return InterleaveDatasetOp::kDatasetType;
+  }
+
+ private:
+  std::vector<Tensor> other_arguments_;
+  int64_t cycle_length_;
+  int64_t block_length_;
+  FunctionDefHelper::AttrValueWrapper func_;
+  std::vector<FunctionDef> func_lib_;
+  DataTypeVector type_arguments_;
+};
 
 class InterleaveDatasetOpTest : public DatasetOpsTestBase {
  protected:
-  // Creates `TensorSliceDataset` variant tensor from the input vector of
-  // tensors.
-  Status CreateTensorSliceDatasetTensor(
-      std::vector<Tensor> *const tensor_vector, Tensor *dataset_tensor) {
-    DatasetBase *tensor_slice_dataset;
-    TF_RETURN_IF_ERROR(CreateTensorSliceDataset(
-        "tensor_slice_node", tensor_vector, &tensor_slice_dataset));
-    TF_RETURN_IF_ERROR(
-        StoreDatasetInVariantTensor(tensor_slice_dataset, dataset_tensor));
-    return Status::OK();
-  }
-
-  // Creates a new `InterleaveDataset` op kernel
-  Status CreateInterleaveDatasetKernel(
-      const FunctionDefHelper::AttrValueWrapper &func,
-      const DataTypeVector &output_types,
-      const std::vector<PartialTensorShape> &output_shapes,
-      std::unique_ptr<OpKernel> *op_kernel) {
-    NodeDef node_def = test::function::NDef(
-        kNodeName, kOpName, {"input_dataset", "cycle_length", "block_length"},
-        {{"f", func},
-         {"Targuments", {}},
-         {"output_types", output_types},
-         {"output_shapes", output_shapes}});
-    TF_RETURN_IF_ERROR(CreateOpKernel(node_def, op_kernel));
-    return Status::OK();
-  }
-
-  // Creates a new `InterleaveDataset` op kernel context.
-  Status CreateInterleaveDatasetContext(
-      OpKernel *const op_kernel,
-      gtl::InlinedVector<TensorValue, 4> *const inputs,
-      std::unique_ptr<OpKernelContext> *context) {
-    TF_RETURN_IF_ERROR(CheckOpKernelInput(*op_kernel, *inputs));
-    TF_RETURN_IF_ERROR(CreateOpKernelContext(op_kernel, inputs, context));
-    return Status::OK();
-  }
+  void TestBody() override {}
 };
-
-struct TestCase {
-  std::vector<Tensor> input_tensors;
-  FunctionDefHelper::AttrValueWrapper func;
-  std::vector<FunctionDef> func_lib;
-  Tensor cycle_length;
-  Tensor block_length;
-  std::vector<Tensor> expected_outputs;
-  DataTypeVector expected_output_dtypes;
-  std::vector<PartialTensorShape> expected_output_shapes;
-  int64 expected_cardinality;
-  std::vector<int> breakpoints;
-};
-
-template <typename T>
-std::vector<Tensor> ConvertToTensorVec(std::vector<T> values) {
-  std::vector<Tensor> tensors;
-  tensors.reserve(values.size());
-  for (auto &value : values) {
-    tensors.emplace_back(
-        DatasetOpsTestBase::CreateTensor<T>(TensorShape({1}), {value}));
-  }
-  return tensors;
-}
 
 FunctionDefHelper::AttrValueWrapper MakeTensorSliceDatasetFunc(
-    const DataTypeVector &output_types,
-    const std::vector<PartialTensorShape> &output_shapes) {
+    const DataTypeVector& output_types,
+    const std::vector<PartialTensorShape>& output_shapes) {
   return FunctionDefHelper::FunctionRef(
-      /*name*/ "MakeTensorSliceDataset",
-      /*attrs*/ {{"Toutput_types", output_types},
+      /*name=*/"MakeTensorSliceDataset",
+      /*attrs=*/{{"Toutput_types", output_types},
                  {"output_shapes", output_shapes}});
 }
 
 // test case 1: cycle_length = 1, block_length = 1.
-TestCase TestCase1() {
-  return {/*input_tensors*/
-          {DatasetOpsTestBase::CreateTensor<int64>(
-              TensorShape{3, 3, 1}, {0, 1, 2, 3, 4, 5, 6, 7, 8})},
-          /*func*/
-          MakeTensorSliceDatasetFunc(
-              DataTypeVector({DT_INT64}),
-              std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-          /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-          /*cycle_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {1}),
-          /*block_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {1}),
-          /*expected_outputs*/
-          ConvertToTensorVec<int64>({0, 1, 2, 3, 4, 5, 6, 7, 8}),
-          /*expected_output_dtypes*/ {DT_INT64},
-          /*expected_output_shapes*/ {PartialTensorShape({1})},
-          /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-          /*breakpoints*/ {0, 4, 11}};
+InterleaveDatasetParams InterleaveDatasetParams1() {
+  auto tensor_slice_dataset_params = TensorSliceDatasetParams(
+      /*components=*/
+      {CreateTensor<int64_t>(TensorShape{3, 3, 1},
+                             {0, 1, 2, 3, 4, 5, 6, 7, 8})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/1,
+      /*block_length=*/1,
+      /*func=*/
+      MakeTensorSliceDatasetFunc(
+          DataTypeVector({DT_INT64}),
+          std::vector<PartialTensorShape>({PartialTensorShape({1})})),
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_INT64},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
 }
 
 // test case 2: cycle_length = 2, block_length = 1.
-TestCase TestCase2() {
-  return {/*input_tensors*/
-          {DatasetOpsTestBase::CreateTensor<int64>(
-              TensorShape{3, 3, 1}, {0, 1, 2, 3, 4, 5, 6, 7, 8})},
-          /*func*/
-          MakeTensorSliceDatasetFunc(
-              DataTypeVector({DT_INT64}),
-              std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-          /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-          /*cycle_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {2}),
-          /*block_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {1}),
-          /*expected_outputs*/
-          ConvertToTensorVec<int64>({0, 3, 1, 4, 2, 5, 6, 7, 8}),
-          /*expected_output_dtypes*/ {DT_INT64},
-          /*expected_output_shapes*/ {PartialTensorShape({1})},
-          /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-          /*breakpoints*/ {0, 4, 11}};
+InterleaveDatasetParams InterleaveDatasetParams2() {
+  auto tensor_slice_dataset_params = TensorSliceDatasetParams(
+      /*components=*/
+      {CreateTensor<int64_t>(TensorShape{3, 3, 1},
+                             {0, 1, 2, 3, 4, 5, 6, 7, 8})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/2,
+      /*block_length=*/1,
+      /*func=*/
+      MakeTensorSliceDatasetFunc(
+          DataTypeVector({DT_INT64}),
+          std::vector<PartialTensorShape>({PartialTensorShape({1})})),
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_INT64},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
 }
 
 // test case 3: cycle_length = 3, block_length = 1.
-TestCase TestCase3() {
-  return {/*input_tensors*/
-          {DatasetOpsTestBase::CreateTensor<int64>(
-              TensorShape{3, 3, 1}, {0, 1, 2, 3, 4, 5, 6, 7, 8})},
-          /*func*/
-          MakeTensorSliceDatasetFunc(
-              DataTypeVector({DT_INT64}),
-              std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-          /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-          /*cycle_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {3}),
-          /*block_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {1}),
-          /*expected_outputs*/
-          ConvertToTensorVec<int64>({0, 3, 6, 1, 4, 7, 2, 5, 8}),
-          /*expected_output_dtypes*/ {DT_INT64},
-          /*expected_output_shapes*/ {PartialTensorShape({1})},
-          /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-          /*breakpoints*/ {0, 4, 11}};
+InterleaveDatasetParams InterleaveDatasetParams3() {
+  auto tensor_slice_dataset_params = TensorSliceDatasetParams(
+      /*components=*/
+      {CreateTensor<int64_t>(TensorShape{3, 3, 1},
+                             {0, 1, 2, 3, 4, 5, 6, 7, 8})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/3,
+      /*block_length=*/1,
+      /*func=*/
+      MakeTensorSliceDatasetFunc(
+          DataTypeVector({DT_INT64}),
+          std::vector<PartialTensorShape>({PartialTensorShape({1})})),
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_INT64},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
 }
 
 // test case 4: cycle_length = 5, block_length = 1.
-TestCase TestCase4() {
-  return {/*input_tensors*/
-          {DatasetOpsTestBase::CreateTensor<int64>(
-              TensorShape{3, 3, 1}, {0, 1, 2, 3, 4, 5, 6, 7, 8})},
-          /*func*/
-          MakeTensorSliceDatasetFunc(
-              DataTypeVector({DT_INT64}),
-              std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-          /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-          /*cycle_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {3}),
-          /*block_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {1}),
-          /*expected_outputs*/
-          ConvertToTensorVec<int64>({0, 3, 6, 1, 4, 7, 2, 5, 8}),
-          /*expected_output_dtypes*/ {DT_INT64},
-          /*expected_output_shapes*/ {PartialTensorShape({1})},
-          /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-          /*breakpoints*/ {0, 4, 11}};
+InterleaveDatasetParams InterleaveDatasetParams4() {
+  auto tensor_slice_dataset_params = TensorSliceDatasetParams(
+      /*components=*/
+      {CreateTensor<int64_t>(TensorShape{3, 3, 1},
+                             {0, 1, 2, 3, 4, 5, 6, 7, 8})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/5,
+      /*block_length=*/1,
+      /*func=*/
+      MakeTensorSliceDatasetFunc(
+          DataTypeVector({DT_INT64}),
+          std::vector<PartialTensorShape>({PartialTensorShape({1})})),
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_INT64},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
 }
 
 // test case 5: cycle_length = 2, block_length = 2.
-TestCase TestCase5() {
-  return {
-      /*input_tensors*/
-      {DatasetOpsTestBase::CreateTensor<string>(
-          TensorShape{3, 3, 1}, {"a", "b", "c", "d", "e", "f", "g", "h", "i"})},
-      /*func*/
+InterleaveDatasetParams InterleaveDatasetParams5() {
+  auto tensor_slice_dataset_params = TensorSliceDatasetParams(
+      /*components=*/
+      {CreateTensor<tstring>(TensorShape{3, 3, 1},
+                             {"a", "b", "c", "d", "e", "f", "g", "h", "i"})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/2,
+      /*block_length=*/2,
+      /*func=*/
       MakeTensorSliceDatasetFunc(
           DataTypeVector({DT_STRING}),
           std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-      /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-      /*cycle_length*/
-      DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {2}),
-      /*block_length*/
-      DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {2}),
-      /*expected_outputs*/
-      ConvertToTensorVec<string>({"a", "b", "d", "e", "c", "f", "g", "h", "i"}),
-      /*expected_output_dtypes*/ {DT_STRING},
-      /*expected_output_shapes*/ {PartialTensorShape({1})},
-      /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-      /*breakpoints*/ {0, 4, 11}};
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_STRING},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
 }
 
 // test case 6: cycle_length = 2, block_length = 3.
-TestCase TestCase6() {
-  return {
-      /*input_tensors*/
-      {DatasetOpsTestBase::CreateTensor<string>(
-          TensorShape{3, 3, 1}, {"a", "b", "c", "d", "e", "f", "g", "h", "i"})},
-      /*func*/
+InterleaveDatasetParams InterleaveDatasetParams6() {
+  auto tensor_slice_dataset_params = TensorSliceDatasetParams(
+      /*components=*/
+      {CreateTensor<tstring>(TensorShape{3, 3, 1},
+                             {"a", "b", "c", "d", "e", "f", "g", "h", "i"})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/2,
+      /*block_length=*/3,
+      /*func=*/
       MakeTensorSliceDatasetFunc(
           DataTypeVector({DT_STRING}),
           std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-      /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-      /*cycle_length*/
-      DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {2}),
-      /*block_length*/
-      DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {3}),
-      /*expected_outputs*/
-      ConvertToTensorVec<string>({"a", "b", "c", "d", "e", "f", "g", "h", "i"}),
-      /*expected_output_dtypes*/ {DT_STRING},
-      /*expected_output_shapes*/ {PartialTensorShape({1})},
-      /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-      /*breakpoints*/ {0, 4, 11}};
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_STRING},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
 }
 
 // test case 7: cycle_length = 2, block_length = 5.
-TestCase TestCase7() {
-  return {
-      /*input_tensors*/
-      {DatasetOpsTestBase::CreateTensor<string>(
-          TensorShape{3, 3, 1}, {"a", "b", "c", "d", "e", "f", "g", "h", "i"})},
-      /*func*/
+InterleaveDatasetParams InterleaveDatasetParams7() {
+  auto tensor_slice_dataset_params = TensorSliceDatasetParams(
+      /*components=*/
+      {CreateTensor<tstring>(TensorShape{3, 3, 1},
+                             {"a", "b", "c", "d", "e", "f", "g", "h", "i"})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/2,
+      /*block_length=*/5,
+      /*func=*/
       MakeTensorSliceDatasetFunc(
           DataTypeVector({DT_STRING}),
           std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-      /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-      /*cycle_length*/
-      DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {2}),
-      /*block_length*/
-      DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {5}),
-      /*expected_outputs*/
-      ConvertToTensorVec<string>({"a", "b", "c", "d", "e", "f", "g", "h", "i"}),
-      /*expected_output_dtypes*/ {DT_STRING},
-      /*expected_output_shapes*/ {PartialTensorShape({1})},
-      /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-      /*breakpoints*/ {0, 4, 11}};
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_STRING},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
 }
 
-// test case 8: cycle_length = 0, block_length = 5.
-TestCase InvalidCycleLengthTestCase() {
-  return {/*input_tensors*/
-          {DatasetOpsTestBase::CreateTensor<int64>(
-              TensorShape{3, 3, 1}, {0, 1, 2, 3, 4, 5, 6, 7, 8})},
-          /*func*/
-          MakeTensorSliceDatasetFunc(
-              DataTypeVector({DT_INT64}),
-              std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-          /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-          /*cycle_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {0}),
-          /*block_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {5}),
-          /*expected_outputs*/ ConvertToTensorVec<int64>({}),
-          /*expected_output_dtypes*/ {DT_INT64},
-          /*expected_output_shapes*/ {PartialTensorShape({1})},
-          /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-          /*breakpoints*/ {}};
+InterleaveDatasetParams InterleaveDatasetParamsWithBounds(
+    int64_t cycle_length, int64_t block_length) {
+  TensorSliceDatasetParams tensor_slice_dataset_params(
+      /*components=*/
+      {CreateTensor<int64_t>(TensorShape{3, 3, 1},
+                             {0, 1, 2, 3, 4, 5, 6, 7, 8})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/cycle_length,
+      /*block_length=*/block_length,
+      /*func=*/
+      MakeTensorSliceDatasetFunc(
+          DataTypeVector({DT_INT64}),
+          std::vector<PartialTensorShape>({PartialTensorShape({1})})),
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_INT64},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
 }
 
-// test case 9: cycle_length = 1, block_length = -1.
-TestCase InvalidBlockLengthTestCase() {
-  return {/*input_tensors*/
-          {DatasetOpsTestBase::CreateTensor<int64>(
-              TensorShape{3, 3, 1}, {0, 1, 2, 3, 4, 5, 6, 7, 8})},
-          /*func*/
-          MakeTensorSliceDatasetFunc(
-              DataTypeVector({DT_INT64}),
-              std::vector<PartialTensorShape>({PartialTensorShape({1})})),
-          /*func_lib*/ {test::function::MakeTensorSliceDataset()},
-          /*cycle_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {1}),
-          /*block_length*/
-          DatasetOpsTestBase::CreateTensor<int64>(TensorShape({}), {-1}),
-          /*expected_outputs*/ ConvertToTensorVec<int64>({}),
-          /*expected_output_dtypes*/ {DT_INT64},
-          /*expected_output_shapes*/ {PartialTensorShape({1})},
-          /*expected_cardinality*/ tensorflow::data::kUnknownCardinality,
-          /*breakpoints*/ {}};
+// Test case 8: cycle_length = 0, block_length = 5.
+InterleaveDatasetParams InterleaveDatasetParamsWithInvalidCycleLength() {
+  return InterleaveDatasetParamsWithBounds(/*cycle_length=*/0,
+                                           /*block_length=*/5);
 }
 
-class ParameterizedInterleaveDatasetOpTest
-    : public InterleaveDatasetOpTest,
-      public ::testing::WithParamInterface<TestCase> {};
-
-TEST_P(ParameterizedInterleaveDatasetOpTest, GetNext) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = GetParam();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
-
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  std::unique_ptr<IteratorContext> iterator_ctx;
-  TF_ASSERT_OK(
-      CreateIteratorContext(interleave_dataset_context.get(), &iterator_ctx));
-  std::unique_ptr<IteratorBase> iterator;
-  TF_ASSERT_OK(interleave_dataset->MakeIterator(iterator_ctx.get(), "Iterator",
-                                                &iterator));
-  auto expected_outputs_it = test_case.expected_outputs.begin();
-  bool end_of_sequence = false;
-  std::vector<Tensor> out_tensors;
-  while (!end_of_sequence) {
-    TF_EXPECT_OK(
-        iterator->GetNext(iterator_ctx.get(), &out_tensors, &end_of_sequence));
-    if (!end_of_sequence) {
-      for (const auto &tensor : out_tensors) {
-        EXPECT_NE(expected_outputs_it, test_case.expected_outputs.end());
-        TF_EXPECT_OK(ExpectEqual(tensor, *expected_outputs_it));
-        expected_outputs_it++;
-      }
-    }
-  }
-  EXPECT_EQ(expected_outputs_it, test_case.expected_outputs.end());
+// Test case 9: cycle_length = 1, block_length = -1.
+InterleaveDatasetParams InterleaveDatasetParamsWithInvalidBlockLength() {
+  return InterleaveDatasetParamsWithBounds(/*cycle_length=*/1,
+                                           /*block_length=*/-1);
 }
 
-TEST_F(InterleaveDatasetOpTest, InvalidCycleLength) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = InvalidCycleLengthTestCase();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
-
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  EXPECT_EQ(CreateDataset(interleave_dataset_kernel.get(),
-                          interleave_dataset_context.get(), &interleave_dataset)
-                .code(),
-            tensorflow::error::INVALID_ARGUMENT);
+// Test case 10: cycle_length = kMaxCycleOrBlockLength + 1, block_length = 5.
+InterleaveDatasetParams InterleaveDatasetParamsWithCycleLengthOutOfBounds() {
+  return InterleaveDatasetParamsWithBounds(
+      /*cycle_length=*/InterleaveDatasetOp::kMaxCycleOrBlockLength + 1,
+      /*block_length=*/5);
 }
 
-TEST_F(InterleaveDatasetOpTest, InvalidBlockLength) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = InvalidBlockLengthTestCase();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
-
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  EXPECT_EQ(CreateDataset(interleave_dataset_kernel.get(),
-                          interleave_dataset_context.get(), &interleave_dataset)
-                .code(),
-            tensorflow::error::INVALID_ARGUMENT);
+// Test case 11: cycle_length = 1, block_length = kMaxCycleOrBlockLength + 1.
+InterleaveDatasetParams InterleaveDatasetParamsWithBlockLengthOutOfBounds() {
+  return InterleaveDatasetParamsWithBounds(
+      /*cycle_length=*/1,
+      /*block_length=*/InterleaveDatasetOp::kMaxCycleOrBlockLength + 1);
 }
+
+std::vector<GetNextTestCase<InterleaveDatasetParams>> GetNextTestCases() {
+  return {
+      {/*dataset_params=*/InterleaveDatasetParams1(),
+       /*expected_outputs=*/
+       CreateTensors<int64_t>(TensorShape({1}),
+                              {{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}})},
+      {/*dataset_params=*/InterleaveDatasetParams2(),
+       /*expected_outputs=*/CreateTensors<int64_t>(
+           TensorShape({1}), {{0}, {3}, {1}, {4}, {2}, {5}, {6}, {7}, {8}})},
+      {/*dataset_params=*/InterleaveDatasetParams3(),
+       /*expected_outputs=*/CreateTensors<int64_t>(
+           TensorShape({1}), {{0}, {3}, {6}, {1}, {4}, {7}, {2}, {5}, {8}})},
+      {/*dataset_params=*/InterleaveDatasetParams4(),
+       /*expected_outputs=*/CreateTensors<int64_t>(
+           TensorShape({1}), {{0}, {3}, {6}, {1}, {4}, {7}, {2}, {5}, {8}})},
+      {/*dataset_params=*/InterleaveDatasetParams5(),
+       /*expected_outputs=*/CreateTensors<tstring>(
+           TensorShape({1}),
+           {{"a"}, {"b"}, {"d"}, {"e"}, {"c"}, {"f"}, {"g"}, {"h"}, {"i"}})},
+      {/*dataset_params=*/InterleaveDatasetParams6(),
+       /*expected_outputs=*/CreateTensors<tstring>(
+           TensorShape({1}),
+           {{"a"}, {"b"}, {"c"}, {"d"}, {"e"}, {"f"}, {"g"}, {"h"}, {"i"}})},
+      {/*dataset_params=*/InterleaveDatasetParams7(),
+       /*expected_outputs=*/CreateTensors<tstring>(
+           TensorShape({1}),
+           {{"a"}, {"b"}, {"c"}, {"d"}, {"e"}, {"f"}, {"g"}, {"h"}, {"i"}})}};
+}
+
+ITERATOR_GET_NEXT_TEST_P(InterleaveDatasetOpTest, InterleaveDatasetParams,
+                         GetNextTestCases())
+
+std::vector<SkipTestCase<InterleaveDatasetParams>> SkipTestCases() {
+  return {{/*dataset_params=*/InterleaveDatasetParams1(),
+           /*num_to_skip*/ 0, /*expected_num_skipped*/ 0, /*get_next*/ true,
+           /*expected_outputs=*/
+           CreateTensors<int64_t>(TensorShape({1}), {{0}})},
+          {/*dataset_params=*/InterleaveDatasetParams1(),
+           /*num_to_skip*/ 5, /*expected_num_skipped*/ 5, /*get_next*/ true,
+           /*expected_outputs=*/
+           CreateTensors<int64_t>(TensorShape({1}), {{5}})},
+          {/*dataset_params=*/InterleaveDatasetParams1(),
+           /*num_to_skip*/ 10, /*expected_num_skipped*/ 9},
+          {/*dataset_params=*/InterleaveDatasetParams2(),
+           /*num_to_skip*/ 5, /*expected_num_skipped*/ 5, /*get_next*/ true,
+           /*expected_outputs=*/
+           CreateTensors<int64_t>(TensorShape({1}), {{5}})},
+          {/*dataset_params=*/InterleaveDatasetParams2(),
+           /*num_to_skip*/ 10, /*expected_num_skipped*/ 9},
+          {/*dataset_params=*/InterleaveDatasetParams3(),
+           /*num_to_skip*/ 5, /*expected_num_skipped*/ 5, /*get_next*/ true,
+           /*expected_outputs=*/
+           CreateTensors<int64_t>(TensorShape({1}), {{7}})},
+          {/*dataset_params=*/InterleaveDatasetParams3(),
+           /*num_to_skip*/ 10, /*expected_num_skipped*/ 9},
+          {/*dataset_params=*/InterleaveDatasetParams4(),
+           /*num_to_skip*/ 5, /*expected_num_skipped*/ 5, /*get_next*/ true,
+           /*expected_outputs=*/
+           CreateTensors<int64_t>(TensorShape({1}), {{7}})},
+          {/*dataset_params=*/InterleaveDatasetParams4(),
+           /*num_to_skip*/ 10, /*expected_num_skipped*/ 9},
+          {/*dataset_params=*/InterleaveDatasetParams5(),
+           /*num_to_skip*/ 3, /*expected_num_skipped*/ 3, /*get_next*/ true,
+           /*expected_outputs=*/
+           CreateTensors<tstring>(TensorShape({1}), {{"e"}})},
+          {/*dataset_params=*/InterleaveDatasetParams5(),
+           /*num_to_skip*/ 10, /*expected_num_skipped*/ 9},
+          {/*dataset_params=*/InterleaveDatasetParams6(),
+           /*num_to_skip*/ 3, /*expected_num_skipped*/ 3, /*get_next*/ true,
+           /*expected_outputs=*/
+           CreateTensors<tstring>(TensorShape({1}), {{"d"}})},
+          {/*dataset_params=*/InterleaveDatasetParams6(),
+           /*num_to_skip*/ 10, /*expected_num_skipped*/ 9},
+          {/*dataset_params=*/InterleaveDatasetParams7(),
+           /*num_to_skip*/ 3, /*expected_num_skipped*/ 3, /*get_next*/ true,
+           /*expected_outputs=*/
+           CreateTensors<tstring>(TensorShape({1}), {{"d"}})},
+          {/*dataset_params=*/InterleaveDatasetParams7(),
+           /*num_to_skip*/ 10, /*expected_num_skipped*/ 9}};
+}
+
+ITERATOR_SKIP_TEST_P(InterleaveDatasetOpTest, InterleaveDatasetParams,
+                     SkipTestCases())
 
 TEST_F(InterleaveDatasetOpTest, DatasetNodeName) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = TestCase1();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
-
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  EXPECT_EQ(interleave_dataset->node_name(), kNodeName);
+  auto dataset_params = InterleaveDatasetParams1();
+  TF_ASSERT_OK(Initialize(dataset_params));
+  TF_ASSERT_OK(CheckDatasetNodeName(dataset_params.node_name()));
 }
 
 TEST_F(InterleaveDatasetOpTest, DatasetTypeString) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = TestCase1();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
-
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  EXPECT_EQ(interleave_dataset->type_string(), kOpName);
+  auto dataset_params = InterleaveDatasetParams1();
+  TF_ASSERT_OK(Initialize(dataset_params));
+  TF_ASSERT_OK(CheckDatasetTypeString(
+      name_utils::OpName(InterleaveDatasetOp::kDatasetType)));
 }
 
-TEST_P(ParameterizedInterleaveDatasetOpTest, DatasetOutputDtypes) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = GetParam();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
-
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  TF_EXPECT_OK(VerifyTypesMatch(interleave_dataset->output_dtypes(),
-                                test_case.expected_output_dtypes));
+std::vector<DatasetOutputDtypesTestCase<InterleaveDatasetParams>>
+DatasetOutputDtypesTestCases() {
+  return {{/*dataset_params=*/InterleaveDatasetParams1(),
+           /*expected_output_dtypes=*/{DT_INT64}},
+          {/*dataset_params=*/InterleaveDatasetParams2(),
+           /*expected_output_dtypes=*/{DT_INT64}},
+          {/*dataset_params=*/InterleaveDatasetParams3(),
+           /*expected_output_dtypes=*/{DT_INT64}},
+          {/*dataset_params=*/InterleaveDatasetParams4(),
+           /*expected_output_dtypes=*/{DT_INT64}},
+          {/*dataset_params=*/InterleaveDatasetParams5(),
+           /*expected_output_dtypes=*/{DT_STRING}},
+          {/*dataset_params=*/InterleaveDatasetParams6(),
+           /*expected_output_dtypes=*/{DT_STRING}},
+          {/*dataset_params=*/InterleaveDatasetParams7(),
+           /*expected_output_dtypes=*/{DT_STRING}}};
 }
 
-TEST_P(ParameterizedInterleaveDatasetOpTest, DatasetOutputShapes) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = GetParam();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
+DATASET_OUTPUT_DTYPES_TEST_P(InterleaveDatasetOpTest, InterleaveDatasetParams,
+                             DatasetOutputDtypesTestCases())
 
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  TF_EXPECT_OK(VerifyShapesCompatible(interleave_dataset->output_shapes(),
-                                      test_case.expected_output_shapes));
+std::vector<DatasetOutputShapesTestCase<InterleaveDatasetParams>>
+DatasetOutputShapesTestCases() {
+  return {{/*dataset_params=*/InterleaveDatasetParams1(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams2(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams3(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams4(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams5(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams6(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams7(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}}};
 }
 
-TEST_P(ParameterizedInterleaveDatasetOpTest, Cardinality) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = GetParam();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
+DATASET_OUTPUT_SHAPES_TEST_P(InterleaveDatasetOpTest, InterleaveDatasetParams,
+                             DatasetOutputShapesTestCases())
 
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  EXPECT_EQ(interleave_dataset->Cardinality(), test_case.expected_cardinality);
+std::vector<CardinalityTestCase<InterleaveDatasetParams>>
+CardinalityTestCases() {
+  return {{/*dataset_params=*/InterleaveDatasetParams1(),
+           /*expected_cardinality=*/kUnknownCardinality},
+          {/*dataset_params=*/InterleaveDatasetParams2(),
+           /*expected_cardinality=*/kUnknownCardinality},
+          {/*dataset_params=*/InterleaveDatasetParams3(),
+           /*expected_cardinality=*/kUnknownCardinality},
+          {/*dataset_params=*/InterleaveDatasetParams4(),
+           /*expected_cardinality=*/kUnknownCardinality},
+          {/*dataset_params=*/InterleaveDatasetParams5(),
+           /*expected_cardinality=*/kUnknownCardinality},
+          {/*dataset_params=*/InterleaveDatasetParams6(),
+           /*expected_cardinality=*/kUnknownCardinality},
+          {/*dataset_params=*/InterleaveDatasetParams7(),
+           /*expected_cardinality=*/kUnknownCardinality}};
 }
 
-TEST_P(ParameterizedInterleaveDatasetOpTest, DatasetSave) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = GetParam();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
+DATASET_CARDINALITY_TEST_P(InterleaveDatasetOpTest, InterleaveDatasetParams,
+                           CardinalityTestCases())
 
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  std::unique_ptr<SerializationContext> serialization_ctx;
-  TF_ASSERT_OK(CreateSerializationContext(&serialization_ctx));
-  VariantTensorData data;
-  VariantTensorDataWriter writer(&data);
-  TF_ASSERT_OK(interleave_dataset->Save(serialization_ctx.get(), &writer));
-  TF_ASSERT_OK(writer.Flush());
+std::vector<IteratorOutputDtypesTestCase<InterleaveDatasetParams>>
+IteratorOutputDtypesTestCases() {
+  return {{/*dataset_params=*/InterleaveDatasetParams1(),
+           /*expected_output_dtypes=*/{DT_INT64}},
+          {/*dataset_params=*/InterleaveDatasetParams2(),
+           /*expected_output_dtypes=*/{DT_INT64}},
+          {/*dataset_params=*/InterleaveDatasetParams3(),
+           /*expected_output_dtypes=*/{DT_INT64}},
+          {/*dataset_params=*/InterleaveDatasetParams4(),
+           /*expected_output_dtypes=*/{DT_INT64}},
+          {/*dataset_params=*/InterleaveDatasetParams5(),
+           /*expected_output_dtypes=*/{DT_STRING}},
+          {/*dataset_params=*/InterleaveDatasetParams6(),
+           /*expected_output_dtypes=*/{DT_STRING}},
+          {/*dataset_params=*/InterleaveDatasetParams7(),
+           /*expected_output_dtypes=*/{DT_STRING}}};
 }
 
-TEST_P(ParameterizedInterleaveDatasetOpTest, IteratorOutputDtypes) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = GetParam();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
+ITERATOR_OUTPUT_DTYPES_TEST_P(InterleaveDatasetOpTest, InterleaveDatasetParams,
+                              IteratorOutputDtypesTestCases())
 
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  std::unique_ptr<IteratorContext> iterator_ctx;
-  TF_ASSERT_OK(
-      CreateIteratorContext(interleave_dataset_context.get(), &iterator_ctx));
-  std::unique_ptr<IteratorBase> iterator;
-  TF_ASSERT_OK(interleave_dataset->MakeIterator(iterator_ctx.get(), "Iterator",
-                                                &iterator));
-
-  TF_EXPECT_OK(VerifyTypesMatch(iterator->output_dtypes(),
-                                test_case.expected_output_dtypes));
+std::vector<IteratorOutputShapesTestCase<InterleaveDatasetParams>>
+IteratorOutputShapesTestCases() {
+  return {{/*dataset_params=*/InterleaveDatasetParams1(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams2(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams3(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams4(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams5(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams6(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}},
+          {/*dataset_params=*/InterleaveDatasetParams7(),
+           /*expected_output_shapes=*/{PartialTensorShape({1})}}};
 }
 
-TEST_P(ParameterizedInterleaveDatasetOpTest, IteratorOutputShapes) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = GetParam();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
+ITERATOR_OUTPUT_SHAPES_TEST_P(InterleaveDatasetOpTest, InterleaveDatasetParams,
+                              IteratorOutputShapesTestCases())
 
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  std::unique_ptr<IteratorContext> iterator_ctx;
-  TF_ASSERT_OK(
-      CreateIteratorContext(interleave_dataset_context.get(), &iterator_ctx));
-  std::unique_ptr<IteratorBase> iterator;
-  TF_ASSERT_OK(interleave_dataset->MakeIterator(iterator_ctx.get(), "Iterator",
-                                                &iterator));
-
-  TF_EXPECT_OK(VerifyShapesCompatible(iterator->output_shapes(),
-                                      test_case.expected_output_shapes));
+TEST_F(InterleaveDatasetOpTest, IteratorPrefix) {
+  auto dataset_params = InterleaveDatasetParams1();
+  TF_ASSERT_OK(Initialize(dataset_params));
+  TF_ASSERT_OK(CheckIteratorPrefix(name_utils::IteratorPrefix(
+      InterleaveDatasetOp::kDatasetType, dataset_params.iterator_prefix())));
 }
 
-TEST_F(InterleaveDatasetOpTest, IteratorOutputPrefix) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = TestCase1();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
-
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
-
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
-
-  std::unique_ptr<IteratorContext> iterator_ctx;
-  TF_ASSERT_OK(
-      CreateIteratorContext(interleave_dataset_context.get(), &iterator_ctx));
-  std::unique_ptr<IteratorBase> iterator;
-  TF_ASSERT_OK(interleave_dataset->MakeIterator(iterator_ctx.get(), "Iterator",
-                                                &iterator));
-
-  EXPECT_EQ(iterator->prefix(), "Iterator::Interleave");
+std::vector<IteratorSaveAndRestoreTestCase<InterleaveDatasetParams>>
+IteratorSaveAndRestoreTestCases() {
+  return {
+      {/*dataset_params=*/InterleaveDatasetParams1(),
+       /*breakpoints=*/{0, 4, 11},
+       /*expected_outputs=*/
+       CreateTensors<int64_t>(TensorShape({1}),
+                              {{0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}})},
+      {/*dataset_params=*/InterleaveDatasetParams2(),
+       /*breakpoints=*/{0, 4, 11},
+       /*expected_outputs=*/
+       CreateTensors<int64_t>(TensorShape({1}),
+                              {{0}, {3}, {1}, {4}, {2}, {5}, {6}, {7}, {8}})},
+      {/*dataset_params=*/InterleaveDatasetParams3(),
+       /*breakpoints=*/{0, 4, 11},
+       /*expected_outputs=*/
+       CreateTensors<int64_t>(TensorShape({1}),
+                              {{0}, {3}, {6}, {1}, {4}, {7}, {2}, {5}, {8}})},
+      {/*dataset_params=*/InterleaveDatasetParams4(),
+       /*breakpoints=*/{0, 4, 11},
+       /*expected_outputs=*/
+       CreateTensors<int64_t>(TensorShape({1}),
+                              {{0}, {3}, {6}, {1}, {4}, {7}, {2}, {5}, {8}})},
+      {/*dataset_params=*/InterleaveDatasetParams5(),
+       /*breakpoints=*/{0, 4, 11},
+       /*expected_outputs=*/
+       CreateTensors<tstring>(
+           TensorShape({1}),
+           {{"a"}, {"b"}, {"d"}, {"e"}, {"c"}, {"f"}, {"g"}, {"h"}, {"i"}})},
+      {/*dataset_params=*/InterleaveDatasetParams6(),
+       /*breakpoints=*/{0, 4, 11},
+       /*expected_outputs=*/
+       CreateTensors<tstring>(
+           TensorShape({1}),
+           {{"a"}, {"b"}, {"c"}, {"d"}, {"e"}, {"f"}, {"g"}, {"h"}, {"i"}})},
+      {/*dataset_params=*/InterleaveDatasetParams7(),
+       /*breakpoints=*/{0, 4, 11},
+       /*expected_outputs=*/
+       CreateTensors<tstring>(
+           TensorShape({1}),
+           {{"a"}, {"b"}, {"c"}, {"d"}, {"e"}, {"f"}, {"g"}, {"h"}, {"i"}})}};
 }
 
-TEST_P(ParameterizedInterleaveDatasetOpTest, Roundtrip) {
-  int thread_num = 2, cpu_num = 2;
-  const TestCase &test_case = GetParam();
-  TF_ASSERT_OK(InitThreadPool(thread_num));
-  TF_ASSERT_OK(InitFunctionLibraryRuntime(test_case.func_lib, cpu_num));
+ITERATOR_SAVE_AND_RESTORE_TEST_P(InterleaveDatasetOpTest,
+                                 InterleaveDatasetParams,
+                                 IteratorSaveAndRestoreTestCases())
 
-  std::unique_ptr<OpKernel> interleave_dataset_kernel;
-  TF_ASSERT_OK(CreateInterleaveDatasetKernel(
-      test_case.func, test_case.expected_output_dtypes,
-      test_case.expected_output_shapes, &interleave_dataset_kernel));
+TEST_F(InterleaveDatasetOpTest, InvalidCycleLength) {
+  const InterleaveDatasetParams dataset_params =
+      InterleaveDatasetParamsWithInvalidCycleLength();
+  EXPECT_EQ(Initialize(dataset_params).code(),
+            absl::StatusCode::kInvalidArgument);
+}
 
-  Tensor tensor_slice_dataset_tensor(DT_VARIANT, TensorShape({}));
-  std::vector<Tensor> inputs_for_tensor_slice_dataset = test_case.input_tensors;
-  TF_ASSERT_OK(CreateTensorSliceDatasetTensor(&inputs_for_tensor_slice_dataset,
-                                              &tensor_slice_dataset_tensor));
-  Tensor cycle_length = test_case.cycle_length;
-  Tensor block_length = test_case.block_length;
-  gtl::InlinedVector<TensorValue, 4> inputs(
-      {&tensor_slice_dataset_tensor, &cycle_length, &block_length});
-  std::unique_ptr<OpKernelContext> interleave_dataset_context;
-  TF_ASSERT_OK(CreateInterleaveDatasetContext(
-      interleave_dataset_kernel.get(), &inputs, &interleave_dataset_context));
-  DatasetBase *interleave_dataset;
-  TF_ASSERT_OK(CreateDataset(interleave_dataset_kernel.get(),
-                             interleave_dataset_context.get(),
-                             &interleave_dataset));
-  core::ScopedUnref scoped_unref(interleave_dataset);
+TEST_F(InterleaveDatasetOpTest, InvalidBlockLength) {
+  const InterleaveDatasetParams dataset_params =
+      InterleaveDatasetParamsWithInvalidBlockLength();
+  EXPECT_EQ(Initialize(dataset_params).code(),
+            absl::StatusCode::kInvalidArgument);
+}
 
-  std::unique_ptr<IteratorContext> iterator_ctx;
-  TF_ASSERT_OK(
-      CreateIteratorContext(interleave_dataset_context.get(), &iterator_ctx));
-  std::unique_ptr<IteratorBase> iterator;
-  TF_ASSERT_OK(interleave_dataset->MakeIterator(iterator_ctx.get(), "Iterator",
-                                                &iterator));
+TEST_F(InterleaveDatasetOpTest, CycleLengthOutOfBounds) {
+  const InterleaveDatasetParams dataset_params =
+      InterleaveDatasetParamsWithCycleLengthOutOfBounds();
+  EXPECT_EQ(Initialize(dataset_params).code(),
+            absl::StatusCode::kInvalidArgument);
+}
 
-  std::unique_ptr<SerializationContext> serialization_ctx;
-  TF_ASSERT_OK(CreateSerializationContext(&serialization_ctx));
+TEST_F(InterleaveDatasetOpTest, BlockLengthOutOfBounds) {
+  const InterleaveDatasetParams dataset_params =
+      InterleaveDatasetParamsWithBlockLengthOutOfBounds();
+  EXPECT_EQ(Initialize(dataset_params).code(),
+            absl::StatusCode::kInvalidArgument);
+}
 
+TEST_F(InterleaveDatasetOpTest, SplitProvider) {
+  auto params = InterleaveDatasetParams2();
+  TF_ASSERT_OK(InitializeRuntime(params));
+  TF_EXPECT_OK(CheckSplitProviderFullIteration(
+      params,
+      CreateTensors<int64_t>(TensorShape({1}),
+                             {{0}, {3}, {1}, {4}, {2}, {5}, {6}, {7}, {8}})));
+  TF_EXPECT_OK(CheckSplitProviderShardedIteration(
+      params, /*num_shards=*/3, /*shard_index=*/1,
+      CreateTensors<int64_t>(TensorShape({1}), {{3}, {4}, {5}})));
+}
+
+TEST_F(InterleaveDatasetOpTest, SymbolicCheckpointSaveAndRestore) {
+  auto dataset_params = InterleaveDatasetParams2();
+  TF_ASSERT_OK(Initialize(dataset_params));
+
+  IteratorContext::Params params(iterator_ctx_.get());
+  params.symbolic_checkpoint = true;
+  iterator_ctx_ = std::make_unique<IteratorContext>(std::move(params));
+
+  TF_ASSERT_OK(dataset_->MakeIterator(iterator_ctx_.get(), /*parent=*/nullptr,
+                                      dataset_params.iterator_prefix(),
+                                      &iterator_));
+
+  const std::vector<Tensor> expected_outputs = CreateTensors<int64_t>(
+      TensorShape({1}), {{0}, {3}, {1}, {4}, {2}, {5}, {6}, {7}, {8}});
+  const std::vector<int> breakpoints = {0, 4, 7, 11};
   bool end_of_sequence = false;
-  std::vector<Tensor> out_tensors;
   int cur_iteration = 0;
-  auto expected_outputs_it = test_case.expected_outputs.begin();
-  const std::vector<int> &breakpoints = test_case.breakpoints;
+  std::vector<Tensor> out_tensors;
   for (int breakpoint : breakpoints) {
-    VariantTensorData data;
-    VariantTensorDataWriter writer(&data);
-    TF_EXPECT_OK(iterator->Save(serialization_ctx.get(), &writer));
-    TF_EXPECT_OK(writer.Flush());
-    VariantTensorDataReader reader(&data);
-    TF_EXPECT_OK(RestoreIterator(iterator_ctx.get(), &reader, "Iterator",
-                                 *interleave_dataset, &iterator));
+    VariantTensorDataWriter writer;
+    TF_ASSERT_OK(iterator_ctx_->checkpoint()->Save(&writer));
+    std::vector<const VariantTensorData*> data;
+    writer.GetData(&data);
+    VariantTensorDataReader reader(data);
+    // Restore into a fresh `IteratorContext` (whose `MemoryCheckpoint` is
+    // empty) to mirror `IteratorResource::Restore`.
+    iterator_ctx_ = std::make_unique<IteratorContext>(*iterator_ctx_);
+    TF_ASSERT_OK(RestoreIterator(iterator_ctx_.get(), &reader,
+                                 dataset_params.iterator_prefix(), *dataset_,
+                                 &iterator_));
 
     while (cur_iteration <= breakpoint) {
-      TF_EXPECT_OK(iterator->GetNext(iterator_ctx.get(), &out_tensors,
-                                     &end_of_sequence));
-      if (!end_of_sequence) {
-        for (auto &tensor : out_tensors) {
-          EXPECT_NE(expected_outputs_it, test_case.expected_outputs.end());
-          TF_EXPECT_OK(ExpectEqual(tensor, *expected_outputs_it));
-          expected_outputs_it++;
-        }
-      }
+      std::vector<Tensor> next;
+      TF_ASSERT_OK(
+          iterator_->GetNext(iterator_ctx_.get(), &next, &end_of_sequence));
+      out_tensors.insert(out_tensors.end(), next.begin(), next.end());
       cur_iteration++;
     }
-
-    if (breakpoint >= test_case.expected_outputs.size()) {
-      EXPECT_TRUE(end_of_sequence);
-      EXPECT_EQ(expected_outputs_it, test_case.expected_outputs.end());
-    } else {
-      EXPECT_FALSE(end_of_sequence);
-    }
   }
+  TF_EXPECT_OK(
+      ExpectEqual(out_tensors, expected_outputs, /*compare_order=*/true));
 }
 
-INSTANTIATE_TEST_SUITE_P(InterleaveDatasetOpTest,
-                         ParameterizedInterleaveDatasetOpTest,
-                         ::testing::ValuesIn(std::vector<TestCase>(
-                             {TestCase1(), TestCase2(), TestCase3(),
-                              TestCase4(), TestCase5(), TestCase6(),
-                              TestCase7()})));
+TEST_F(InterleaveDatasetOpTest, SymbolicCheckpointSkip) {
+  auto dataset_params = InterleaveDatasetParams2();
+  TF_ASSERT_OK(Initialize(dataset_params));
+
+  IteratorContext::Params params(iterator_ctx_.get());
+  params.symbolic_checkpoint = true;
+  iterator_ctx_ = std::make_unique<IteratorContext>(std::move(params));
+  TF_ASSERT_OK(dataset_->MakeIterator(iterator_ctx_.get(), /*parent=*/nullptr,
+                                      dataset_params.iterator_prefix(),
+                                      &iterator_));
+  // Skipping 7 elements exhausts the first two input elements inside
+  // `SkipInternal` (which must purge their sub-iterator state from
+  // `iterator_ctx_->checkpoint()` and propagate the input iterator position
+  // recorded when the second input element was opened) and opens the third
+  // input element.
+  bool end_of_sequence = false;
+  int num_skipped = 0;
+  TF_ASSERT_OK(iterator_->Skip(iterator_ctx_.get(), /*num_to_skip=*/7,
+                               &end_of_sequence, &num_skipped));
+  EXPECT_FALSE(end_of_sequence);
+  EXPECT_EQ(num_skipped, 7);
+  {
+    VariantTensorDataWriter skip_writer;
+    TF_ASSERT_OK(iterator_ctx_->checkpoint()->Save(&skip_writer));
+    std::vector<const VariantTensorData*> skip_data;
+    skip_writer.GetData(&skip_data);
+    VariantTensorDataReader skip_reader(skip_data);
+    auto sub_iterator_index_key = [&](int input_element_index) {
+      return FullName(
+          name_utils::IteratorPrefix(
+              TensorSliceDatasetOp::kDatasetType,
+              absl::StrCat(iterator_->prefix(), "[", input_element_index, "]")),
+          "index");
+    };
+    EXPECT_FALSE(skip_reader.Contains(sub_iterator_index_key(0)));
+    EXPECT_FALSE(skip_reader.Contains(sub_iterator_index_key(1)));
+    EXPECT_TRUE(skip_reader.Contains(sub_iterator_index_key(2)));
+    int64_t input_index = -1;
+    TF_ASSERT_OK(skip_reader.ReadScalar(
+        FullName(name_utils::IteratorPrefix(TensorSliceDatasetOp::kDatasetType,
+                                            iterator_->prefix()),
+                 "index"),
+        &input_index));
+    EXPECT_EQ(input_index, 2);
+  }
+
+  // `DatasetBaseIterator::Skip` does not call `IteratorContext::SaveCheckpoint`
+  // (only `GetNext`, `MakeIterator`, and `Restore` do), so call `GetNext` once
+  // so the remaining open sub-iterator saves its state before the symbolic
+  // checkpoint is saved.
+  std::vector<Tensor> out_tensors;
+  TF_ASSERT_OK(
+      iterator_->GetNext(iterator_ctx_.get(), &out_tensors, &end_of_sequence));
+  EXPECT_FALSE(end_of_sequence);
+  TF_EXPECT_OK(ExpectEqual(out_tensors,
+                           CreateTensors<int64_t>(TensorShape({1}), {{7}}),
+                           /*compare_order=*/true));
+
+  VariantTensorDataWriter writer;
+  TF_ASSERT_OK(iterator_ctx_->checkpoint()->Save(&writer));
+  std::vector<const VariantTensorData*> data;
+  writer.GetData(&data);
+  VariantTensorDataReader reader(data);
+  // Restore into a fresh `IteratorContext` (whose `MemoryCheckpoint` is empty)
+  // to mirror `IteratorResource::Restore`.
+  iterator_ctx_ = std::make_unique<IteratorContext>(*iterator_ctx_);
+  TF_ASSERT_OK(RestoreIterator(iterator_ctx_.get(), &reader,
+                               dataset_params.iterator_prefix(), *dataset_,
+                               &iterator_));
+  TF_EXPECT_OK(
+      CheckIteratorGetNext(CreateTensors<int64_t>(TensorShape({1}), {{8}}),
+                           /*compare_order=*/true));
+}
+
+InterleaveDatasetParams InterleaveBenchmarkDatasetParams() {
+  auto tensor_slice_dataset_params = TensorSliceDatasetParams(
+      /*components=*/{CreateTensor<int64_t>(TensorShape{100, 10, 1})},
+      /*node_name=*/"tensor_slice_dataset");
+  return InterleaveDatasetParams(
+      std::move(tensor_slice_dataset_params),
+      /*other_arguments=*/{},
+      /*cycle_length=*/2,
+      /*block_length=*/1,
+      /*func=*/
+      MakeTensorSliceDatasetFunc(
+          DataTypeVector({DT_INT64}),
+          std::vector<PartialTensorShape>({PartialTensorShape({1})})),
+      /*func_lib=*/{test::function::MakeTensorSliceDataset()},
+      /*type_arguments=*/{},
+      /*output_dtypes=*/{DT_INT64},
+      /*output_shapes=*/{PartialTensorShape({1})},
+      /*node_name=*/kNodeName);
+}
+
+// `test_benchmark.h` provides `BENCHMARK`, `benchmark::State`, and
+// `benchmark::DoNotOptimize` without re-exporting the internal headers that
+// define them (`registration.h`, `state.h`, `utils.h`), which do not exist in
+// the benchmark release that open-source TensorFlow builds with.
+// NOLINTBEGIN(misc-include-cleaner)
+void BM_InterleaveDatasetGetNext(benchmark::State& state) {
+  auto dataset_params = InterleaveBenchmarkDatasetParams();
+  InterleaveDatasetOpTest test_base;
+  TF_CHECK_OK(test_base.InitializeRuntime(dataset_params));
+  std::unique_ptr<TestDataset> dataset;
+  TF_CHECK_OK(test_base.MakeDataset(dataset_params, &dataset));
+  std::unique_ptr<TestIterator> iterator;
+  std::vector<Tensor> out_tensors;
+  for (auto _ : state) {
+    TF_CHECK_OK(test_base.MakeIterator(dataset_params, *dataset, &iterator));
+    bool end_of_sequence = false;
+    while (!end_of_sequence) {
+      TF_CHECK_OK(iterator->GetNext(&out_tensors, &end_of_sequence));
+      benchmark::DoNotOptimize(out_tensors);
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * 1000);
+}
+BENCHMARK(BM_InterleaveDatasetGetNext);
+
+void BM_InterleaveDatasetSkip(benchmark::State& state) {
+  auto dataset_params = InterleaveBenchmarkDatasetParams();
+  InterleaveDatasetOpTest test_base;
+  TF_CHECK_OK(test_base.InitializeRuntime(dataset_params));
+  std::unique_ptr<TestDataset> dataset;
+  TF_CHECK_OK(test_base.MakeDataset(dataset_params, &dataset));
+  std::unique_ptr<TestIterator> iterator;
+  for (auto _ : state) {
+    TF_CHECK_OK(test_base.MakeIterator(dataset_params, *dataset, &iterator));
+    bool end_of_sequence = false;
+    while (!end_of_sequence) {
+      int num_skipped = 0;
+      TF_CHECK_OK(iterator->iterator()->Skip(iterator->ctx(), /*num_to_skip=*/1,
+                                             &end_of_sequence, &num_skipped));
+      benchmark::DoNotOptimize(num_skipped);
+    }
+  }
+  state.SetItemsProcessed(state.iterations() * 1000);
+}
+BENCHMARK(BM_InterleaveDatasetSkip);
+// NOLINTEND(misc-include-cleaner)
 
 }  // namespace
 }  // namespace data

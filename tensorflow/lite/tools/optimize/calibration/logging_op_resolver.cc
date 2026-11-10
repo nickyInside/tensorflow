@@ -14,24 +14,74 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/tools/optimize/calibration/logging_op_resolver.h"
 
-#include "absl/memory/memory.h"
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
+#include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/api/error_reporter.h"
+#include "tensorflow/lite/core/api/op_resolver.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/tools/optimize/calibration/calibration_common.h"
+#include "tensorflow/lite/util.h"
 
 namespace tflite {
 namespace optimize {
 namespace calibration {
 
-LoggingOpResolver::LoggingOpResolver(const BuiltinOpsSet& ops_to_replace,
-                                     const OpResolver& base_resolver,
-                                     KernelEvalFuncPtr logging_eval_fn) {
-  for (const auto& op_and_version : ops_to_replace) {
+LoggingOpResolver::LoggingOpResolver(
+    const BuiltinOpsSet& builtin_ops_to_replace,
+    const CustomOpsSet& custom_ops_to_replace, const OpResolver& base_resolver,
+    KernelEvalFuncPtr logging_eval_fn, ErrorReporter* error_reporter) {
+  std::vector<std::string> unresolved_builtin_ops;
+  std::vector<std::string> unresolved_custom_ops;
+
+  for (const auto& op_and_version : builtin_ops_to_replace) {
     const TfLiteRegistration* base_registration =
         base_resolver.FindOp(op_and_version.first, op_and_version.second);
+    if (!base_registration) {
+      unresolved_builtin_ops.push_back(
+          EnumNameBuiltinOperator(op_and_version.first));
+      continue;
+    }
     BuiltinOperatorKey key = op_and_version;
     builtin_op_evalfn_map_[key] = base_registration->invoke;
-    std::unique_ptr<TfLiteRegistration> logging_registation =
-        absl::make_unique<TfLiteRegistration>(*base_registration);
-    logging_registation->invoke = logging_eval_fn;
-    builtin_op_registration_map_[key] = std::move(logging_registation);
+    auto logging_registration =
+        std::make_unique<TfLiteRegistration>(*base_registration);
+    logging_registration->invoke = logging_eval_fn;
+    builtin_op_registration_map_[key] = std::move(logging_registration);
+  }
+  for (const auto& op_and_version : custom_ops_to_replace) {
+    const TfLiteRegistration* base_registration = base_resolver.FindOp(
+        op_and_version.first.c_str(), op_and_version.second);
+    if (!base_registration) {
+      if (!IsFlexOp(op_and_version.first.c_str()))
+        unresolved_custom_ops.push_back(op_and_version.first.c_str());
+      continue;
+    }
+    CustomOperatorKey key = op_and_version;
+    custom_op_evalfn_map_[key] = base_registration->invoke;
+    auto logging_registration =
+        std::make_unique<TfLiteRegistration>(*base_registration);
+    logging_registration->invoke = logging_eval_fn;
+    custom_op_registration_map_[key] = std::move(logging_registration);
+  }
+
+  if (!unresolved_builtin_ops.empty() || !unresolved_custom_ops.empty()) {
+    if (!error_reporter) return;
+    std::string error_message =
+        "Failed to initialize op resolver for calibration:";
+    if (!unresolved_builtin_ops.empty())
+      absl::StrAppend(&error_message, "\nThere are unresolved builtin ops: [",
+                      absl::StrJoin(unresolved_builtin_ops, ", "), "]");
+    if (!unresolved_custom_ops.empty()) {
+      absl::StrAppend(&error_message, "\nThere are unresolved custom ops: [",
+                      absl::StrJoin(unresolved_custom_ops, ", "), "]");
+    }
+    TF_LITE_REPORT_ERROR(error_reporter, error_message.c_str());
   }
 }
 
@@ -53,9 +103,20 @@ KernelEvalFuncPtr LoggingOpResolver::GetWrappedKernelInvoke(BuiltinOperator op,
 
 const TfLiteRegistration* LoggingOpResolver::FindOp(const char* op,
                                                     int version) const {
-  // TODO(b/121374947): Support custom ops as well.
+  CustomOperatorKey key = {op, version};
+  if (custom_op_registration_map_.find(key) !=
+      custom_op_registration_map_.end()) {
+    return custom_op_registration_map_.at(key).get();
+  }
+
   return nullptr;
 }
+
+KernelEvalFuncPtr LoggingOpResolver::GetWrappedKernelInvoke(const char* op,
+                                                            int version) const {
+  return custom_op_evalfn_map_.at({op, version});
+}
+
 }  // namespace calibration
 }  // namespace optimize
 }  // namespace tflite

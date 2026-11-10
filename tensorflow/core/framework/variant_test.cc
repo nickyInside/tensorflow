@@ -15,8 +15,10 @@ limitations under the License.
 
 #include "tensorflow/core/framework/variant.h"
 
+#include <cstddef>
+#if defined(__x86_64__)
 #include <xmmintrin.h>
-
+#endif
 #include <vector>
 
 #include "tensorflow/core/framework/tensor.h"
@@ -35,8 +37,8 @@ namespace {
 template <typename T, bool BIG>
 struct Wrapper {
   T value;
-  char big[BIG ? 256 : 0];
-  string TypeName() const { return "POD"; }
+  char big[BIG ? 256 : 1];
+  std::string TypeName() const { return "POD"; }
 };
 
 template <bool BIG>
@@ -85,13 +87,13 @@ class MaybeAlive {
 
   static int LiveCounter() { return live_counter_; }
 
-  string TypeName() const { return "MaybeAlive"; }
+  std::string TypeName() const { return "MaybeAlive"; }
   void Encode(VariantTensorData* data) const {}
   bool Decode(VariantTensorData data) { return false; }
 
  private:
   bool alive_;
-  char big_[BIG ? 256 : 0];
+  char big_[BIG ? 256 : 1];
   static int live_counter_;
 };
 
@@ -122,10 +124,10 @@ class DeleteCounter {
     rhs.counter_ = nullptr;
   }
   DeleteCounter(const DeleteCounter& rhs) = default;
-  char big_[BIG ? 256 : 0];
+  char big_[BIG ? 256 : 1];
   int* counter_;
 
-  string TypeName() const { return "DeleteCounter"; }
+  std::string TypeName() const { return "DeleteCounter"; }
   void Encode(VariantTensorData* data) const {}
   bool Decode(VariantTensorData data) { return false; }
 };
@@ -214,6 +216,88 @@ TEST(VariantTest, MoveAndCopyBetweenBigAndSmallVariants) {
   EXPECT_EQ(deleted_small, 1);
 }
 
+namespace {
+
+template <bool BIG>
+class MoveAndCopyCounter {
+ public:
+  MoveAndCopyCounter()
+      : big_{}, move_counter_(nullptr), copy_counter_(nullptr) {}
+  explicit MoveAndCopyCounter(int* move_counter, int* copy_counter)
+      : big_{}, move_counter_(move_counter), copy_counter_(copy_counter) {}
+
+  MoveAndCopyCounter& operator=(const MoveAndCopyCounter& rhs) {
+    copy_counter_ = rhs.copy_counter_;
+    if (copy_counter_) ++*copy_counter_;
+    return *this;
+  }
+  MoveAndCopyCounter& operator=(MoveAndCopyCounter&& rhs) {
+    move_counter_ = rhs.move_counter_;
+    if (move_counter_) ++*move_counter_;
+    return *this;
+  }
+  MoveAndCopyCounter(MoveAndCopyCounter&& rhs) {
+    move_counter_ = rhs.move_counter_;
+    if (move_counter_) ++*move_counter_;
+  }
+  MoveAndCopyCounter(const MoveAndCopyCounter& rhs) {
+    copy_counter_ = rhs.copy_counter_;
+    if (copy_counter_) ++*copy_counter_;
+  }
+  char big_[BIG ? 256 : 1];
+  int* move_counter_;
+  int* copy_counter_;
+
+  std::string TypeName() const { return "MoveAndCopyCounter"; }
+  void Encode(VariantTensorData* data) const {}
+  bool Decode(VariantTensorData data) { return false; }
+};
+
+}  // namespace
+
+TEST(VariantTest, EmplaceBigAndSmallVariants) {
+  {
+    int moved_big = 0;
+    int moved_small = 0;
+    int copied_big = 0;
+    int copied_small = 0;
+    Variant x = MoveAndCopyCounter</*BIG=*/true>(&moved_big, &copied_big);
+    EXPECT_EQ(moved_big, 1);
+    EXPECT_EQ(copied_big, 0);
+    Variant y = MoveAndCopyCounter</*BIG=*/false>(&moved_small, &copied_small);
+    EXPECT_EQ(moved_small, 1);
+    EXPECT_EQ(copied_small, 0);
+  }
+
+  {
+    int moved_big = 0;
+    int moved_small = 0;
+    int copied_big = 0;
+    int copied_small = 0;
+    Variant x(MoveAndCopyCounter</*BIG=*/true>(&moved_big, &copied_big));
+    EXPECT_EQ(moved_big, 1);
+    EXPECT_EQ(copied_big, 0);
+    Variant y(MoveAndCopyCounter</*BIG=*/false>(&moved_small, &copied_small));
+    EXPECT_EQ(moved_small, 1);
+    EXPECT_EQ(copied_small, 0);
+  }
+
+  {
+    int moved_big = 0;
+    int moved_small = 0;
+    int copied_big = 0;
+    int copied_small = 0;
+    Variant x;
+    x.emplace<MoveAndCopyCounter</*BIG=*/true>>(&moved_big, &copied_big);
+    EXPECT_EQ(moved_big, 0);
+    EXPECT_EQ(copied_big, 0);
+    Variant y;
+    y.emplace<MoveAndCopyCounter</*BIG=*/false>>(&moved_small, &copied_small);
+    EXPECT_EQ(moved_small, 0);
+    EXPECT_EQ(copied_small, 0);
+  }
+}
+
 template <bool BIG>
 void TestDestructOnVariantMove() {
   CHECK_EQ(MaybeAlive<BIG>::LiveCounter(), 0);
@@ -240,7 +324,7 @@ TEST(VariantTest, Int) {
   EXPECT_EQ(*x.get<int>(), 3);
   EXPECT_EQ(x.TypeName(), "int");
 }
-
+#if defined(__x86_64__)
 struct MayCreateAlignmentDifficulties {
   int a;
   __m128 b;
@@ -269,7 +353,7 @@ TEST(VariantTest, NotAlignable) {
   EXPECT_EQ(z_val->a, -1);
   EXPECT_TRUE(M128AllEqual(z_val->b, v));
 }
-
+#endif
 template <bool BIG>
 void TestBasic() {
   Variant x;
@@ -371,12 +455,25 @@ TEST(VariantTest, Tensor) {
   x.get<Tensor>()->flat<float>()(0) += 1.0f;
   EXPECT_EQ(x.get<Tensor>()->flat<float>()(0), 43.0f);
   EXPECT_EQ(x.TypeName(), "tensorflow::Tensor");
+
+  Tensor& foo_t = x.emplace<Tensor>("foo");
+  EXPECT_NE(x.get<Tensor>(), nullptr);
+  EXPECT_EQ(x.get<Tensor>()->scalar<tstring>()(), "foo");
+  EXPECT_EQ(&foo_t, x.get<Tensor>());
+  EXPECT_EQ(x.TypeName(), "tensorflow::Tensor");
+
+  Tensor& bar_t = x.emplace<Tensor>(DT_INT64, TensorShape({1}));
+  EXPECT_EQ(&bar_t, x.get<Tensor>());
+  bar_t.vec<int64_t>()(0) = 17;
+  EXPECT_EQ(x.get<Tensor>()->vec<int64_t>()(0), 17);
+  bar_t.vec<int64_t>()(0) += 1;
+  EXPECT_EQ(x.get<Tensor>()->vec<int64_t>()(0), 18);
 }
 
 TEST(VariantTest, NontrivialTensorVariantCopy) {
   Tensor variants(DT_VARIANT, {});
   Tensor t(true);
-  test::FillValues<Variant>(&variants, gtl::ArraySlice<Variant>({t}));
+  test::FillValues<Variant>(&variants, absl::Span<const Variant>({t}));
   const Tensor* t_c = variants.flat<Variant>()(0).get<Tensor>();
   EXPECT_EQ(t_c->dtype(), t.dtype());
   EXPECT_EQ(t_c->shape(), t.shape());
@@ -441,7 +538,7 @@ struct TensorList {
     return true;
   }
 
-  string TypeName() const { return "TensorList"; }
+  std::string TypeName() const { return "TensorList"; }
 
   std::vector<Tensor> vec;
 };
@@ -492,10 +589,10 @@ TEST(VariantTest, TensorListTest) {
   serialized.ToProto(&data);
   const Variant y_unknown = data;
   EXPECT_EQ(y_unknown.TypeName(), "TensorList");
-  EXPECT_EQ(y_unknown.TypeId(), MakeTypeIndex<VariantTensorDataProto>());
+  EXPECT_EQ(y_unknown.TypeId(), TypeIndex::Make<VariantTensorDataProto>());
   EXPECT_EQ(y_unknown.DebugString(),
-            strings::StrCat(
-                "Variant<type: TensorList value: ", data.DebugString(), ">"));
+            absl::StrCat("Variant<type: TensorList value: ", data.DebugString(),
+                         ">"));
 }
 
 template <bool BIG>
@@ -517,9 +614,9 @@ void PodUpdateTest() {
   struct Pod {
     int x;
     float y;
-    char big[BIG ? 256 : 0];
+    char big[BIG ? 256 : 1];
 
-    string TypeName() const { return "POD"; }
+    std::string TypeName() const { return "POD"; }
   };
 
   Variant x = Pod{10, 20.f};
@@ -540,9 +637,9 @@ void TestEncodeDecodePod() {
   struct Pod {
     int x;
     float y;
-    char big[BIG ? 256 : 0];
+    char big[BIG ? 256 : 1];
 
-    string TypeName() const { return "POD"; }
+    std::string TypeName() const { return "POD"; }
   };
 
   Variant x;
@@ -578,6 +675,87 @@ TEST(VariantTest, EncodeDecodeTensor) {
             "Variant<type: tensorflow::Tensor value: Tensor<type: int32 shape: "
             "[] values: 42>>");
   EXPECT_EQ(x.get<Tensor>()->flat<int>()(0), y.get<Tensor>()->flat<int>()(0));
+}
+
+TEST(BoolVariantTest, DecodeNonBool) {
+  Tensor parsed(DT_VARIANT);
+  TensorProto tensor_proto;
+  tensor_proto.set_dtype(DT_VARIANT);
+  VariantTensorDataProto* variant = tensor_proto.add_variant_val();
+  variant->set_type_name("bool");
+  variant->set_metadata("-");  // 42
+  EXPECT_TRUE(parsed.FromProto(tensor_proto));
+  EXPECT_EQ(parsed.NumElements(), 1);
+  EXPECT_TRUE(parsed.flat<Variant>()(0).get<bool>());
+}
+
+struct FallibleType {
+  bool fail_encode = false;
+  std::string value = "success";
+
+  explicit FallibleType(bool fail = false) : fail_encode(fail) {}
+
+  bool Encode(VariantTensorData* data) const {
+    if (fail_encode) return false;
+    data->set_metadata(value);
+    return true;
+  }
+
+  bool Decode(VariantTensorData data) { return true; }
+
+  std::string TypeName() const { return "FallibleType"; }
+};
+
+struct InfallibleVoidType {
+  std::string value = "void_success";
+
+  void Encode(VariantTensorData* data) const { data->set_metadata(value); }
+
+  bool Decode(VariantTensorData data) { return true; }
+
+  std::string TypeName() const { return "InfallibleVoidType"; }
+};
+
+TEST(VariantTest, BoolEncodeSuccessAndFailure) {
+  Variant v_ok = FallibleType{/*fail_encode=*/false};
+  VariantTensorData data;
+  EXPECT_TRUE(v_ok.Encode(&data));
+  std::string buf;
+  EXPECT_TRUE(v_ok.Encode(&buf));
+
+  Variant v_fail = FallibleType{/*fail_encode=*/true};
+  EXPECT_FALSE(v_fail.Encode(&data));
+  EXPECT_FALSE(v_fail.Encode(&buf));
+}
+
+TEST(VariantTest, VoidEncodeTreatedAsTrue) {
+  Variant v = InfallibleVoidType{};
+  VariantTensorData data;
+  EXPECT_TRUE(v.Encode(&data));
+  std::string buf;
+  EXPECT_TRUE(v.Encode(&buf));
+}
+
+TEST(VariantTest, ErrorPropagationToAsProtoFieldAndTensorContent) {
+  Tensor t_ok(DT_VARIANT, TensorShape({2}));
+  t_ok.flat<Variant>()(0) = FallibleType{/*fail_encode=*/false};
+  t_ok.flat<Variant>()(1) = InfallibleVoidType{};
+
+  TensorProto proto_field_ok;
+  EXPECT_TRUE(t_ok.AsProtoField(&proto_field_ok));
+
+  TensorProto proto_content_ok;
+  EXPECT_TRUE(t_ok.AsProtoTensorContent(&proto_content_ok));
+
+  Tensor t_fail(DT_VARIANT, TensorShape({2}));
+  t_fail.flat<Variant>()(0) = FallibleType{/*fail_encode=*/false};
+  t_fail.flat<Variant>()(1) = FallibleType{/*fail_encode=*/true};
+
+  TensorProto proto_field_fail;
+  EXPECT_FALSE(t_fail.AsProtoField(&proto_field_fail));
+
+  TensorProto proto_content_fail;
+  EXPECT_FALSE(t_fail.AsProtoTensorContent(&proto_content_fail));
 }
 
 }  // end namespace tensorflow

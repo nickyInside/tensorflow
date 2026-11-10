@@ -1,3 +1,18 @@
+# Copyright 2026 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
 # Description:
 #   Provides ApiDef access and ApiDef validation for TensorFlow.
 #
@@ -6,37 +21,42 @@
 #   :python_api_def
 #   :java_api_def
 
-package(
-    default_visibility = ["//visibility:private"],
+load(
+    "@local_config_tensorrt//:build_defs.bzl",
+    "if_tensorrt",
 )
-
-licenses(["notice"])  # Apache 2.0
-
+load(
+    "@xla//xla/tsl/mkl:build_defs.bzl",
+    "if_mkl",
+)
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_binary",
     "tf_cc_test",
 )
-load(
-    "//third_party/mkl:build_defs.bzl",
-    "if_mkl",
+load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+
+package(
+    # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
+    default_visibility = ["//visibility:private"],
+    licenses = ["notice"],
 )
 
-filegroup(
+alias(
     name = "base_api_def",
-    srcs = glob(["base_api/*"]),
+    actual = "//tensorflow/core/api_def/base_api:base_api_def",
     visibility = ["//tensorflow:internal"],
 )
 
-filegroup(
+alias(
     name = "python_api_def",
-    srcs = glob(["python_api/*"]),
+    actual = "//tensorflow/core/api_def/python_api:python_api_def",
     visibility = ["//tensorflow:internal"],
 )
 
-filegroup(
+alias(
     name = "java_api_def",
-    srcs = glob(["java_api/*"]),
+    actual = "//tensorflow/core/api_def/java_api:java_api_def",
     visibility = ["//tensorflow:internal"],
 )
 
@@ -44,7 +64,7 @@ cc_library(
     name = "excluded_ops_lib",
     srcs = ["excluded_ops.cc"],
     hdrs = ["excluded_ops.h"],
-    copts = if_mkl(["-DINTEL_MKL=1"]),
+    copts = if_mkl(["-DINTEL_MKL=1"]) + if_tensorrt(["-DGOOGLE_TENSORRT=1"]),
 )
 
 cc_library(
@@ -60,6 +80,7 @@ cc_library(
         "//tensorflow/core:op_gen_lib",
         "//tensorflow/core:ops",
         "//tensorflow/core:protos_all_cc",
+        "@com_google_absl//absl/strings:str_format",
     ],
 )
 
@@ -110,5 +131,9 @@ tf_cc_test(
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:resource_loader",
+        "//tensorflow/core/tpu/ops:sparse_core_ops",
+        "//tensorflow/core/tpu/ops:sparse_core_preprocess_ops",
+        "//tensorflow/core/tpu/ops:tpu_copy_with_dynamic_shape_op",
     ],
 )

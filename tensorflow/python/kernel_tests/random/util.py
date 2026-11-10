@@ -14,15 +14,10 @@
 # ==============================================================================
 """Utilities for testing random variables."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import math
 
 import numpy as np
 
-from tensorflow.python.framework import dtypes
 from tensorflow.python.ops.distributions import special_math
 
 
@@ -50,10 +45,12 @@ def test_moment_matching(
   sample_moments = []
   expected_moments = []
   variance_sample_moments = []
-  x = samples.flat
   for i in range(1, number_moments + 1):
-    strided_range = x[::(i - 1) * stride + 1]
-    sample_moments.append(np.mean(strided_range ** i))
+    if len(samples.shape) == 2:
+      strided_range = samples.flat[::(i - 1) * stride + 1]
+    else:
+      strided_range = samples[::(i - 1) * stride + 1, ...]
+    sample_moments.append(np.mean(strided_range**i, axis=0))
     expected_moments.append(dist.moment(i))
     variance_sample_moments.append(
         (dist.moment(2 * i) - dist.moment(i) ** 2) / len(strided_range))
@@ -67,8 +64,7 @@ def test_moment_matching(
         i * np.finfo(samples.dtype).eps)
     tiny = np.finfo(samples.dtype).tiny
     assert np.all(total_variance > 0)
-    if total_variance < tiny:
-      total_variance = tiny
+    total_variance = np.where(total_variance < tiny, tiny, total_variance)
     # z_test is approximately a unit normal distribution.
     z_test_scores.append(abs(
         (sample_moments[i - 1] - expected_moments[i - 1]) / np.sqrt(
@@ -100,7 +96,17 @@ def anderson_darling(x):
   return -n - z / n
 
 
-def test_truncated_normal(assert_equal, assert_all_close, dtype, n, y):
+def test_truncated_normal(assert_equal,
+                          assert_all_close,
+                          n,
+                          y,
+                          means=None,
+                          stddevs=None,
+                          minvals=None,
+                          maxvals=None,
+                          mean_atol=5e-4,
+                          median_atol=8e-4,
+                          variance_rtol=1e-3):
   """Tests truncated normal distribution's statistics."""
   def _normal_cdf(x):
     return .5 * math.erfc(-x / math.sqrt(2))
@@ -109,16 +115,33 @@ def test_truncated_normal(assert_equal, assert_all_close, dtype, n, y):
     return math.exp(-(x**2) / 2.) / math.sqrt(2 * math.pi)
 
   def probit(x):
-    return special_math.ndtri(x)
+    return special_math.ndtri(np.float64(x))
 
   a = -2.
   b = 2.
   mu = 0.
   sigma = 1.
 
+  if minvals is not None:
+    a = minvals
+
+  if maxvals is not None:
+    b = maxvals
+
+  if means is not None:
+    mu = means
+
+  if stddevs is not None:
+    sigma = stddevs
+
   alpha = (a - mu) / sigma
   beta = (b - mu) / sigma
-  z = _normal_cdf(beta) - _normal_cdf(alpha)
+  if alpha > 0:
+    z = _normal_cdf(-alpha) - _normal_cdf(-beta)
+    median_norm = -probit((_normal_cdf(-alpha) + _normal_cdf(-beta)) / 2.0)
+  else:
+    z = _normal_cdf(beta) - _normal_cdf(alpha)
+    median_norm = probit((_normal_cdf(alpha) + _normal_cdf(beta)) / 2.0)
 
   assert_equal((y >= a).sum(), n)
   assert_equal((y <= b).sum(), n)
@@ -129,12 +152,11 @@ def test_truncated_normal(assert_equal, assert_all_close, dtype, n, y):
   expected_mean = mu + (normal_pdf(alpha) - normal_pdf(beta)) / z * sigma
   y = y.astype(float)
   actual_mean = np.mean(y)
-  assert_all_close(actual_mean, expected_mean, atol=5e-4)
+  assert_all_close(actual_mean, expected_mean, atol=mean_atol)
 
-  expected_median = mu + probit(
-      (_normal_cdf(alpha) + _normal_cdf(beta)) / 2.) * sigma
+  expected_median = mu + median_norm * sigma
   actual_median = np.median(y)
-  assert_all_close(actual_median, expected_median, atol=8e-4)
+  assert_all_close(actual_median, expected_median, atol=median_atol)
 
   expected_variance = sigma**2 * (1 + (
       (alpha * normal_pdf(alpha) - beta * normal_pdf(beta)) / z) - (
@@ -143,4 +165,4 @@ def test_truncated_normal(assert_equal, assert_all_close, dtype, n, y):
   assert_all_close(
       actual_variance,
       expected_variance,
-      rtol=6e-3 if dtype == dtypes.bfloat16 else 1e-3)
+      rtol=variance_rtol)

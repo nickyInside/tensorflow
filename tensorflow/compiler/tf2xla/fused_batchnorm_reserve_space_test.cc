@@ -13,22 +13,36 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "absl/algorithm/container.h"
+#include "absl/strings/str_cat.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
+#include "tensorflow/cc/framework/ops.h"
+#include "tensorflow/cc/framework/scope.h"
 #include "tensorflow/cc/ops/array_ops.h"
 #include "tensorflow/cc/ops/const_op.h"
 #include "tensorflow/cc/ops/nn_ops.h"
+#include "tensorflow/compiler/jit/flags.h"
+#include "tensorflow/core/framework/device_attributes.pb.h"
+#include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/tensor.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/framework/types.pb.h"
-#include "tensorflow/core/kernels/ops_testutil.h"
+#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/public/session.h"
+#include "tensorflow/core/public/session_options.h"
 
 namespace tensorflow {
 namespace {
-Status GetTestDevice(Session* session, string* test_device) {
+absl::Status GetTestDevice(Session* session, std::string* test_device) {
   std::vector<DeviceAttributes> devices;
   TF_RETURN_IF_ERROR(session->ListDevices(&devices));
 
@@ -41,12 +55,12 @@ Status GetTestDevice(Session* session, string* test_device) {
   });
 
   if (!found_gpu && !found_cpu) {
-    return errors::Internal("Expected at least one CPU or GPU!");
+    return absl::InternalError("Expected at least one CPU or GPU!");
   }
 
   *test_device = found_gpu ? "GPU" : "CPU";
   VLOG(2) << "Using test device " << *test_device;
-  return Status::OK();
+  return absl::OkStatus();
 }
 
 void FillZeros(Tensor* tensor) {
@@ -71,7 +85,7 @@ TEST(FusedBatchnormReserveSpaceTest, Test) {
   std::unique_ptr<tensorflow::Session> session(
       tensorflow::NewSession(tensorflow::SessionOptions{}));
 
-  string test_device;
+  std::string test_device;
   TF_ASSERT_OK(GetTestDevice(session.get(), &test_device));
 
   Scope root = tensorflow::Scope::NewRootScope();
@@ -94,8 +108,8 @@ TEST(FusedBatchnormReserveSpaceTest, Test) {
   Output variance =
       Const(root.WithOpName("variance"), Input::Initializer(variance_data));
 
-  string tf_device = absl::StrCat("/device:", test_device, ":0");
-  string xla_device = absl::StrCat("/device:XLA_", test_device, ":0");
+  std::string tf_device = absl::StrCat("/device:", test_device, ":0");
+  std::string xla_device = absl::StrCat("/device:XLA_", test_device, ":0");
 
   FusedBatchNorm fused_batch_norm_tf(
       root.WithOpName("fused_batch_norm_tf").WithDevice(tf_device), input,
@@ -126,5 +140,11 @@ TEST(FusedBatchnormReserveSpaceTest, Test) {
   test::ExpectClose(results[0], results[1], /*atol=*/1e-4);
   test::ExpectClose(results[2], results[3], /*atol=*/1e-4);
 }
+
+static bool Initialized = [] {
+  tensorflow::GetXlaDeviceFlags()->tf_xla_enable_xla_devices = true;
+  return true;
+}();
+
 }  // namespace
 }  // namespace tensorflow

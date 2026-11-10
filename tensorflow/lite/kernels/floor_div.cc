@@ -12,11 +12,18 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#include "tensorflow/lite/c/c_api_internal.h"
+#include <math.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include <functional>
+
+#include "tensorflow/lite/core/c/common.h"
+#include "tensorflow/lite/kernels/internal/reference/binary_function.h"
 #include "tensorflow/lite/kernels/internal/reference/reference_ops.h"
 #include "tensorflow/lite/kernels/internal/tensor.h"
+#include "tensorflow/lite/kernels/internal/tensor_ctypes.h"
 #include "tensorflow/lite/kernels/kernel_util.h"
-#include "tensorflow/lite/kernels/op_macros.h"
 
 namespace tflite {
 namespace ops {
@@ -33,12 +40,6 @@ constexpr int kOutputTensor = 0;
 struct OpData {
   bool requires_broadcast;
 };
-
-template <typename T>
-T FloorDiv(T input1, T input2) {
-  return std::floor(std::divides<double>()(static_cast<double>(input1),
-                                           static_cast<double>(input2)));
-}
 
 void* Init(TfLiteContext* context, const char* buffer, size_t length) {
   auto* data = new OpData;
@@ -57,16 +58,29 @@ TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
   // Reinterprete the opaque data provided by user.
   OpData* data = reinterpret_cast<OpData*>(node->user_data);
 
-  const TfLiteTensor* input1 = GetInput(context, node, kInputTensor1);
-  const TfLiteTensor* input2 = GetInput(context, node, kInputTensor2);
-  TfLiteTensor* output = GetOutput(context, node, kOutputTensor);
+  const TfLiteTensor* input1;
+  TF_LITE_ENSURE_OK(context,
+                    GetInputSafe(context, node, kInputTensor1, &input1));
+  const TfLiteTensor* input2;
+  TF_LITE_ENSURE_OK(context,
+                    GetInputSafe(context, node, kInputTensor2, &input2));
+  TfLiteTensor* output;
+  TF_LITE_ENSURE_OK(context,
+                    GetOutputSafe(context, node, kOutputTensor, &output));
 
-  TF_LITE_ENSURE_EQ(context, input1->type, input2->type);
+  TF_LITE_ENSURE_TYPES_EQ(context, input1->type, input2->type);
 
   const TfLiteType type = input1->type;
-  if (type != kTfLiteInt32) {
-    context->ReportError(context, "Currently floor_div only supports int32.");
-    return kTfLiteError;
+  switch (type) {
+    case kTfLiteFloat32:
+    case kTfLiteInt32:
+    case kTfLiteInt16:
+    case kTfLiteInt8:
+      break;
+    default:
+      TF_LITE_KERNEL_LOG(context, "Type '%s' is not supported by floor_div.",
+                         TfLiteTypeGetName(type));
+      return kTfLiteError;
   }
   output->type = type;
 
@@ -92,7 +106,7 @@ TfLiteStatus EvalImpl(TfLiteContext* context, bool requires_broadcast,
   // Validate the denominator.
   for (int i = 0; i < NumElements(input2); ++i) {
     if (std::equal_to<T>()(denominator_data[i], 0)) {
-      context->ReportError(context, "Division by 0");
+      TF_LITE_KERNEL_LOG(context, "Division by 0");
       return kTfLiteError;
     }
   }
@@ -100,12 +114,13 @@ TfLiteStatus EvalImpl(TfLiteContext* context, bool requires_broadcast,
     reference_ops::BroadcastBinaryFunction4DSlow<T, T, T>(
         GetTensorShape(input1), GetTensorData<T>(input1),
         GetTensorShape(input2), denominator_data, GetTensorShape(output),
-        GetTensorData<T>(output), FloorDiv<T>);
+        GetTensorData<T>(output), reference_ops::FloorDiv<T>);
   } else {
     reference_ops::BinaryFunction<T, T, T>(
         GetTensorShape(input1), GetTensorData<T>(input1),
         GetTensorShape(input2), GetTensorData<T>(input2),
-        GetTensorShape(output), GetTensorData<T>(output), FloorDiv<T>);
+        GetTensorShape(output), GetTensorData<T>(output),
+        reference_ops::FloorDiv<T>);
   }
 
   return kTfLiteOk;
@@ -114,17 +129,36 @@ TfLiteStatus EvalImpl(TfLiteContext* context, bool requires_broadcast,
 TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   OpData* data = reinterpret_cast<OpData*>(node->user_data);
 
-  const TfLiteTensor* input1 = GetInput(context, node, kInputTensor1);
-  const TfLiteTensor* input2 = GetInput(context, node, kInputTensor2);
-  TfLiteTensor* output = GetOutput(context, node, kOutputTensor);
+  const TfLiteTensor* input1;
+  TF_LITE_ENSURE_OK(context,
+                    GetInputSafe(context, node, kInputTensor1, &input1));
+  const TfLiteTensor* input2;
+  TF_LITE_ENSURE_OK(context,
+                    GetInputSafe(context, node, kInputTensor2, &input2));
+  TfLiteTensor* output;
+  TF_LITE_ENSURE_OK(context,
+                    GetOutputSafe(context, node, kOutputTensor, &output));
 
   switch (input1->type) {
+    case kTfLiteInt8: {
+      return EvalImpl<int8_t>(context, data->requires_broadcast, input1, input2,
+                              output);
+    }
+    case kTfLiteInt16: {
+      return EvalImpl<int16_t>(context, data->requires_broadcast, input1,
+                               input2, output);
+    }
     case kTfLiteInt32: {
       return EvalImpl<int32_t>(context, data->requires_broadcast, input1,
                                input2, output);
     }
+    case kTfLiteFloat32: {
+      return EvalImpl<float>(context, data->requires_broadcast, input1, input2,
+                             output);
+    }
     default: {
-      context->ReportError(context, "Currently floor_div only supports int32.");
+      TF_LITE_KERNEL_LOG(context, "Type '%s' is not supported by floor_div.",
+                         TfLiteTypeGetName(input1->type));
       return kTfLiteError;
     }
   }

@@ -12,30 +12,44 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+#include <cstddef>
+#include <cstdint>
 #include <iterator>
+#include <memory>
+#include <utility>
 #include <vector>
 
-#include "tensorflow/core/common_runtime/function.h"
+#include "absl/algorithm/container.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "xla/tsl/platform/errors.h"
+#include "tensorflow/core/common_runtime/input_colocation_exemption_registry.h"
+#include "tensorflow/core/data/captured_function.h"
 #include "tensorflow/core/framework/dataset.h"
-#include "tensorflow/core/framework/partial_tensor_shape.h"
+#include "tensorflow/core/framework/model.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/op_requires.h"
 #include "tensorflow/core/framework/tensor.h"
-#include "tensorflow/core/kernels/data/captured_function.h"
-#include "tensorflow/core/kernels/data/dataset_utils.h"
-#include "tensorflow/core/lib/random/random.h"
+#include "tensorflow/core/framework/tensor_shape.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/platform/mutex.h"
+#include "tsl/platform/thread_annotations.h"
 
 namespace tensorflow {
 namespace data {
+namespace experimental {
 namespace {
-
-// See documentation in ../../ops/dataset_ops.cc for a high-level
-// description of the following op.
 
 class ScanDatasetOp : public UnaryDatasetOpKernel {
  public:
   explicit ScanDatasetOp(OpKernelConstruction* ctx)
       : UnaryDatasetOpKernel(ctx) {
     FunctionMetadata::Params params;
-    params.is_multi_device_function = true;
+    if (ctx->HasAttr("use_default_device")) {
+      OP_REQUIRES_OK(ctx,
+                     ctx->GetAttr("use_default_device", &use_default_device_));
+      params.use_default_device = use_default_device_;
+    }
     OP_REQUIRES_OK(ctx,
                    FunctionMetadata::Create(ctx, "f", params, &func_metadata_));
     OP_REQUIRES_OK(ctx, ctx->GetAttr("Tstate", &state_types_));
@@ -58,9 +72,10 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
         ctx, CapturedFunction::Create(ctx, func_metadata_, "other_arguments",
                                       &captured_func));
 
-    *output = new Dataset(ctx, input, std::move(initial_state),
-                          std::move(captured_func), state_types_, output_types_,
-                          output_shapes_, preserve_cardinality_);
+    *output =
+        new Dataset(ctx, input, std::move(initial_state),
+                    std::move(captured_func), state_types_, output_types_,
+                    output_shapes_, preserve_cardinality_, use_default_device_);
   }
 
  private:
@@ -72,7 +87,7 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
             const DataTypeVector& state_types,
             const DataTypeVector& output_types,
             const std::vector<PartialTensorShape>& output_shapes,
-            bool preserve_cardinality)
+            bool preserve_cardinality, bool use_default_device)
         : DatasetBase(DatasetContext(ctx)),
           input_(input),
           initial_state_(std::move(initial_state)),
@@ -80,16 +95,17 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
           state_types_(state_types),
           output_types_(output_types),
           output_shapes_(output_shapes),
-          preserve_cardinality_(preserve_cardinality) {
+          preserve_cardinality_(preserve_cardinality),
+          use_default_device_(use_default_device) {
       input_->Ref();
     }
 
     ~Dataset() override { input_->Unref(); }
 
     std::unique_ptr<IteratorBase> MakeIteratorInternal(
-        const string& prefix) const override {
-      return absl::make_unique<Iterator>(
-          Iterator::Params{this, strings::StrCat(prefix, "::Scan")});
+        const std::string& prefix) const override {
+      return std::make_unique<Iterator>(
+          Iterator::Params{this, absl::StrCat(prefix, "::Scan")});
     }
 
     const DataTypeVector& output_dtypes() const override {
@@ -99,14 +115,33 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
       return output_shapes_;
     }
 
-    string DebugString() const override { return "ScanDatasetOp::Dataset"; }
+    std::string DebugString() const override {
+      return "ScanDatasetOp::Dataset";
+    }
 
-    int64 Cardinality() const override { return input_->Cardinality(); }
+    int64_t CardinalityInternal(CardinalityOptions options) const override {
+      if (preserve_cardinality_) {
+        return input_->Cardinality(options);
+      } else {
+        return kUnknownCardinality;
+      }
+    }
+
+    absl::Status InputDatasets(
+        std::vector<const DatasetBase*>* inputs) const override {
+      inputs->push_back(input_);
+      return absl::OkStatus();
+    }
+
+    absl::Status CheckExternalState() const override {
+      TF_RETURN_IF_ERROR(captured_func_->CheckExternalState());
+      return input_->CheckExternalState();
+    }
 
    protected:
-    Status AsGraphDefInternal(SerializationContext* ctx,
-                              DatasetGraphDefBuilder* b,
-                              Node** output) const override {
+    absl::Status AsGraphDefInternal(SerializationContext* ctx,
+                                    DatasetGraphDefBuilder* b,
+                                    Node** output) const override {
       Node* input_node;
       TF_RETURN_IF_ERROR(b->AddInputDataset(ctx, input_, &input_node));
       std::vector<Node*> initial_state_nodes;
@@ -128,15 +163,18 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
       b->BuildAttrValue(other_arguments_types, &other_arguments_types_attr);
       AttrValue preserve_cardinality_attr;
       b->BuildAttrValue(preserve_cardinality_, &preserve_cardinality_attr);
+      AttrValue use_default_device_attr;
+      b->BuildAttrValue(use_default_device_, &use_default_device_attr);
       TF_RETURN_IF_ERROR(
           b->AddDataset(this, {{0, input_node}},
                         {{1, initial_state_nodes}, {2, other_arguments}},
                         {{"f", f},
                          {"Tstate", state_types},
                          {"Targuments", other_arguments_types_attr},
-                         {"preserve_cardinality", preserve_cardinality_attr}},
+                         {"preserve_cardinality", preserve_cardinality_attr},
+                         {"use_default_device", use_default_device_attr}},
                         output));
-      return Status::OK();
+      return absl::OkStatus();
     }
 
    private:
@@ -146,83 +184,87 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
           : DatasetIterator<Dataset>(params),
             state_(params.dataset->initial_state_) {}
 
-      Status Initialize(IteratorContext* ctx) override {
+      bool SymbolicCheckpointCompatible() const override { return true; }
+
+      absl::Status Initialize(IteratorContext* ctx) override {
         TF_RETURN_IF_ERROR(
-            dataset()->input_->MakeIterator(ctx, prefix(), &input_impl_));
+            dataset()->input_->MakeIterator(ctx, this, prefix(), &input_impl_));
         return dataset()->captured_func_->Instantiate(
             ctx, &instantiated_captured_func_);
       }
 
-      Status GetNextInternal(IteratorContext* ctx,
-                             std::vector<Tensor>* out_tensors,
-                             bool* end_of_sequence) override {
+      absl::Status GetNextInternal(IteratorContext* ctx,
+                                   std::vector<Tensor>* out_tensors,
+                                   bool* end_of_sequence) override {
         mutex_lock l(mu_);
 
         std::vector<Tensor> next_element;
         TF_RETURN_IF_ERROR(
             input_impl_->GetNext(ctx, &next_element, end_of_sequence));
         if (*end_of_sequence) {
-          return Status::OK();
+          return absl::OkStatus();
         }
 
         std::vector<Tensor> args;
         args.reserve(state_.size() + next_element.size());
-        std::copy(state_.begin(), state_.end(), std::back_inserter(args));
-        std::copy(next_element.begin(), next_element.end(),
-                  std::back_inserter(args));
+        absl::c_copy(state_, std::back_inserter(args));
+        absl::c_copy(next_element, std::back_inserter(args));
 
         std::vector<Tensor> state_and_output;
         state_and_output.reserve(dataset()->state_types_.size() +
                                  output_dtypes().size());
 
-        Status s = instantiated_captured_func_->Run(ctx, std::move(args),
-                                                    &state_and_output);
-        DCHECK(state_and_output.size() <=
-               dataset()->state_types_.size() + output_dtypes().size());
+        absl::Status s = instantiated_captured_func_->Run(
+            ctx, std::move(args), &state_and_output, model_node());
         if (s.ok()) {
+          const size_t expected_size =
+              dataset()->state_types_.size() + output_dtypes().size();
+          if (state_and_output.size() != expected_size) {
+            return absl::InvalidArgumentError(absl::StrCat(
+                "scan_func returned ", state_and_output.size(),
+                " elements, but expected ", expected_size, " elements."));
+          }
           state_.clear();
           size_t i = 0;
           for (; i < dataset()->state_types_.size(); ++i) {
             if (state_and_output[i].dtype() != dataset()->state_types_[i]) {
-              return errors::InvalidArgument(
+              return absl::InvalidArgumentError(absl::StrCat(
                   "Got wrong type for scan_func return value ", i,
                   " (expected ", DataTypeString(dataset()->state_types_[i]),
-                  ", got ", DataTypeString(state_and_output[i].dtype()), ").");
+                  ", got ", DataTypeString(state_and_output[i].dtype()), ")."));
             }
             state_.push_back(std::move(state_and_output[i]));
           }
           for (; i < state_and_output.size(); ++i) {
             const size_t output_index = i - dataset()->state_types_.size();
             if (state_and_output[i].dtype() != output_dtypes()[output_index]) {
-              return errors::InvalidArgument(
+              return absl::InvalidArgumentError(absl::StrCat(
                   "Got wrong type for scan_func return value ", i,
-                  " (expected ",
-                  DataTypeString(dataset()->state_types_[output_index]),
-                  ", got ", DataTypeString(state_and_output[i].dtype()), ").");
+                  " (expected ", DataTypeString(output_dtypes()[output_index]),
+                  ", got ", DataTypeString(state_and_output[i].dtype()), ")."));
             }
             if (!output_shapes()[output_index].IsCompatibleWith(
                     state_and_output[i].shape())) {
-              return errors::InvalidArgument(
+              return absl::InvalidArgumentError(absl::StrCat(
                   "Got wrong shape for scan_func return value ", i,
                   " (expected ", output_shapes()[output_index].DebugString(),
-                  ", got ", state_and_output[i].shape().DebugString(), ").");
+                  ", got ", state_and_output[i].shape().DebugString(), ")."));
             }
 
             out_tensors->push_back(std::move(state_and_output[i]));
           }
-        } else if (errors::IsOutOfRange(s)) {
+        } else if (absl::IsOutOfRange(s)) {
           if (dataset()->preserve_cardinality_) {
             // To guarantee that the transformation preserves the cardinality of
             // the dataset, we convert `OutOfRange` to `InvalidArgument` as the
             // former may be interpreted by a caller as the end of sequence.
-            return errors::InvalidArgument(
-                "Function invocation produced OutOfRangeError: ",
-                s.error_message());
+            return absl::InvalidArgumentError(absl::StrCat(
+                "Function invocation produced OutOfRangeError: ", s.message()));
           } else {
             // `f` may deliberately raise `errors::OutOfRange` to indicate
             // that we should terminate the iteration early.
             *end_of_sequence = true;
-            return Status::OK();
+            return absl::OkStatus();
           }
         }
         return s;
@@ -235,41 +277,40 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
                                          /*ratio=*/1);
       }
 
-      Status SaveInternal(IteratorStateWriter* writer) override {
+      absl::Status SaveInternal(SerializationContext* ctx,
+                                IteratorStateWriter* writer) override {
+        TF_RETURN_IF_ERROR(ctx->HandleCheckExternalStateStatus(
+            dataset()->captured_func_->CheckExternalState()));
         mutex_lock l(mu_);
-        TF_RETURN_IF_ERROR(SaveInput(writer, input_impl_));
-        if (!state_.empty()) {
-          TF_RETURN_IF_ERROR(
-              writer->WriteScalar(full_name("state_size"), state_.size()));
-          for (int idx = 0; idx < state_.size(); idx++) {
-            TF_RETURN_IF_ERROR(writer->WriteTensor(
-                full_name(strings::StrCat("state[", idx, "]")), state_[idx]));
-          }
+        TF_RETURN_IF_ERROR(SaveInput(ctx, writer, input_impl_));
+        TF_RETURN_IF_ERROR(
+            writer->WriteScalar(full_name("state_size"), state_.size()));
+        for (int idx = 0; idx < state_.size(); idx++) {
+          TF_RETURN_IF_ERROR(writer->WriteTensor(
+              full_name(absl::StrCat("state[", idx, "]")), state_[idx]));
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
 
-      Status RestoreInternal(IteratorContext* ctx,
-                             IteratorStateReader* reader) override {
+      absl::Status RestoreInternal(IteratorContext* ctx,
+                                   IteratorStateReader* reader) override {
         mutex_lock l(mu_);
         TF_RETURN_IF_ERROR(RestoreInput(ctx, reader, input_impl_));
-        if (reader->Contains(full_name("state_size"))) {
-          int64 size;
-          TF_RETURN_IF_ERROR(
-              reader->ReadScalar(full_name("state_size"), &size));
-          state_.resize(size);
-          for (int idx = 0; idx < size; idx++) {
-            TF_RETURN_IF_ERROR(reader->ReadTensor(
-                full_name(strings::StrCat("state[", idx, "]")), &state_[idx]));
-          }
+        int64_t size;
+        TF_RETURN_IF_ERROR(reader->ReadScalar(full_name("state_size"), &size));
+        state_.resize(size);
+        for (int idx = 0; idx < size; idx++) {
+          TF_RETURN_IF_ERROR(reader->ReadTensor(
+              ctx->flr(), full_name(absl::StrCat("state[", idx, "]")),
+              &state_[idx]));
         }
-        return Status::OK();
+        return absl::OkStatus();
       }
 
      private:
       mutex mu_;
-      std::unique_ptr<IteratorBase> input_impl_ GUARDED_BY(mu_);
-      std::vector<Tensor> state_ GUARDED_BY(mu_);
+      std::unique_ptr<IteratorBase> input_impl_ TF_GUARDED_BY(mu_);
+      std::vector<Tensor> state_ TF_GUARDED_BY(mu_);
       std::unique_ptr<InstantiatedCapturedFunction> instantiated_captured_func_;
     };
 
@@ -280,6 +321,7 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
     const DataTypeVector output_types_;
     const std::vector<PartialTensorShape> output_shapes_;
     const bool preserve_cardinality_;
+    const bool use_default_device_;
   };
 
   std::shared_ptr<FunctionMetadata> func_metadata_ = nullptr;
@@ -287,11 +329,17 @@ class ScanDatasetOp : public UnaryDatasetOpKernel {
   DataTypeVector output_types_;
   std::vector<PartialTensorShape> output_shapes_;
   bool preserve_cardinality_;
+  bool use_default_device_;
 };
 
+REGISTER_KERNEL_BUILDER(Name("ScanDataset").Device(DEVICE_CPU), ScanDatasetOp);
 REGISTER_KERNEL_BUILDER(Name("ExperimentalScanDataset").Device(DEVICE_CPU),
                         ScanDatasetOp);
 
+REGISTER_INPUT_COLOCATION_EXEMPTION("ScanDataset");
+REGISTER_INPUT_COLOCATION_EXEMPTION("ExperimentalScanDataset");
+
 }  // namespace
+}  // namespace experimental
 }  // namespace data
 }  // namespace tensorflow

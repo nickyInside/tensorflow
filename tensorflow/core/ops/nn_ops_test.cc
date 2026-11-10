@@ -59,7 +59,7 @@ TEST(NNOpsTest, TopKV2_ShapeFn) {
   Tensor k_t;
   op.input_tensors[1] = &k_t;
 
-  k_t = test::AsScalar<int32>(20);
+  k_t = test::AsScalar<int32_t>(20);
   // With known input, each output is an unknown shape.
   INFER_OK(op, "?;[]", "?;?");
   // With vector input, each output is [k].
@@ -75,7 +75,7 @@ TEST(NNOpsTest, TopKV2_ShapeFn) {
               "[1];[]");
   INFER_ERROR("input must have last dimension >= k = 20 but is 4", op,
               "[1,2,3,4];[]");
-  k_t = test::AsScalar<int32>(-1);
+  k_t = test::AsScalar<int32_t>(-1);
   INFER_ERROR(
       "Dimension size, given by scalar input 1, must be non-negative but is -1",
       op, "[1,2,3,4];[]");
@@ -87,7 +87,7 @@ TEST(NNOpsTest, NthElement_ShapeFn) {
 
   Tensor n_t;
   op.input_tensors[1] = &n_t;
-  n_t = test::AsScalar<int32>(20);
+  n_t = test::AsScalar<int32_t>(20);
 
   INFER_OK(op, "?;[]", "?");
   INFER_OK(op, "[21];[]", "[]");
@@ -98,7 +98,7 @@ TEST(NNOpsTest, NthElement_ShapeFn) {
   INFER_ERROR("Input must have last dimension > n = 20 but is 1", op, "[1];[]");
   INFER_ERROR("Input must have last dimension > n = 20 but is 20", op,
               "[1,2,3,20];[]");
-  n_t = test::AsScalar<int32>(-1);
+  n_t = test::AsScalar<int32_t>(-1);
   INFER_ERROR(
       "Dimension size, given by scalar input 1, must be non-negative but is -1",
       op, "[1,2,3,4];[]");
@@ -181,7 +181,8 @@ TEST(NNOpsTest, BatchNormWithGlobalNormalizationGrad_ShapeFn) {
 TEST(NNOpsTest, FusedBatchNorm_ShapeFn) {
   ShapeInferenceTestOp op("FusedBatchNorm");
 
-  auto set_op = [&op](bool is_training, string data_format) {
+  auto set_op = [&op](bool is_training, float exponential_avg_factor,
+                      std::string data_format) {
     TF_ASSERT_OK(NodeDefBuilder("test", "FusedBatchNorm")
                      .Input(FakeInput(DT_FLOAT))
                      .Input(FakeInput(DT_FLOAT))
@@ -190,10 +191,11 @@ TEST(NNOpsTest, FusedBatchNorm_ShapeFn) {
                      .Input(FakeInput(DT_FLOAT))
                      .Attr("data_format", data_format)
                      .Attr("is_training", is_training)
+                     .Attr("exponential_avg_factor", exponential_avg_factor)
                      .Finalize(&op.node_def));
   };
 
-  set_op(true, "NHWC");
+  set_op(true, 1.0, "NHWC");
   // Test rank errors.
   INFER_ERROR("Shape must be rank 4 but is rank 3", op, "[1,2,3];?;?;?;?");
   INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;[1,2,3];?;?;?");
@@ -207,7 +209,21 @@ TEST(NNOpsTest, FusedBatchNorm_ShapeFn) {
            "[d0_3|d1_0|d2_0];[d0_3|d1_0|d2_0];"
            "[d0_3|d1_0|d2_0];[d0_3|d1_0|d2_0]");
 
-  set_op(true, "NCHW");
+  set_op(true, 0.5, "NHWC");
+  // Test rank errors.
+  INFER_ERROR("Shape must be rank 4 but is rank 3", op, "[1,2,3];?;?;?;?");
+  INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;[1,2,3];?;?;?");
+  INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;?;[1,2,3];?;?");
+  // Channel dim of first input is merged with the single dim in other 4 inputs.
+  INFER_OK(op, "?;?;?;?;?", "[?,?,?,?];[?];[?];[?];[?]");
+  INFER_OK(op, "?;[1];?;?;?", "[?,?,?,d1_0];[d1_0];[d1_0];[d1_0];[d1_0]");
+  INFER_OK(op, "?;?;[1];?;?", "[?,?,?,d2_0];[d2_0];[d2_0];[d2_0];[d2_0]");
+  INFER_OK(op, "[1,2,3,4];[4];[4];?;?",
+           "[d0_0,d0_1,d0_2,d0_3|d1_0|d2_0];"
+           "[d0_3|d1_0|d2_0];[d0_3|d1_0|d2_0];"
+           "[d0_3|d1_0|d2_0];[d0_3|d1_0|d2_0]");
+
+  set_op(true, 1.0, "NCHW");
   // Test rank errors.
   INFER_ERROR("Shape must be rank 4 but is rank 3", op, "[1,2,3];?;?;?;?");
   INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;[1,2,3];?;?;?");
@@ -221,7 +237,7 @@ TEST(NNOpsTest, FusedBatchNorm_ShapeFn) {
            "[d0_1|d1_0|d2_0];[d0_1|d1_0|d2_0];"
            "[d0_1|d1_0|d2_0];[d0_1|d1_0|d2_0]");
 
-  set_op(false, "NHWC");
+  set_op(false, 1.0, "NHWC");
   // Test rank errors.
   INFER_ERROR("Shape must be rank 4 but is rank 3", op, "[1,2,3];?;?;?;?");
   INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;[1,2,3];?;?;?");
@@ -239,7 +255,7 @@ TEST(NNOpsTest, FusedBatchNorm_ShapeFn) {
            "[d0_3|d1_0|d2_0|d3_0|d4_0];[d0_3|d1_0|d2_0|d3_0|d4_0];"
            "[d0_3|d1_0|d2_0|d3_0|d4_0];[d0_3|d1_0|d2_0|d3_0|d4_0]");
 
-  set_op(false, "NCHW");
+  set_op(false, 1.0, "NCHW");
   // Test rank errors.
   INFER_ERROR("Shape must be rank 4 but is rank 3", op, "[1,2,3];?;?;?;?");
   INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;[1,2,3];?;?;?");
@@ -260,7 +276,7 @@ TEST(NNOpsTest, FusedBatchNorm_ShapeFn) {
 
 TEST(NNOpsTest, FusedBatchNormGrad_ShapeFn) {
   ShapeInferenceTestOp op("FusedBatchNormGrad");
-  auto set_op = [&op](string data_format) {
+  auto set_op = [&op](std::string data_format) {
     TF_ASSERT_OK(NodeDefBuilder("test", "FusedBatchNormGrad")
                      .Input(FakeInput(DT_FLOAT))
                      .Input(FakeInput(DT_FLOAT))
@@ -270,22 +286,6 @@ TEST(NNOpsTest, FusedBatchNormGrad_ShapeFn) {
                      .Attr("data_format", data_format)
                      .Finalize(&op.node_def));
   };
-
-  set_op("NHWC");
-  // Test rank errors.
-  INFER_ERROR("Shape must be rank 4 but is rank 3", op, "[1,2,3];?;?;?;?");
-  INFER_ERROR("Shape must be rank 4 but is rank 3", op, "?;[1,2,3];?;?;?");
-  INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;?;[1,2,3];?;?");
-  INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;?;?;[1,2,3];?");
-  INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;?;?;?;[1,2,3]");
-  // Channel dim of first input is merged with the single dim in other 4 inputs.
-  INFER_OK(op, "?;?;?;?;?", "[?,?,?,?];[?];[?];[0];[0]");
-  INFER_OK(op, "?;?;[1];?;?", "[?,?,?,d2_0];[d2_0];[d2_0];[0];[0]");
-  INFER_OK(op, "?;?;?;[1];?", "[?,?,?,d3_0];[d3_0];[d3_0];[0];[0]");
-  INFER_OK(op, "?;?;?;?;[1]", "[?,?,?,d4_0];[d4_0];[d4_0];[0];[0]");
-  INFER_OK(op, "[1,2,3,4];[1,2,3,4];[4];[4];[4]",
-           "[d0_0,d0_1,d0_2,d0_3|d2_0|d3_0|d4_0];"
-           "[d0_3|d2_0|d3_0|d4_0];[d0_3|d2_0|d3_0|d4_0];[0];[0]");
 
   set_op("NCHW");
   // Test rank errors.
@@ -302,6 +302,41 @@ TEST(NNOpsTest, FusedBatchNormGrad_ShapeFn) {
   INFER_OK(op, "[1,4,2,3];[1,4,2,3];[4];[4];[4]",
            "[d0_0,d0_1|d2_0|d3_0|d4_0,d0_2,d0_3];"
            "[d0_1|d2_0|d3_0|d4_0];[d0_1|d2_0|d3_0|d4_0];[0];[0]");
+
+  set_op("NHWC");
+  // Test rank errors.
+  INFER_ERROR("Shape must be rank 4 but is rank 3", op, "[1,2,3];?;?;?;?");
+  INFER_ERROR("Shape must be rank 4 but is rank 3", op, "?;[1,2,3];?;?;?");
+  INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;?;[1,2,3];?;?");
+  INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;?;?;[1,2,3];?");
+  INFER_ERROR("Shape must be rank 1 but is rank 3", op, "?;?;?;?;[1,2,3]");
+  // Channel dim of first input is merged with the single dim in other 4 inputs.
+  INFER_OK(op, "?;?;?;?;?", "[?,?,?,?];[?];[?];[0];[0]");
+  INFER_OK(op, "?;?;[1];?;?", "[?,?,?,d2_0];[d2_0];[d2_0];[0];[0]");
+  INFER_OK(op, "?;?;?;[1];?", "[?,?,?,d3_0];[d3_0];[d3_0];[0];[0]");
+  INFER_OK(op, "?;?;?;?;[1]", "[?,?,?,d4_0];[d4_0];[d4_0];[0];[0]");
+  INFER_OK(op, "[1,2,3,4];[1,2,3,4];[4];[4];[4]",
+           "[d0_0,d0_1,d0_2,d0_3|d2_0|d3_0|d4_0];"
+           "[d0_3|d2_0|d3_0|d4_0];[d0_3|d2_0|d3_0|d4_0];[0];[0]");
+}
+
+TEST(NNOpsTest, Conv2DBackpropInput_ShapeFn) {
+  ShapeInferenceTestOp op("Conv2DBackpropInput");
+
+  // Test rank error.
+  INFER_ERROR("input_sizes to contain 4 values or 2 values", op,
+              "[3];[?,?,?,?];[?,?,?,?]");
+  INFER_ERROR("Shape must be rank 4 but is rank 3", op,
+              "[4];[?,?,?,?];[?,?,?]");
+
+  // When input_sizes is a 4D shape and the convolution is grouped, the channel
+  // size of the input grad doesn't always equal the input channel size of the
+  // filter. So, when input_sizes is a 4D shape, the channel size of the input
+  // grad is determined by the content of input_sizes.
+  INFER_OK(op, "[4];[?,?,2,?];[1,?,?,?]", "[d2_0,?,?,?]");
+  // When input_sizes is a 2D shape, the channel size of the input grad always
+  // matches the filter shape.
+  INFER_OK(op, "[2];[?,?,2,?];[1,?,?,?]", "[d2_0,?,?,d1_2]");
 }
 
 TEST(NNOpsTest, Conv3DBackpropInput_ShapeFn) {
@@ -455,8 +490,9 @@ TEST(NNOpsTest, InTopK_ShapeFn) {
 
 TEST(NNOpsTest, Dilation2DShapeTest) {
   ShapeInferenceTestOp op("Dilation2D");
-  auto set_op = [&op](const std::vector<int32>& strides,
-                      const std::vector<int32>& rates, const string& padding) {
+  auto set_op = [&op](const std::vector<int32_t>& strides,
+                      const std::vector<int32_t>& rates,
+                      const std::string& padding) {
     TF_ASSERT_OK(NodeDefBuilder("test", "Dilation2D")
                      .Input("input", 0, DT_FLOAT)
                      .Input("filter", 0, DT_FLOAT)
@@ -488,7 +524,8 @@ TEST(NNOpsTest, FractionalPool_ShapeFn) {
                        .Finalize(&op.node_def));
     };
 
-    set_op(std::vector<float>{2.0f, 1, 1 / 1.5f, 1 / 2.0f});
+    // pooling_ratio must >= 1.0
+    set_op(std::vector<float>{2.0f, 1, 1.5f, 4.0f});
 
     // Rank check.
     INFER_ERROR("must be rank 4", op, "[?,?,?]");
@@ -497,11 +534,11 @@ TEST(NNOpsTest, FractionalPool_ShapeFn) {
     INFER_OK(op, "?", "[?,?,?,?];[?];[?]");
     INFER_OK(op, "[?,?,?,?]", "[?,?,?,?];[?];[?]");
 
-    INFER_OK(op, "[10,20,30,40]", "[5,20,45,80];[20];[45]");
-    INFER_OK(op, "[?,20,30,40]", "[?,20,45,80];[20];[45]");
-    INFER_OK(op, "[10,?,30,40]", "[5,?,45,80];[?];[45]");
-    INFER_OK(op, "[10,20,?,40]", "[5,20,?,80];[20];[?]");
-    INFER_OK(op, "[10,20,30,?]", "[5,20,45,?];[20];[45]");
+    INFER_OK(op, "[10,20,30,40]", "[5,20,20,10];[20];[20]");
+    INFER_OK(op, "[?,20,30,40]", "[?,20,20,10];[20];[20]");
+    INFER_OK(op, "[10,?,30,40]", "[5,?,20,10];[?];[20]");
+    INFER_OK(op, "[10,20,?,40]", "[5,20,?,10];[20];[?]");
+    INFER_OK(op, "[10,20,30,?]", "[5,20,20,?];[20];[20]");
 
     // Wrong number of values for pooling_ratio.
     set_op(std::vector<float>{.5, 1.0, 1.5});
@@ -532,8 +569,8 @@ TEST(NNOpsTest, FractionalAvgPoolGrad) {
   INFER_OK(op, "?;?;?;?", "[?,?,?,?]");
 
   // When input tensor is known, its values determine output shape.
-  std::vector<int32> shape{1, 2, 3, 4};
-  Tensor shape_t = test::AsTensor<int32>(shape);
+  std::vector<int32_t> shape{1, 2, 3, 4};
+  Tensor shape_t = test::AsTensor<int32_t>(shape);
   op.input_tensors[0] = &shape_t;
   INFER_OK(op, "[5];?;?;?", "[1,2,3,4]");
 }

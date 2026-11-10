@@ -15,9 +15,13 @@ limitations under the License.
 #include "tensorflow/lite/tools/evaluation/stages/topk_accuracy_eval_stage.h"
 
 #include <stdint.h>
+
 #include <string>
+#include <vector>
 
 #include <gtest/gtest.h>
+#include "tensorflow/lite/c/c_api_types.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_config.pb.h"
 #include "tensorflow/lite/tools/evaluation/proto/evaluation_stages.pb.h"
 
@@ -181,8 +185,7 @@ TEST(TopkAccuracyEvalStage, InvalidGroundTruth) {
   float array[kNumCategories];
   float* tensor = ResetOutputArray(array);
   tensor[0] = 0.8;
-  std::string ground_truth = "XYZ";
-  stage.SetEvalInputs(tensor, &ground_truth);
+  stage.SetEvalInputs(tensor, /*ground_truth_label=*/nullptr);
   EXPECT_EQ(stage.Run(), kTfLiteError);
 }
 

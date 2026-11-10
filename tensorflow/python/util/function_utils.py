@@ -14,20 +14,14 @@
 # ==============================================================================
 """Utility to retrieve function args."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import functools
-
-import six
 
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.util import tf_inspect
 
 
-def _is_bounded_method(fn):
+def _is_bound_method(fn):
   _, fn = tf_decorator.unwrap(fn)
   return tf_inspect.ismethod(fn) and (fn.__self__ is not None)
 
@@ -55,8 +49,11 @@ def fn_args(fn):
     if _is_callable_object(fn):
       fn = fn.__call__
     args = tf_inspect.getfullargspec(fn).args
-    if _is_bounded_method(fn):
-      args.remove('self')
+    if _is_bound_method(fn) and args:
+      # If it's a bound method, it may or may not have a self/cls first
+      # argument; for example, self could be captured in *args.
+      # If it does have a positional argument, it is self/cls.
+      args.pop(0)
   return tuple(args)
 
 
@@ -78,8 +75,8 @@ def has_kwargs(fn):
     fn = fn.__call__
   elif not callable(fn):
     raise TypeError(
-        'fn should be a function-like object, but is of type {}.'.format(
-            type(fn)))
+        'Argument `fn` should be a callable. '
+        f'Received: fn={fn} (of type {type(fn)})')
   return tf_inspect.getfullargspec(fn).varkw is not None
 
 
@@ -90,12 +87,16 @@ def get_func_name(func):
     if tf_inspect.isfunction(func):
       return func.__name__
     elif tf_inspect.ismethod(func):
-      return '%s.%s' % (six.get_method_self(func).__class__.__name__,
-                        six.get_method_function(func).__name__)
+      return '%s.%s' % (
+          func.__self__.__class__.__name__,
+          func.__func__.__name__,
+      )
     else:  # Probably a class instance with __call__
       return str(type(func))
   else:
-    raise ValueError('Argument must be callable')
+    raise ValueError(
+        'Argument `func` must be a callable. '
+        f'Received func={func} (of type {type(func)})')
 
 
 def get_func_code(func):
@@ -103,17 +104,19 @@ def get_func_code(func):
   _, func = tf_decorator.unwrap(func)
   if callable(func):
     if tf_inspect.isfunction(func) or tf_inspect.ismethod(func):
-      return six.get_function_code(func)
+      return func.__code__
     # Since the object is not a function or method, but is a callable, we will
     # try to access the __call__method as a function.  This works with callable
     # classes but fails with functool.partial objects despite their __call__
     # attribute.
     try:
-      return six.get_function_code(func.__call__)
+      return func.__call__.__code__
     except AttributeError:
       return None
   else:
-    raise ValueError('Argument must be callable')
+    raise ValueError(
+        'Argument `func` must be a callable. '
+        f'Received func={func} (of type {type(func)})')
 
 
 _rewriter_config_optimizer_disabled = None

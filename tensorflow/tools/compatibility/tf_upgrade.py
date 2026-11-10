@@ -14,10 +14,6 @@
 # ==============================================================================
 """Upgrader for Python scripts from pre-1.0 TensorFlow to 1.0 TensorFlow."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import argparse
 
 from tensorflow.tools.compatibility import ast_edits

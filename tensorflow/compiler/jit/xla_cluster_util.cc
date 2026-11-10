@@ -15,59 +15,89 @@ limitations under the License.
 
 #include "tensorflow/compiler/jit/xla_cluster_util.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/log/check.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/match.h"
-#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_join.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/compiler/jit/flags.h"
-#include "tensorflow/compiler/xla/status_macros.h"
+#include "xla/service/graphcycles/graphcycles.h"
+#include "xla/status_macros.h"
+#include "xla/tsl/platform/errors.h"
+#include "xla/tsl/platform/statusor.h"
+#include "tensorflow/core/common_runtime/function_body.h"
+#include "tensorflow/core/common_runtime/optimization_registry.h"
+#include "tensorflow/core/framework/attr_value_util.h"
 #include "tensorflow/core/framework/bounds_check.h"
+#include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/node_def_util.h"
+#include "tensorflow/core/framework/op.h"
+#include "tensorflow/core/framework/op_def_builder.h"
+#include "tensorflow/core/framework/types.h"
+#include "tensorflow/core/graph/algorithm.h"
 #include "tensorflow/core/graph/control_flow.h"
+#include "tensorflow/core/graph/edgeset.h"
+#include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/lib/gtl/cleanup.h"
+#include "tensorflow/core/lib/strings/proto_serialization.h"
+#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/hash.h"
+#include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/public/session_options.h"
 #include "tensorflow/core/util/device_name_utils.h"
+#include "tensorflow/core/util/xla_config_registry.h"
 
 namespace tensorflow {
 
 const char* const kXlaClusterAttr = "_XlaCluster";
-const char* const kXlaOutsideCompilationAttr = "_XlaOutsideCompilation";
 const char* const kXlaCompileTimeConstantInputsAttr =
     "_XlaCompileTimeConstantInputs";
 
 namespace {
 // Returns a string describing how an edge from src to dst would
 // create a cycle.
-string DescribeCycle(const GraphCycles* cycles, const Graph& graph, int src,
-                     int dst) {
-  int32 max_path_size = graph.num_node_ids() + 1;
-  std::vector<int32> path(max_path_size);
-  int32 path_size = cycles->FindPath(dst, src, max_path_size, path.data());
+std::string DescribeCycle(const xla::GraphCycles* cycles, const Graph& graph,
+                          int src, int dst) {
+  int32_t max_path_size = graph.num_node_ids() + 1;
+  std::vector<int32_t> path(max_path_size);
+  int32_t path_size = cycles->FindPath(dst, src, max_path_size, path.data());
   if (path_size == 0) {
     return "";
   }
 
   auto node_name = [&graph](int node_id) {
     if (!FastBoundsCheck(node_id, graph.num_node_ids())) {
-      return string("(null)");
+      return std::string("(null)");
     }
     auto* node = graph.FindNodeId(node_id);
     if (node == nullptr) {
-      return string("(null)");
+      return std::string("(null)");
     }
     return node->name();
   };
 
-  string description;
+  std::string description;
   absl::StrAppend(&description, "Edge from ", node_name(src), " to ",
                   node_name(dst), " would create a cycle.\n");
   path.resize(path_size);
-  for (int32 node_id : path) {
-    string ascii_art;
+  for (int32_t node_id : path) {
+    std::string ascii_art;
     if (node_id == dst) {
       ascii_art = "+-> ";
     } else if (node_id != src) {
@@ -102,8 +132,8 @@ bool HasForwardedRefInput(const Node& node) {
   return false;
 }
 
-xla::StatusOr<bool> CreateCycleDetectionGraph(const Graph* graph,
-                                              GraphCycles* cycles) {
+absl::StatusOr<bool> CreateCycleDetectionGraph(const Graph* graph,
+                                               xla::GraphCycles* cycles) {
   for (int i = 0; i < graph->num_node_ids(); ++i) {
     // We rely on the node IDs in the cycle detection graph being consecutive
     // integers starting from 0.
@@ -129,11 +159,12 @@ xla::StatusOr<bool> CreateCycleDetectionGraph(const Graph* graph,
   //   "NextIteration" nodes.
 
   // Map from frame name strings to node IDs in the cycle detection graph.
-  std::unordered_map<string, int> frame_nodes;
+  std::unordered_map<std::string, int> frame_nodes;
 
   // Get the cycle graph node ID for frame 'frame_name', or add one if none
   // exists.
-  auto GetOrAddFrameNodeId = [&frame_nodes, cycles](const string& frame_name) {
+  auto GetOrAddFrameNodeId = [&frame_nodes,
+                              cycles](const std::string& frame_name) {
     int& frame_id = frame_nodes.emplace(frame_name, -1).first->second;
     if (frame_id < 0) {
       // The emplace succeeded; we have not allocated a frame node yet.
@@ -151,7 +182,7 @@ xla::StatusOr<bool> CreateCycleDetectionGraph(const Graph* graph,
 
       if (edge->dst()->IsEnter()) {
         // Lift edges to an "Enter" node to the corresponding frame node.
-        const string& frame_name =
+        const std::string& frame_name =
             control_flow_info[edge->dst()->id()].frame_name;
         dst = GetOrAddFrameNodeId(frame_name);
         dst_type = "frame";
@@ -159,7 +190,7 @@ xla::StatusOr<bool> CreateCycleDetectionGraph(const Graph* graph,
 
       if (edge->src()->IsExit()) {
         // Lift edges from an "Exit" node to the corresponding frame node.
-        const string& frame_name =
+        const std::string& frame_name =
             control_flow_info[edge->src()->id()].frame_name;
         src = GetOrAddFrameNodeId(frame_name);
         src_type = "frame";
@@ -182,24 +213,24 @@ xla::StatusOr<bool> CreateCycleDetectionGraph(const Graph* graph,
     if (!cycles->InsertEdge(edge->src()->id(), edge->dst()->id())) {
       // This should never happen. All cycles in the graph should contain
       // a control flow operator.
-      return errors::Internal(
+      return absl::InternalError(absl::StrCat(
           "Found cycle in graph without control flow operator during XLA "
           "compilation: ",
-          DescribeCycle(cycles, *graph, edge->src()->id(), edge->dst()->id()));
+          DescribeCycle(cycles, *graph, edge->src()->id(), edge->dst()->id())));
     }
   }
 
   return true;
 }
 
-absl::optional<absl::string_view> GetXlaClusterForNode(const Node& node) {
+std::optional<absl::string_view> GetXlaClusterForNode(const Node& node) {
   const AttrValue* attr_value = node.attrs().Find(kXlaClusterAttr);
   if (attr_value == nullptr) {
-    return absl::nullopt;
+    return std::nullopt;
   }
-  Status s = AttrValueHasType(*attr_value, "string");
+  absl::Status s = AttrValueHasType(*attr_value, "string");
   if (!s.ok()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   return attr_value->s();
 }
@@ -218,19 +249,12 @@ void RemoveFromXlaCluster(NodeDef* node_def) {
 void RemoveFromXlaCluster(Node* node) { node->ClearAttr(kXlaClusterAttr); }
 
 namespace {
-struct XlaGlobalJitLevel {
-  OptimizerOptions::GlobalJitLevel single_gpu;
-  OptimizerOptions::GlobalJitLevel general;
-};
+typedef xla_config_registry::XlaGlobalJitLevel XlaGlobalJitLevel;
 
 XlaGlobalJitLevel GetXlaGlobalJitLevel(
-    const GraphOptimizationPassOptions& options) {
+    const OptimizerOptions::GlobalJitLevel& jit_level_in_session_opts) {
   XlaGlobalJitLevel result;
 
-  OptimizerOptions::GlobalJitLevel jit_level_in_session_opts =
-      options.session_options->config.graph_options()
-          .optimizer_options()
-          .global_jit_level();
   if (jit_level_in_session_opts == OptimizerOptions::DEFAULT) {
     // To set compilation to be on by default, change the following line.
     result.single_gpu = result.general = OptimizerOptions::OFF;
@@ -255,7 +279,7 @@ XlaGlobalJitLevel GetXlaGlobalJitLevel(
   return result;
 }
 
-int GetGpuNumber(const string& device_name) {
+int GetGpuNumber(const std::string& device_name) {
   DeviceNameUtils::ParsedName parsed_name;
   if (!DeviceNameUtils::ParseFullName(device_name, &parsed_name)) {
     return -1;
@@ -267,7 +291,7 @@ int GetGpuNumber(const string& device_name) {
 
 bool IsSingleGpuGraph(const Graph& g) {
   int gpus_seen = 0;
-  absl::flat_hash_set<string> devices_seen;
+  absl::flat_hash_set<std::string> devices_seen;
 
   for (Node* n : g.op_nodes()) {
     if (devices_seen.contains(n->assigned_device_name())) {
@@ -289,7 +313,12 @@ bool IsSingleGpuGraph(const Graph& g) {
 
 OptimizerOptions::GlobalJitLevel GetGlobalJitLevelForGraph(
     const GraphOptimizationPassOptions& options) {
-  XlaGlobalJitLevel xla_global_jit_level = GetXlaGlobalJitLevel(options);
+  OptimizerOptions::GlobalJitLevel jit_level_in_session_opts =
+      options.session_options->config.graph_options()
+          .optimizer_options()
+          .global_jit_level();
+  XlaGlobalJitLevel xla_global_jit_level =
+      GetXlaGlobalJitLevel(jit_level_in_session_opts);
   if (xla_global_jit_level.single_gpu == xla_global_jit_level.general) {
     VLOG(4) << "GetGlobalJitLevelForGraph returning "
             << xla_global_jit_level.single_gpu;
@@ -309,9 +338,311 @@ bool MayCallFunction(const Node& n, const FunctionLibraryDefinition* flib_def) {
 
   // This is a conservative check: there may be nodes with a `func`
   // attribute that do not make function calls.
-  return absl::c_any_of(n.def().attr(),
-                        [](const std::pair<string, AttrValue>& name_attr_pair) {
-                          return name_attr_pair.second.has_func();
-                        });
+  return absl::c_any_of(
+      n.def().attr(),
+      [](const std::pair<std::string, AttrValue>& name_attr_pair) {
+        return name_attr_pair.second.has_func();
+      });
 }
+bool IsShapeConsumerOp(const Node& node) {
+  return node.type_string() == "Shape" || node.type_string() == "Rank" ||
+         node.type_string() == "Size";
+}
+
+namespace {
+struct ClusterInfo {
+  int size;
+
+  // Maps op names to the number of times they appear in the cluster.
+  absl::flat_hash_map<absl::string_view, int> op_histogram;
+};
+
+void HistogramMapToRepeatedOpAndCount(
+    protobuf::RepeatedPtrField<XlaAutoClusteringSummary::OpAndCount>* result,
+    const absl::flat_hash_map<absl::string_view, int>& histogram) {
+  for (const auto& pair : histogram) {
+    XlaAutoClusteringSummary::OpAndCount* new_entry = result->Add();
+    new_entry->set_op(std::string(pair.first));
+    new_entry->set_count(pair.second);
+  }
+
+  absl::c_sort(*result, [](const XlaAutoClusteringSummary::OpAndCount& a,
+                           const XlaAutoClusteringSummary::OpAndCount& b) {
+    return a.op() < b.op();
+  });
+}
+
+void ClusterInfoToProtobuf(XlaAutoClusteringSummary::Cluster* result,
+                           absl::string_view name, const ClusterInfo& info) {
+  result->set_name(std::string(name));
+  result->set_size(info.size);
+  HistogramMapToRepeatedOpAndCount(result->mutable_op_histogram(),
+                                   info.op_histogram);
+}
+}  // namespace
+
+XlaAutoClusteringSummary GetXlaAutoClusteringSummary(const Graph& graph) {
+  absl::flat_hash_map<absl::string_view, ClusterInfo> cluster_name_to_info;
+  XlaAutoClusteringSummary result;
+
+  absl::flat_hash_map<absl::string_view, int> unclustered_op_histogram;
+
+  for (Node* n : graph.nodes()) {
+    std::optional<absl::string_view> cluster_name = GetXlaClusterForNode(*n);
+    if (cluster_name) {
+      result.set_clustered_node_count(result.clustered_node_count() + 1);
+      ClusterInfo* info = &cluster_name_to_info[*cluster_name];
+      info->size++;
+      info->op_histogram[n->type_string()]++;
+    } else {
+      result.set_unclustered_node_count(result.unclustered_node_count() + 1);
+      unclustered_op_histogram[n->type_string()]++;
+    }
+  }
+
+  for (const auto& pair : cluster_name_to_info) {
+    XlaAutoClusteringSummary::Cluster* new_cluster = result.add_clusters();
+    ClusterInfoToProtobuf(new_cluster, pair.first, pair.second);
+  }
+
+  absl::c_sort(*result.mutable_clusters(),
+               [&](const XlaAutoClusteringSummary::Cluster& a,
+                   const XlaAutoClusteringSummary::Cluster& b) {
+                 return a.name() < b.name();
+               });
+
+  HistogramMapToRepeatedOpAndCount(result.mutable_unclustered_op_histogram(),
+                                   unclustered_op_histogram);
+
+  return result;
+}
+
+namespace {
+using CallTargetListTy = absl::InlinedVector<NameAttrList, 2>;
+
+CallTargetListTy GetCallTargetListFromNode(
+    const Node& n, FunctionLibraryRuntime* lib_runtime) {
+  const FunctionLibraryDefinition& flib_def =
+      *lib_runtime->GetFunctionLibraryDefinition();
+  if (flib_def.Find(n.type_string())) {
+    NameAttrList callee;
+    callee.set_name(n.type_string());
+    *callee.mutable_attr() = n.def().attr();
+    return {callee};
+  }
+
+  CallTargetListTy result;
+  for (const auto& name_attr_pair : n.attrs()) {
+    const AttrValue& attr_value = name_attr_pair.second;
+    if (attr_value.value_case() == AttrValue::kFunc) {
+      result.push_back(attr_value.func());
+    } else if (attr_value.value_case() == AttrValue::kList) {
+      result.insert(result.end(), attr_value.list().func().begin(),
+                    attr_value.list().func().end());
+    }
+  }
+
+  return result;
+}
+
+enum class Direction { kForward, kBackward };
+
+absl::Status GetNodesRelatedToRefVariablesInDirection(
+    const Graph& graph, FunctionLibraryRuntime* lib_runtime,
+    Direction direction, int depth, absl::flat_hash_set<Node*>* result);
+
+absl::StatusOr<bool> DoesAnyCalleeHaveRefNodes(
+    const CallTargetListTy& call_target_list,
+    FunctionLibraryRuntime* lib_runtime, Direction direction, int depth) {
+  const int kMaxDepth = 10;
+
+  if (depth == kMaxDepth && !call_target_list.empty()) {
+    // Conservative answer to avoid recursing too much.
+    return true;
+  }
+
+  absl::flat_hash_set<Node*> callee_ref_nodes;
+  for (const NameAttrList& call_target : call_target_list) {
+    const OpRegistrationData* op_reg;
+    if (OpRegistry::Global()->LookUp(call_target.name(), &op_reg).ok()) {
+      const OpDef& op = op_reg->op_def;
+      if (absl::c_any_of(op.output_arg(), [](const OpDef::ArgDef arg) {
+            return arg.is_ref();
+          })) {
+        return true;
+      }
+      continue;
+    }
+
+    callee_ref_nodes.clear();
+    FunctionLibraryRuntime::Handle handle;
+    if (!lib_runtime
+             ->Instantiate(call_target.name(), AttrSlice(&call_target.attr()),
+                           &handle)
+             .ok()) {
+      VLOG(2) << "Could not find " << call_target.name()
+              << " in the function library.";
+      // Since we don't know the semantic of `n` we don't know if this is an
+      // error.  We return true to signal a conservative answer.
+      return true;
+    }
+
+    auto release_handle_on_return =
+        gtl::MakeCleanup([&] { CHECK_OK(lib_runtime->ReleaseHandle(handle)); });
+
+    const FunctionBody* fbody = lib_runtime->GetFunctionBody(handle);
+    TF_RETURN_IF_ERROR(GetNodesRelatedToRefVariablesInDirection(
+        *fbody->graph, lib_runtime, direction, depth + 1, &callee_ref_nodes));
+
+    // We could possibly use something cheaper than
+    // GetNodesRelatedToRefVariablesInDirection since we only care about the
+    // size of `callee_ref_nodes` but for now we don't ceare.
+    if (!callee_ref_nodes.empty()) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// Helper for GetNodesRelatedToRefVariables that traverses the graph in one
+// direction.
+absl::Status GetNodesRelatedToRefVariablesInDirection(
+    const Graph& graph, FunctionLibraryRuntime* lib_runtime,
+    Direction direction, int depth, absl::flat_hash_set<Node*>* result) {
+  std::vector<Node*> nodes_in_order;
+  if (direction == Direction::kForward) {
+    GetReversePostOrder(graph, &nodes_in_order,
+                        /*stable_comparator=*/NodeComparatorName());
+  } else {
+    GetPostOrder(graph, &nodes_in_order,
+                 /*stable_comparator=*/NodeComparatorName());
+  }
+
+  size_t old_result_size;
+  int iterations = 0;
+
+  const int kMaxIterations = 10 * 1000;
+
+  std::vector<bool> callee_has_ref_nodes_cache;
+  callee_has_ref_nodes_cache.resize(graph.num_node_ids());
+
+  auto does_callee_have_ref_nodes = [&](Node* n) -> absl::StatusOr<bool> {
+    if (iterations == 1) {
+      TF_ASSIGN_OR_RETURN(
+          bool callee_has_ref_nodes,
+          DoesAnyCalleeHaveRefNodes(GetCallTargetListFromNode(*n, lib_runtime),
+                                    lib_runtime, direction, depth));
+      callee_has_ref_nodes_cache[n->id()] = callee_has_ref_nodes;
+      return callee_has_ref_nodes;
+    } else {
+      return {callee_has_ref_nodes_cache[n->id()]};
+    }
+  };
+
+  do {
+    TF_RET_CHECK(iterations++ < kMaxIterations) << "infinite loop?";
+
+    old_result_size = result->size();
+    for (Node* n : nodes_in_order) {
+      if (n->IsSource() || n->IsSink()) {
+        continue;
+      }
+
+      bool inserted_n = false;
+      const EdgeSet& edges =
+          direction == Direction::kForward ? n->in_edges() : n->out_edges();
+      for (const Edge* e : edges) {
+        if (result->contains(direction == Direction::kForward ? e->src()
+                                                              : e->dst())) {
+          result->insert(n);
+          inserted_n = true;
+          break;
+        }
+      }
+
+      if (inserted_n) {
+        continue;
+      }
+
+      if (direction == Direction::kForward &&
+          absl::c_any_of(n->output_types(), IsRefType)) {
+        result->insert(n);
+        continue;
+      }
+
+      TF_ASSIGN_OR_RETURN(bool callee_has_ref_nodes,
+                          does_callee_have_ref_nodes(n));
+      if (callee_has_ref_nodes) {
+        result->insert(n);
+        continue;
+      }
+    }
+
+    // Loop until convergence.
+  } while (result->size() != old_result_size);
+
+  VLOG(2) << "# iterations = " << iterations;
+
+  return absl::OkStatus();
+}
+
+// Sorts control inputs of a graphdef so that they are deterministically
+// ordered.
+void SortControlInputs(GraphDef* gdef) {
+  int64_t num_nodes = gdef->node_size();
+  for (int64_t i = 0; i < num_nodes; ++i) {
+    NodeDef* node = gdef->mutable_node(i);
+    // Stable sort control inputs and leave the order of data inputs unchanged.
+    std::stable_sort(node->mutable_input()->begin(),
+                     node->mutable_input()->end(),
+                     [](const std::string& a, const std::string& b) {
+                       bool a_is_control = absl::StartsWith(a, "^");
+                       bool b_is_control = absl::StartsWith(b, "^");
+                       return (!a_is_control && b_is_control) ||
+                              (a_is_control && b_is_control && a < b);
+                     });
+  }
+}
+}  // namespace
+
+absl::StatusOr<absl::flat_hash_set<Node*>> GetNodesRelatedToRefVariables(
+    const Graph& graph, FunctionLibraryRuntime* lib_runtime) {
+  absl::flat_hash_set<Node*> result;
+  TF_RETURN_IF_ERROR(GetNodesRelatedToRefVariablesInDirection(
+      graph, lib_runtime, Direction::kForward, 0, &result));
+  TF_RETURN_IF_ERROR(GetNodesRelatedToRefVariablesInDirection(
+      graph, lib_runtime, Direction::kBackward, 0, &result));
+
+  VLOG(1) << "GetNodesRelatedToRefVariables() found " << result.size()
+          << " nodes";
+  return result;
+}
+
+absl::StatusOr<std::string> SerializeGraphDeterministic(const Graph& graph) {
+  GraphDef def;
+  graph.ToGraphDef(&def);
+
+  // Before serialization, sort each node's control inputs to achieve
+  // determinism. Sorting control inputs could help (but not necessarily) create
+  // a deterministic serialization and fingerprint. Other sources of
+  // nondeterminism include unstable node ordering.
+  SortControlInputs(&def);
+
+  std::string s;
+  if (!SerializeToStringDeterministic(def, &s)) {
+    return absl::InternalError("Failed to serialize graphdef.");
+  }
+  return s;
+}
+
+absl::StatusOr<uint64_t> FingerprintGraph(const Graph& graph) {
+  TF_ASSIGN_OR_RETURN(std::string serialized,
+                      SerializeGraphDeterministic(graph));
+  return Hash64(serialized.data(), serialized.size());
+}
+
+// Register a callback for querying XlaGlobalJitLevel.
+REGISTER_XLA_CONFIG_GETTER(GetXlaGlobalJitLevel);
+
 }  // namespace tensorflow
